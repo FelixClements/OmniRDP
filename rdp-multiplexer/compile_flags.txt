@@ -1,0 +1,9 @@
+-std=c11
+-DWIN32
+-D_WIN32
+-Iinclude
+-Isrc
+-I../freerdp-3.25.0/include
+-I../freerdp-3.25.0/winpr/include
+-I../freerdp-3.25.0/build/include
+-I../freerdp-3.25.0/build/winpr/include

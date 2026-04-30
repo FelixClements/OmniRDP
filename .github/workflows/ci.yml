@@ -1,0 +1,282 @@
+name: Multiplexer CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  format-check:
+    name: Format Check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format-15
+
+      - name: Check formatting
+        run: |
+          find multiplexer-v2/src multiplexer-v2/include \
+            \( -name "*.c" -o -name "*.h" \) -print0 | \
+            xargs -0 clang-format-15 --dry-run --Werror
+
+      - name: Format files (if check failed)
+        if: failure()
+        run: |
+          find multiplexer-v2/src multiplexer-v2/include \
+            \( -name "*.c" -o -name "*.h" \) -print0 | \
+            xargs -0 clang-format-15 -i
+          git diff --stat
+
+  build-linux:
+    name: Linux (${{ matrix.build_type }})
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FreeRDP 3.25.0
+        uses: actions/checkout@v4
+        with:
+          repository: FreeRDP/FreeRDP
+          ref: 3.25.0
+          path: freerdp-3.25.0
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config git \
+            libssl-dev libx11-dev libxext-dev libxinerama-dev \
+            libxcursor-dev libxkbfile-dev libxv-dev libxi-dev \
+            libxrender-dev libxrandr-dev libxfixes-dev \
+            libxdamage-dev libxtst-dev libxss-dev \
+            libpulse-dev libasound2-dev libpcsclite-dev \
+            libusb-1.0-0-dev libudev-dev libdbus-glib-1-dev \
+            libxml2-dev libcairo2-dev libswscale-dev \
+            libavcodec-dev libavutil-dev libjpeg-dev libpng-dev \
+            libturbojpeg0-dev libcmocka-dev libpam0g-dev \
+            libwayland-dev libcups2-dev libkrb5-dev \
+            libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev \
+            libfuse3-dev
+
+      - name: Configure FreeRDP
+        run: |
+          cmake -S freerdp-3.25.0 -B freerdp-3.25.0/build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DWITH_SERVER=ON \
+            -DWITH_SHADOW=ON \
+            -DWITH_PROXY=OFF \
+            -DBUILD_TESTING=OFF \
+            -G Ninja
+
+      - name: Build FreeRDP
+        run: cmake --build freerdp-3.25.0/build -j $(nproc)
+
+      - name: Configure multiplexer-v2
+        run: |
+          cmake -S multiplexer-v2 -B multiplexer-v2/build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -G Ninja
+
+      - name: Build multiplexer-v2
+        run: cmake --build multiplexer-v2/build -j $(nproc)
+
+      - name: Verify standalone binary
+        run: |
+          test -x multiplexer-v2/build/multiplexer-v2
+          ldd multiplexer-v2/build/multiplexer-v2
+          output="$(./multiplexer-v2/build/multiplexer-v2 2>&1 || true)"
+          printf '%s\n' "$output"
+          [[ "$output" == *"Usage:"* ]]
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts/linux-${{ matrix.build_type }}/bin
+          cp multiplexer-v2/build/multiplexer-v2 artifacts/linux-${{ matrix.build_type }}/bin/
+          find freerdp-3.25.0/build \
+            \( -path '*/libfreerdp/*' -o -path '*/winpr/*' -o -path '*/server/common/*' -o -path '*/server/shadow/*' -o -path '*/client/X11/*' \) \
+            \( -name '*.so' -o -name '*.so.*' \) \
+            -exec cp -L {} artifacts/linux-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.build_type }}-multiplexer-v2
+          path: artifacts/linux-${{ matrix.build_type }}/
+          retention-days: 30
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows v2 build attempt (${{ matrix.build_type }})
+    runs-on: windows-2022
+    continue-on-error: true
+    strategy:
+      matrix:
+        build_type: [Debug, Release]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FreeRDP 3.25.0
+        uses: actions/checkout@v4
+        with:
+          repository: FreeRDP/FreeRDP
+          ref: 3.25.0
+          path: freerdp-3.25.0
+          fetch-depth: 1
+
+      - name: Checkout vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: vcpkg
+          fetch-depth: 1
+          ref: "2024.12.16"
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        working-directory: vcpkg
+        run: .\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: vcpkg/installed
+          key: windows-vcpkg-v2-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            windows-vcpkg-v2-
+
+      - name: Install Windows dependencies via vcpkg
+        shell: pwsh
+        working-directory: vcpkg
+        run: |
+          .\vcpkg install `
+            openssl:x64-windows `
+            libjpeg-turbo:x64-windows `
+            libpng:x64-windows `
+            zlib:x64-windows `
+            libusb:x64-windows
+
+      - name: Configure FreeRDP
+        run: |
+          cmake -S freerdp-3.25.0 -B freerdp-3.25.0/build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DWITH_SERVER=ON \
+            -DWITH_SHADOW=ON \
+            -DWITH_PROXY=OFF \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_SHARED_LIBS=ON \
+            -DWITH_X11=OFF \
+            -DWITH_WAYLAND=OFF \
+            -DWITH_SDL2=OFF \
+            -DWITH_CAIRO=OFF \
+            -DWITH_FFMPEG=OFF \
+            -DWITH_MEDIA_FOUNDATION=OFF \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -G "Visual Studio 17 2022" \
+            -A x64
+
+      - name: Build FreeRDP
+        run: cmake --build freerdp-3.25.0/build --config ${{ matrix.build_type }} -j
+
+      - name: Configure multiplexer-v2
+        run: |
+          cmake -S multiplexer-v2 -B multiplexer-v2/build-windows \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -G "Visual Studio 17 2022" \
+            -A x64
+
+      - name: Build multiplexer-v2
+        run: cmake --build multiplexer-v2/build-windows --config ${{ matrix.build_type }} -j
+
+      - name: Stage Windows artifacts if build succeeds
+        if: success()
+        run: |
+          mkdir -p artifacts/windows-${{ matrix.build_type }}/bin
+          find multiplexer-v2/build-windows -name 'multiplexer-v2.exe' -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+          find freerdp-3.25.0/build -name '*.dll' -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+
+      - name: Upload Windows artifacts if build succeeds
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.build_type }}-multiplexer-v2
+          path: artifacts/windows-${{ matrix.build_type }}/
+          retention-days: 30
+          if-no-files-found: error
+
+  valgrind:
+    name: Valgrind (Debug)
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout FreeRDP 3.25.0
+        uses: actions/checkout@v4
+        with:
+          repository: FreeRDP/FreeRDP
+          ref: 3.25.0
+          path: freerdp-3.25.0
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config git valgrind \
+            libssl-dev libx11-dev libxext-dev libxinerama-dev \
+            libxcursor-dev libxkbfile-dev libxv-dev libxi-dev \
+            libxrender-dev libxrandr-dev libxfixes-dev \
+            libxdamage-dev libxtst-dev libxss-dev \
+            libpulse-dev libasound2-dev libpcsclite-dev \
+            libusb-1.0-0-dev libudev-dev libdbus-glib-1-dev \
+            libxml2-dev libcairo2-dev libswscale-dev \
+            libavcodec-dev libavutil-dev libjpeg-dev libpng-dev \
+            libturbojpeg0-dev libcmocka-dev libpam0g-dev \
+            libwayland-dev libcups2-dev libkrb5-dev \
+            libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev \
+            libfuse3-dev
+
+      - name: Configure FreeRDP
+        run: |
+          cmake -S freerdp-3.25.0 -B freerdp-3.25.0/build-valgrind \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DWITH_SERVER=ON \
+            -DWITH_SHADOW=ON \
+            -DWITH_PROXY=OFF \
+            -DBUILD_TESTING=OFF \
+            -G Ninja
+
+      - name: Build FreeRDP
+        run: cmake --build freerdp-3.25.0/build-valgrind -j $(nproc)
+
+      - name: Configure multiplexer-v2
+        run: |
+          cmake -S multiplexer-v2 -B multiplexer-v2/build-valgrind \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -G Ninja
+
+      - name: Build multiplexer-v2
+        run: cmake --build multiplexer-v2/build-valgrind -j $(nproc)
+
+      - name: Valgrind usage check
+        run: |
+          valgrind --leak-check=full --error-exitcode=1 \
+            ./multiplexer-v2/build-valgrind/multiplexer-v2 >/tmp/multiplexer-valgrind.log 2>&1 || status=$?
+          cat /tmp/multiplexer-valgrind.log
+          test "${status:-0}" -eq 1
+          grep -q "Usage:" /tmp/multiplexer-valgrind.log

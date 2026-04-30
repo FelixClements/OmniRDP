@@ -1,0 +1,1429 @@
+#include "backend.h"
+#include "viewer_server.h"
+#include <freerdp/freerdp.h>
+#include <freerdp/addin.h>
+#include <freerdp/client.h>
+#include <freerdp/client/channels.h>
+#include <freerdp/client/cmdline.h>
+#include <freerdp/channels/channels.h>
+#include <freerdp/channels/drdynvc.h>
+#include <freerdp/client/rdpgfx.h>
+#include <freerdp/channels/rdpgfx.h>
+#include <freerdp/gdi/gdi.h>
+#include <freerdp/constants.h>
+#include <freerdp/pointer.h>
+#include <freerdp/update.h>
+#include <inttypes.h>
+#include <string.h>
+#include <stdlib.h>
+#include "platform_compat.h"
+#include <winpr/wtypes.h>
+#include <winpr/wlog.h>
+#include <winpr/sysinfo.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#define TAG "multiplexer.backend"
+
+static BackendClient* g_backend_client = NULL;
+
+static UINT backend_rdpgfx_on_open(RdpgfxClientContext* context, BOOL* do_caps_advertise,
+                                   BOOL* do_frame_acks);
+static UINT backend_rdpgfx_on_close(RdpgfxClientContext* context);
+static UINT backend_rdpgfx_caps_confirm(RdpgfxClientContext* context,
+                                        const RDPGFX_CAPS_CONFIRM_PDU* caps_confirm);
+static UINT backend_rdpgfx_reset_graphics(RdpgfxClientContext* context,
+                                          const RDPGFX_RESET_GRAPHICS_PDU* reset_graphics);
+static UINT backend_rdpgfx_create_surface(RdpgfxClientContext* context,
+                                          const RDPGFX_CREATE_SURFACE_PDU* create_surface);
+static UINT backend_rdpgfx_delete_surface(RdpgfxClientContext* context,
+                                          const RDPGFX_DELETE_SURFACE_PDU* delete_surface);
+static UINT backend_rdpgfx_map_surface_to_output(
+    RdpgfxClientContext* context, const RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU* map_surface_to_output);
+static UINT backend_rdpgfx_start_frame(RdpgfxClientContext* context,
+                                       const RDPGFX_START_FRAME_PDU* start_frame);
+static UINT backend_rdpgfx_surface_command(RdpgfxClientContext* context,
+                                           const RDPGFX_SURFACE_COMMAND* cmd);
+static UINT backend_rdpgfx_end_frame(RdpgfxClientContext* context,
+                                     const RDPGFX_END_FRAME_PDU* end_frame);
+static UINT backend_rdpgfx_delete_encoding_context(
+    RdpgfxClientContext* context,
+    const RDPGFX_DELETE_ENCODING_CONTEXT_PDU* delete_encoding_context);
+static void backend_on_channel_connected(void* context, const ChannelConnectedEventArgs* e);
+static void backend_on_channel_disconnected(void* context, const ChannelDisconnectedEventArgs* e);
+static void backend_reset_full_refresh_state_locked(BackendClient* client);
+static void backend_complete_full_refresh_locked(BackendClient* client, UINT64 generation,
+                                                 BackendFullRefreshOutcome outcome,
+                                                 UINT64 completed_ts);
+
+#ifdef _WIN32
+static BOOL backend_configure_addin_dll_directory(void)
+{
+    HMODULE module = NULL;
+    CHAR path[MAX_PATH] = { 0 };
+    CHAR* separator = NULL;
+    DWORD length = 0;
+
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)(const void*)freerdp_new, &module) || !module)
+    {
+        WLog_WARN(TAG, "Unable to resolve FreeRDP runtime module for addin loading");
+        return FALSE;
+    }
+
+    length = GetModuleFileNameA(module, path, ARRAYSIZE(path));
+    if ((length == 0) || (length >= ARRAYSIZE(path)))
+    {
+        WLog_WARN(TAG, "Unable to resolve FreeRDP runtime directory for addin loading");
+        return FALSE;
+    }
+
+    separator = strrchr(path, '\\');
+    if (!separator)
+        separator = strrchr(path, '/');
+    if (!separator)
+    {
+        WLog_WARN(TAG, "Unable to parse FreeRDP runtime directory for addin loading");
+        return FALSE;
+    }
+
+    *separator = '\0';
+    if (!SetDllDirectoryA(path))
+    {
+        WLog_WARN(TAG, "Failed to add FreeRDP runtime directory to DLL search path: %s", path);
+        return FALSE;
+    }
+
+    WLog_INFO(TAG, "Using FreeRDP addin DLL directory %s", path);
+    return TRUE;
+}
+#endif
+
+static BOOL backend_register_static_channel_provider(void)
+{
+    FREERDP_LOAD_CHANNEL_ADDIN_ENTRY_FN provider = freerdp_get_current_addin_provider();
+
+    if (provider == freerdp_channels_load_static_addin_entry)
+        return TRUE;
+
+    if (provider && (provider != freerdp_channels_load_static_addin_entry))
+        WLog_WARN(TAG, "Replacing existing FreeRDP addin provider");
+
+    if (freerdp_register_addin_provider(freerdp_channels_load_static_addin_entry, 0) !=
+        CHANNEL_RC_OK)
+    {
+        WLog_ERR(TAG, "Failed to register FreeRDP static channel addin provider");
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static BOOL backend_prepare_rdpgfx_channels(BackendClient* client)
+{
+    rdpSettings* settings = NULL;
+    const char* const rdpgfx[] = { RDPGFX_CHANNEL_NAME };
+
+    if (!client || !client->context)
+        return FALSE;
+
+    settings = client->context->settings;
+    if (!settings)
+        return FALSE;
+
+#ifdef _WIN32
+    (void)backend_configure_addin_dll_directory();
+#endif
+
+    if (!freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, FALSE) ||
+        !freerdp_settings_set_bool(settings, FreeRDP_SupportHeartbeatPdu, FALSE) ||
+        !freerdp_settings_set_bool(settings, FreeRDP_SupportMultitransport, FALSE) ||
+        !freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, FALSE) ||
+        !freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, FALSE))
+    {
+        return FALSE;
+    }
+
+    if (freerdp_settings_get_bool(settings, FreeRDP_SupportGraphicsPipeline) &&
+        !freerdp_client_add_dynamic_channel(settings, sizeof(rdpgfx) / sizeof(rdpgfx[0]),
+                                            rdpgfx))
+    {
+        WLog_ERR(TAG, "Failed to register backend RDPEGFX dynamic channel");
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static void backend_attach_rdpgfx_context(BackendClient* client, RdpgfxClientContext* rdpgfx)
+{
+    if (!client || !rdpgfx)
+        return;
+
+    client->rdpgfx = rdpgfx;
+    /* Save GDI's original GFX callbacks. GDI handles decoding and
+     * framebuffer updates. Our callbacks forward to viewers. */
+    client->gdi_StartFrame = rdpgfx->StartFrame;
+    client->gdi_EndFrame = rdpgfx->EndFrame;
+    client->gdi_SurfaceCommand = rdpgfx->SurfaceCommand;
+    client->gdi_ResetGraphics = rdpgfx->ResetGraphics;
+    client->gdi_CreateSurface = rdpgfx->CreateSurface;
+    client->gdi_DeleteSurface = rdpgfx->DeleteSurface;
+    client->gdi_MapSurfaceToOutput = rdpgfx->MapSurfaceToOutput;
+    client->gdi_DeleteEncodingContext = rdpgfx->DeleteEncodingContext;
+    client->gdi_OnOpen = rdpgfx->OnOpen;
+    client->gdi_OnClose = rdpgfx->OnClose;
+    client->gdi_CapsConfirm = rdpgfx->CapsConfirm;
+
+    client->rdpgfx->custom = client;
+    client->rdpgfx->OnOpen = backend_rdpgfx_on_open;
+    client->rdpgfx->OnClose = backend_rdpgfx_on_close;
+    client->rdpgfx->CapsConfirm = backend_rdpgfx_caps_confirm;
+    client->rdpgfx->ResetGraphics = backend_rdpgfx_reset_graphics;
+    client->rdpgfx->CreateSurface = backend_rdpgfx_create_surface;
+    client->rdpgfx->DeleteSurface = backend_rdpgfx_delete_surface;
+    client->rdpgfx->MapSurfaceToOutput = backend_rdpgfx_map_surface_to_output;
+    client->rdpgfx->StartFrame = backend_rdpgfx_start_frame;
+    client->rdpgfx->SurfaceCommand = backend_rdpgfx_surface_command;
+    client->rdpgfx->EndFrame = backend_rdpgfx_end_frame;
+    client->rdpgfx->DeleteEncodingContext = backend_rdpgfx_delete_encoding_context;
+}
+
+static BOOL backend_service_full_refresh_request(BackendClient* client)
+{
+    RECTANGLE_16 rect = { 0 };
+    UINT32 width = 0;
+    UINT32 height = 0;
+    UINT64 generation = 0;
+    UINT64 request_ts = 0;
+    UINT64 now = 0;
+    BOOL should_request = FALSE;
+    BOOL sent = FALSE;
+
+    if (!client || !client->context || !client->context->update ||
+        !client->context->update->RefreshRect)
+        return FALSE;
+
+    EnterCriticalSection(&client->refresh_lock);
+    should_request = client->full_refresh_requested && !client->full_refresh_in_flight;
+    generation = client->full_refresh_requested_generation;
+    request_ts = client->full_refresh_requested_timestamp_ms;
+    LeaveCriticalSection(&client->refresh_lock);
+
+    if (!should_request)
+        return FALSE;
+
+    now = platform_get_timestamp_ms();
+    backend_get_desktop_layout(client, &width, &height, NULL);
+    if ((width == 0) || (height == 0) || (width > UINT16_MAX) || (height > UINT16_MAX))
+    {
+        EnterCriticalSection(&client->refresh_lock);
+        if (client->full_refresh_requested && !client->full_refresh_in_flight &&
+            (client->full_refresh_requested_generation == generation))
+        {
+            backend_complete_full_refresh_locked(client, generation,
+                                                 BACKEND_FULL_REFRESH_OUTCOME_FAILED, now);
+        }
+        LeaveCriticalSection(&client->refresh_lock);
+        WLog_WARN(TAG,
+                  "Dropping backend full refresh generation=%" PRIu64
+                  " request for invalid layout %ux%u",
+                  generation, width, height);
+        return FALSE;
+    }
+
+    rect.left = 0;
+    rect.top = 0;
+    rect.right = WINPR_ASSERTING_INT_CAST(UINT16, width);
+    rect.bottom = WINPR_ASSERTING_INT_CAST(UINT16, height);
+    sent = client->context->update->RefreshRect(client->context, 1, &rect);
+
+    EnterCriticalSection(&client->refresh_lock);
+    if (client->full_refresh_requested && !client->full_refresh_in_flight &&
+        (client->full_refresh_requested_generation == generation))
+    {
+        client->full_refresh_requested = FALSE;
+        client->full_refresh_requested_generation = 0;
+        client->full_refresh_requested_timestamp_ms = 0;
+
+        if (sent)
+        {
+            client->full_refresh_in_flight = TRUE;
+            client->full_refresh_in_flight_generation = generation;
+            client->full_refresh_in_flight_timestamp_ms = now;
+        }
+        else
+        {
+            backend_complete_full_refresh_locked(client, generation,
+                                                 BACKEND_FULL_REFRESH_OUTCOME_FAILED, now);
+        }
+    }
+    LeaveCriticalSection(&client->refresh_lock);
+
+    if (!sent)
+    {
+        WLog_WARN(TAG, "Backend full refresh generation=%" PRIu64 " failed for %ux%u",
+                  generation, width, height);
+        return FALSE;
+    }
+
+    WLog_INFO(TAG,
+              "Backend full refresh generation=%" PRIu64
+              " requested %ux%u queued_at=%" PRIu64 " started_at=%" PRIu64,
+              generation, width, height, request_ts, now);
+    return TRUE;
+}
+
+static void backend_reset_full_refresh_state_locked(BackendClient* client)
+{
+    if (!client)
+        return;
+
+    client->full_refresh_requested = FALSE;
+    client->full_refresh_in_flight = FALSE;
+    client->full_refresh_generation = 0;
+    client->full_refresh_requested_generation = 0;
+    client->full_refresh_in_flight_generation = 0;
+    client->full_refresh_completed_generation = 0;
+    client->full_refresh_requested_timestamp_ms = 0;
+    client->full_refresh_in_flight_timestamp_ms = 0;
+    client->full_refresh_completed_timestamp_ms = 0;
+    client->full_refresh_completed_outcome = BACKEND_FULL_REFRESH_OUTCOME_NONE;
+}
+
+static void backend_complete_full_refresh_locked(BackendClient* client, UINT64 generation,
+                                                 BackendFullRefreshOutcome outcome,
+                                                 UINT64 completed_ts)
+{
+    if (!client)
+        return;
+
+    client->full_refresh_requested = FALSE;
+    client->full_refresh_in_flight = FALSE;
+    client->full_refresh_requested_generation = 0;
+    client->full_refresh_in_flight_generation = 0;
+    client->full_refresh_requested_timestamp_ms = 0;
+    client->full_refresh_in_flight_timestamp_ms = 0;
+    client->full_refresh_completed_generation = generation;
+    client->full_refresh_completed_timestamp_ms = completed_ts;
+    client->full_refresh_completed_outcome = outcome;
+}
+
+static void backend_store_pointer_position(BackendClient* client, UINT16 x, UINT16 y)
+{
+    if (!client)
+        return;
+
+    EnterCriticalSection(&client->pointer_lock);
+    client->pointer_x = x;
+    client->pointer_y = y;
+    client->pointer_position_generation++;
+    LeaveCriticalSection(&client->pointer_lock);
+}
+
+static void backend_store_pointer_system(BackendClient* client, BOOL visible, UINT32 type)
+{
+    if (!client)
+        return;
+
+    EnterCriticalSection(&client->pointer_lock);
+    client->pointer_visible = visible;
+    client->pointer_type = type;
+    client->active_pointer_shape = NULL;
+    client->pointer_shape_generation++;
+    LeaveCriticalSection(&client->pointer_lock);
+}
+
+static BOOL backend_activate_pointer_shape(BackendClient* client, PointerShapeEntry* entry)
+{
+    if (!client || !entry)
+        return FALSE;
+
+    EnterCriticalSection(&client->pointer_lock);
+    client->pointer_visible = TRUE;
+    client->pointer_type = SYSPTR_DEFAULT;
+    client->active_pointer_shape = entry;
+    client->pointer_shape_generation++;
+    LeaveCriticalSection(&client->pointer_lock);
+    return TRUE;
+}
+
+static void backend_store_desktop_layout(BackendClient* client, UINT32 width, UINT32 height,
+                                         BOOL* changed_out)
+{
+    BOOL changed = FALSE;
+
+    if (!client || width == 0 || height == 0)
+    {
+        if (changed_out)
+            *changed_out = FALSE;
+        return;
+    }
+
+    EnterCriticalSection(&client->layout_lock);
+    if ((client->desktop_width != width) || (client->desktop_height != height))
+    {
+        client->desktop_width = width;
+        client->desktop_height = height;
+        client->layout_generation++;
+        changed = TRUE;
+    }
+    LeaveCriticalSection(&client->layout_lock);
+
+    if (changed_out)
+        *changed_out = changed;
+}
+
+static void backend_refresh_desktop_layout(BackendClient* client, rdpContext* context)
+{
+    UINT32 width = 0;
+    UINT32 height = 0;
+    BOOL changed = FALSE;
+    rdpSettings* settings = NULL;
+
+    if (!client)
+        return;
+
+    if (context && context->gdi && context->gdi->width > 0 && context->gdi->height > 0)
+    {
+        width = WINPR_ASSERTING_INT_CAST(UINT32, context->gdi->width);
+        height = WINPR_ASSERTING_INT_CAST(UINT32, context->gdi->height);
+    }
+
+    settings = context ? context->settings : (client->context ? client->context->settings : NULL);
+    if ((width == 0 || height == 0) && settings)
+    {
+        width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+        height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+    }
+
+    backend_store_desktop_layout(client, width, height, &changed);
+    if (changed)
+    {
+        UINT32 generation = 0;
+        backend_get_desktop_layout(client, &width, &height, &generation);
+        WLog_INFO(TAG, "Desktop layout updated to %ux%u generation=%" PRIu32, width, height,
+                  generation);
+        viewer_server_notify_backend_layout_change(client, width, height, generation);
+    }
+}
+
+static BOOL backend_forward_surface_bits(BackendClient* client, const SURFACE_BITS_COMMAND* cmd)
+{
+    if (!client || !cmd)
+        return FALSE;
+
+    /* Forward NSCodec and RemoteFX SurfaceBits to viewers.
+     * Other codecs (Planar, etc.) are decoded by GDI and not forwarded. */
+    if (cmd->bmp.codecID != RDP_CODEC_ID_NSCODEC &&
+        cmd->bmp.codecID != RDP_CODEC_ID_REMOTEFX)
+    {
+        WLog_DBG(TAG, "Ignoring non-NS/RemoteFX SurfaceBits codecId=%" PRIu16, cmd->bmp.codecID);
+        return TRUE;
+    }
+
+    if (viewer_server_publish_surface_bits(client, cmd))
+    {
+        client->forwarded_surface_bits_count++;
+        client->forwarded_surface_bits_bytes += cmd->bmp.bitmapDataLength;
+    }
+
+    return TRUE;
+}
+
+static BOOL backend_forward_frame_marker(BackendClient* client, const SURFACE_FRAME_MARKER* marker)
+{
+    if (!client || !marker)
+        return FALSE;
+
+    if (viewer_server_publish_frame_marker(client, marker))
+        client->forwarded_frame_marker_count++;
+
+    return TRUE;
+}
+
+static UINT backend_rdpgfx_on_open(RdpgfxClientContext* context, BOOL* do_caps_advertise,
+                                   BOOL* do_frame_acks)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+
+    if (!client)
+        return ERROR_INVALID_PARAMETER;
+
+    client->rdpgfx_channel_open = TRUE;
+    client->rdpgfx_caps_confirmed = FALSE;
+    if (do_caps_advertise)
+        *do_caps_advertise = TRUE;
+    if (do_frame_acks)
+        *do_frame_acks = TRUE;
+
+    WLog_INFO(TAG, "Backend RDPEGFX channel opened");
+    return CHANNEL_RC_OK;
+}
+
+static UINT backend_rdpgfx_on_close(RdpgfxClientContext* context)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+
+    if (!client)
+        return ERROR_INVALID_PARAMETER;
+
+    client->rdpgfx_channel_open = FALSE;
+    client->rdpgfx_caps_confirmed = FALSE;
+    WLog_INFO(TAG, "Backend RDPEGFX channel closed");
+    return CHANNEL_RC_OK;
+}
+
+static UINT backend_rdpgfx_caps_confirm(RdpgfxClientContext* context,
+                                        const RDPGFX_CAPS_CONFIRM_PDU* caps_confirm)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+
+    if (!client || !caps_confirm || !caps_confirm->capsSet)
+        return ERROR_INVALID_PARAMETER;
+
+    client->rdpgfx_caps_confirmed = TRUE;
+    WLog_INFO(TAG, "Backend RDPEGFX caps confirmed version=0x%08" PRIX32 " flags=0x%08" PRIX32,
+              caps_confirm->capsSet->version, caps_confirm->capsSet->flags);
+    return CHANNEL_RC_OK;
+}
+
+static UINT backend_rdpgfx_create_surface(RdpgfxClientContext* context,
+                                          const RDPGFX_CREATE_SURFACE_PDU* create_surface)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+
+    if (!client || !create_surface)
+        return ERROR_INVALID_PARAMETER;
+
+    if (viewer_server_publish_gfx_create_surface(client, create_surface))
+        client->forwarded_gfx_create_surface_count++;
+
+    return CHANNEL_RC_OK;
+}
+
+static UINT backend_rdpgfx_delete_surface(RdpgfxClientContext* context,
+                                          const RDPGFX_DELETE_SURFACE_PDU* delete_surface)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+
+    if (!client || !delete_surface)
+        return ERROR_INVALID_PARAMETER;
+
+    if (viewer_server_publish_gfx_delete_surface(client, delete_surface))
+        client->forwarded_gfx_delete_surface_count++;
+
+    return CHANNEL_RC_OK;
+}
+
+static UINT backend_rdpgfx_map_surface_to_output(
+    RdpgfxClientContext* context, const RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU* map_surface_to_output)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+
+    if (!client || !map_surface_to_output)
+        return ERROR_INVALID_PARAMETER;
+
+    if (viewer_server_publish_gfx_map_surface_to_output(client, map_surface_to_output))
+        client->forwarded_gfx_map_surface_to_output_count++;
+
+    return CHANNEL_RC_OK;
+}
+
+static UINT backend_rdpgfx_start_frame(RdpgfxClientContext* context,
+                                       const RDPGFX_START_FRAME_PDU* start_frame)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+
+    if (!client || !start_frame)
+        return ERROR_INVALID_PARAMETER;
+
+    if (client->gdi_StartFrame)
+        ((pcRdpgfxStartFrame)client->gdi_StartFrame)(context, start_frame);
+
+    if (viewer_server_publish_gfx_start_frame(client, start_frame))
+        client->forwarded_gfx_start_frame_count++;
+
+    return CHANNEL_RC_OK;
+}
+
+static UINT backend_rdpgfx_end_frame(RdpgfxClientContext* context,
+                                     const RDPGFX_END_FRAME_PDU* end_frame)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+
+    if (!client || !end_frame)
+        return ERROR_INVALID_PARAMETER;
+
+    if (client->gdi_EndFrame)
+        ((pcRdpgfxEndFrame)client->gdi_EndFrame)(context, end_frame);
+
+    if (viewer_server_publish_gfx_end_frame(client, end_frame))
+        client->forwarded_gfx_end_frame_count++;
+
+    return CHANNEL_RC_OK;
+}
+
+static UINT backend_rdpgfx_surface_command(RdpgfxClientContext* context,
+                                           const RDPGFX_SURFACE_COMMAND* cmd)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+
+    if (!client || !cmd)
+        return ERROR_INVALID_PARAMETER;
+
+    if (client->gdi_SurfaceCommand)
+        ((pcRdpgfxSurfaceCommand)client->gdi_SurfaceCommand)(context, cmd);
+
+    if (viewer_server_publish_gfx_surface_command(client, cmd))
+        client->forwarded_gfx_surface_command_count++;
+
+    return CHANNEL_RC_OK;
+}
+
+static UINT backend_rdpgfx_reset_graphics(RdpgfxClientContext* context,
+                                          const RDPGFX_RESET_GRAPHICS_PDU* reset_graphics)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+    BOOL changed = FALSE;
+
+    if (!client || !reset_graphics)
+        return ERROR_INVALID_PARAMETER;
+
+    if (client->gdi_ResetGraphics)
+        ((pcRdpgfxResetGraphics)client->gdi_ResetGraphics)(context, reset_graphics);
+
+    backend_store_desktop_layout(client, reset_graphics->width, reset_graphics->height, &changed);
+    if (changed)
+    {
+        UINT32 width = 0;
+        UINT32 height = 0;
+        UINT32 generation = 0;
+
+        backend_get_desktop_layout(client, &width, &height, &generation);
+        viewer_server_notify_backend_layout_change(client, width, height, generation);
+    }
+
+    if (viewer_server_publish_gfx_reset_graphics(client, reset_graphics))
+        client->forwarded_gfx_reset_graphics_count++;
+
+    return CHANNEL_RC_OK;
+}
+
+static UINT backend_rdpgfx_delete_encoding_context(
+    RdpgfxClientContext* context,
+    const RDPGFX_DELETE_ENCODING_CONTEXT_PDU* delete_encoding_context)
+{
+    BackendClient* client = context ? (BackendClient*)context->custom : NULL;
+
+    if (!client || !delete_encoding_context)
+        return ERROR_INVALID_PARAMETER;
+
+    if (viewer_server_publish_gfx_delete_encoding_context(client, delete_encoding_context))
+        client->forwarded_gfx_delete_encoding_context_count++;
+
+    return CHANNEL_RC_OK;
+}
+
+static void backend_on_channel_connected(void* context, const ChannelConnectedEventArgs* e)
+{
+    BackendClient* client = g_backend_client;
+
+    (void)context;
+
+    if (!client || !e || !e->name || !e->pInterface)
+        return;
+
+    if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) != 0)
+        return;
+
+    backend_attach_rdpgfx_context(client, (RdpgfxClientContext*)e->pInterface);
+    WLog_INFO(TAG, "Backend RDPEGFX dynamic channel connected");
+}
+
+static void backend_on_channel_disconnected(void* context, const ChannelDisconnectedEventArgs* e)
+{
+    BackendClient* client = g_backend_client;
+
+    (void)context;
+
+    if (!client || !e || !e->name)
+        return;
+
+    if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) != 0)
+        return;
+
+    client->rdpgfx = NULL;
+    client->rdpgfx_channel_open = FALSE;
+    client->rdpgfx_caps_confirmed = FALSE;
+    WLog_INFO(TAG, "Backend RDPEGFX dynamic channel disconnected");
+}
+
+static BOOL on_pointer_position(rdpContext* context,
+                                const POINTER_POSITION_UPDATE* pointer_position)
+{
+    BackendClient* client = g_backend_client;
+
+    (void)context;
+
+    if (!client || !pointer_position)
+        return FALSE;
+
+    backend_store_pointer_position(client,
+                                   WINPR_ASSERTING_INT_CAST(UINT16, pointer_position->xPos),
+                                   WINPR_ASSERTING_INT_CAST(UINT16, pointer_position->yPos));
+    WLog_INFO(TAG, "PointerPosition x=%" PRIu32 " y=%" PRIu32, pointer_position->xPos,
+              pointer_position->yPos);
+    return TRUE;
+}
+
+static BOOL on_pointer_system(rdpContext* context, const POINTER_SYSTEM_UPDATE* pointer_system)
+{
+    BackendClient* client = g_backend_client;
+    BOOL visible = TRUE;
+
+    (void)context;
+
+    if (!client || !pointer_system)
+        return FALSE;
+
+    visible = (pointer_system->type != SYSPTR_NULL);
+
+    backend_store_pointer_system(client, visible, pointer_system->type);
+
+    WLog_INFO(TAG, "PointerSystem type=0x%08" PRIX32 " visible=%d", pointer_system->type,
+              visible);
+    return TRUE;
+}
+
+static BOOL on_pointer_color(rdpContext* context, const POINTER_COLOR_UPDATE* pointer_color)
+{
+    BackendClient* client = g_backend_client;
+    PointerShapeEntry* entry = NULL;
+
+    (void)context;
+
+    if (!client || !pointer_color)
+        return FALSE;
+
+    EnterCriticalSection(&client->pointer_lock);
+    entry = pointer_shape_cache_add_from_color(client->pointer_shape_cache, pointer_color);
+    LeaveCriticalSection(&client->pointer_lock);
+
+    if (!entry)
+    {
+        WLog_WARN(TAG, "PointerColor cache=%" PRIu16 " size=%" PRIu16 "x%" PRIu16
+                       " rejected",
+                  pointer_color->cacheIndex, pointer_color->width, pointer_color->height);
+        return FALSE;
+    }
+
+    backend_activate_pointer_shape(client, entry);
+    WLog_INFO(TAG, "PointerColor cache=%" PRIu16 " size=%" PRIu16 "x%" PRIu16,
+              pointer_color->cacheIndex, pointer_color->width, pointer_color->height);
+    return TRUE;
+}
+
+static BOOL on_pointer_new(rdpContext* context, const POINTER_NEW_UPDATE* pointer_new)
+{
+    const POINTER_COLOR_UPDATE* color = pointer_new ? &pointer_new->colorPtrAttr : NULL;
+    BackendClient* client = g_backend_client;
+    PointerShapeEntry* entry = NULL;
+
+    (void)context;
+
+    if (!client || !pointer_new || !color)
+        return FALSE;
+
+    EnterCriticalSection(&client->pointer_lock);
+    entry = pointer_shape_cache_add_from_new(client->pointer_shape_cache, pointer_new);
+    LeaveCriticalSection(&client->pointer_lock);
+
+    if (!entry)
+    {
+        WLog_WARN(TAG, "PointerNew cache=%" PRIu16 " size=%" PRIu16 "x%" PRIu16
+                       " xorBpp=%" PRIu32 " rejected",
+                  color->cacheIndex, color->width, color->height, pointer_new->xorBpp);
+        return FALSE;
+    }
+
+    backend_activate_pointer_shape(client, entry);
+    WLog_INFO(TAG, "PointerNew cache=%" PRIu16 " size=%" PRIu16 "x%" PRIu16
+                   " xorBpp=%" PRIu32,
+              color->cacheIndex, color->width, color->height, pointer_new->xorBpp);
+    return TRUE;
+}
+
+static BOOL on_pointer_cached(rdpContext* context, const POINTER_CACHED_UPDATE* pointer_cached)
+{
+    BackendClient* client = g_backend_client;
+    PointerShapeEntry* entry = NULL;
+
+    (void)context;
+
+    if (!client || !pointer_cached || (pointer_cached->cacheIndex > UINT16_MAX))
+        return FALSE;
+
+    EnterCriticalSection(&client->pointer_lock);
+    entry = pointer_shape_cache_get_by_index(
+        client->pointer_shape_cache,
+        WINPR_ASSERTING_INT_CAST(UINT16, pointer_cached->cacheIndex));
+    LeaveCriticalSection(&client->pointer_lock);
+
+    if (!entry)
+    {
+        WLog_WARN(TAG, "PointerCached cache=%" PRIu32 " missing", pointer_cached->cacheIndex);
+        return FALSE;
+    }
+
+    backend_activate_pointer_shape(client, entry);
+    WLog_INFO(TAG, "PointerCached cache=%" PRIu32, pointer_cached->cacheIndex);
+    return TRUE;
+}
+
+static BOOL on_desktop_resize(rdpContext* context)
+{
+    BackendClient* client = g_backend_client;
+    if (!client)
+        return FALSE;
+
+    backend_refresh_desktop_layout(client, context);
+    return TRUE;
+}
+
+static BOOL on_surface_frame_marker(rdpContext* context, const SURFACE_FRAME_MARKER* marker)
+{
+    (void)context;
+    WLog_INFO(TAG, "FrameMarker action=%u id=%u", marker->frameAction, marker->frameId);
+    return TRUE;
+}
+
+static BOOL on_surface_bits(rdpContext* context, const SURFACE_BITS_COMMAND* cmd)
+{
+    BackendClient* client = g_backend_client;
+    if (!client || !client->orig_surface_bits)
+        return FALSE;
+
+    BOOL rc = client->orig_surface_bits(context, cmd);
+    if (!rc || !cmd)
+        return rc;
+
+    backend_refresh_desktop_layout(client, context);
+    (void)backend_forward_surface_bits(client, cmd);
+    return TRUE;
+}
+
+static BOOL on_surface_frame_marker_wrapped(rdpContext* context, const SURFACE_FRAME_MARKER* marker)
+{
+    BackendClient* client = g_backend_client;
+    BOOL rc = FALSE;
+
+    if (!client || !client->orig_surface_frame_marker)
+        return FALSE;
+
+    rc = client->orig_surface_frame_marker(context, marker);
+    if (!rc || !marker)
+        return rc;
+
+    (void)backend_forward_frame_marker(client, marker);
+    return rc;
+}
+
+static BOOL on_post_connect(freerdp* instance)
+{
+    (void)instance;
+    BackendClient* client = g_backend_client;
+    if (!client)
+        return FALSE;
+
+    WLog_INFO(TAG, "Backend connected successfully");
+
+    if (!gdi_init(instance, PIXEL_FORMAT_BGRX32))
+    {
+        WLog_ERR(TAG, "Failed to initialize GDI");
+        return FALSE;
+    }
+
+    WLog_INFO(TAG, "GDI initialized");
+    if (client->context && client->context->update)
+    {
+        client->orig_surface_bits = client->context->update->SurfaceBits;
+        client->context->update->SurfaceBits = on_surface_bits;
+        client->orig_surface_frame_marker = client->context->update->SurfaceFrameMarker;
+        client->context->update->SurfaceFrameMarker = on_surface_frame_marker_wrapped;
+    }
+    backend_refresh_desktop_layout(client, client->context);
+    client->connected = TRUE;
+    return TRUE;
+}
+
+static void on_post_disconnect(freerdp* instance)
+{
+    (void)instance;
+    BackendClient* client = g_backend_client;
+    if (!client)
+        return;
+
+    WLog_INFO(TAG, "Backend disconnected");
+    client->connected = FALSE;
+}
+
+static BOOL on_authenticate_ex(freerdp* instance, char** username, char** password, char** domain, rdp_auth_reason reason)
+{
+    (void)instance;
+    (void)reason;
+    BackendClient* client = g_backend_client;
+    if (!client)
+        return FALSE;
+
+    if (client->username)
+        *username = strdup(client->username);
+    if (client->password)
+        *password = strdup(client->password);
+    if (client->domain)
+        *domain = strdup(client->domain);
+
+    return TRUE;
+}
+
+static DWORD on_verify_certificate_ex(freerdp* instance, const char* host, UINT16 port,
+                                      const char* common_name, const char* subject,
+                                      const char* issuer, const char* fingerprint, DWORD flags)
+{
+    (void)instance;
+    (void)host;
+    (void)port;
+    (void)common_name;
+    (void)subject;
+    (void)issuer;
+    (void)fingerprint;
+    (void)flags;
+
+    WLog_WARN(TAG, "Certificate verification bypassed (insecure!)");
+    return 1;
+}
+
+BackendClient* backend_init(void)
+{
+    BackendClient* client = calloc(1, sizeof(BackendClient));
+    if (!client)
+        return NULL;
+
+    InitializeCriticalSection(&client->layout_lock);
+    InitializeCriticalSection(&client->pointer_lock);
+    InitializeCriticalSection(&client->refresh_lock);
+    client->pointer_visible = TRUE;
+    client->pointer_type = SYSPTR_DEFAULT;
+    client->pointer_position_generation = 1;
+    client->pointer_shape_generation = 1;
+    client->pointer_shape_cache = pointer_shape_cache_new();
+    if (!client->pointer_shape_cache)
+    {
+        DeleteCriticalSection(&client->layout_lock);
+        DeleteCriticalSection(&client->pointer_lock);
+        DeleteCriticalSection(&client->refresh_lock);
+        free(client);
+        return NULL;
+    }
+    
+    freerdp* instance = freerdp_new();
+    if (!instance)
+    {
+        pointer_shape_cache_free(client->pointer_shape_cache);
+        DeleteCriticalSection(&client->layout_lock);
+        DeleteCriticalSection(&client->pointer_lock);
+        DeleteCriticalSection(&client->refresh_lock);
+        free(client);
+        return NULL;
+    }
+    
+    if (!freerdp_context_new(instance))
+    {
+        freerdp_free(instance);
+        pointer_shape_cache_free(client->pointer_shape_cache);
+        DeleteCriticalSection(&client->layout_lock);
+        DeleteCriticalSection(&client->pointer_lock);
+        free(client);
+        return NULL;
+    }
+
+    /* freerdp_connect() recreates the channel manager and reloads addins through LoadChannels. */
+    instance->LoadChannels = freerdp_client_load_channels;
+
+    client->context = instance->context;
+    g_backend_client = client;
+
+    if (!backend_register_static_channel_provider())
+    {
+        freerdp_context_free(instance);
+        freerdp_free(instance);
+        pointer_shape_cache_free(client->pointer_shape_cache);
+        DeleteCriticalSection(&client->layout_lock);
+        DeleteCriticalSection(&client->pointer_lock);
+        DeleteCriticalSection(&client->refresh_lock);
+        free(client);
+        g_backend_client = NULL;
+        return NULL;
+    }
+
+    if (!client->context->pubSub ||
+        PubSub_SubscribeChannelConnected(client->context->pubSub, backend_on_channel_connected) < 0 ||
+        PubSub_SubscribeChannelDisconnected(client->context->pubSub,
+                                            backend_on_channel_disconnected) < 0)
+    {
+        freerdp_context_free(instance);
+        freerdp_free(instance);
+        pointer_shape_cache_free(client->pointer_shape_cache);
+        DeleteCriticalSection(&client->layout_lock);
+        DeleteCriticalSection(&client->pointer_lock);
+        DeleteCriticalSection(&client->refresh_lock);
+        free(client);
+        g_backend_client = NULL;
+        return NULL;
+    }
+
+    if (client->context->update)
+    {
+        WLog_INFO(TAG, "Registering update callbacks");
+        client->context->update->DesktopResize = on_desktop_resize;
+        client->context->update->SurfaceFrameMarker = on_surface_frame_marker;
+        if (client->context->update->pointer)
+        {
+            client->context->update->pointer->PointerPosition = on_pointer_position;
+            client->context->update->pointer->PointerSystem = on_pointer_system;
+            client->context->update->pointer->PointerColor = on_pointer_color;
+            client->context->update->pointer->PointerNew = on_pointer_new;
+            client->context->update->pointer->PointerCached = on_pointer_cached;
+        }
+    }
+    else
+    {
+        WLog_ERR(TAG, "No update context available!");
+    }
+
+    rdpSettings* settings = client->context->settings;
+    if (!settings)
+    {
+        freerdp_context_free(instance);
+        freerdp_free(instance);
+        pointer_shape_cache_free(client->pointer_shape_cache);
+        DeleteCriticalSection(&client->layout_lock);
+        DeleteCriticalSection(&client->pointer_lock);
+        DeleteCriticalSection(&client->refresh_lock);
+        free(client);
+        return NULL;
+    }
+    
+    /* Enable RemoteFX alongside NSCodec. RFX uses better compression
+     * for large changed areas (window drags) though still 64×64 tiles. */
+    freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_NSCodec, TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_RefreshRect, TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_FrameMarkerCommandEnabled, TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_SurfaceFrameMarkerEnabled, TRUE);
+    /* Raise frame ack from 2 to 4: more frames in flight before ack
+     * reduces pipeline throttling during rapid updates. */
+    freerdp_settings_set_uint32(settings, FreeRDP_FrameAcknowledge, 4);
+    freerdp_settings_set_bool(settings, FreeRDP_DeactivateClientDecoding, FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, FALSE);
+    freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, 1920);
+    freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, 1080);
+    freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
+    client->desktop_width = 1920;
+    client->desktop_height = 1080;
+    client->port = 3389;
+
+    if (!backend_prepare_rdpgfx_channels(client))
+    {
+        freerdp_context_free(instance);
+        freerdp_free(instance);
+        pointer_shape_cache_free(client->pointer_shape_cache);
+        DeleteCriticalSection(&client->layout_lock);
+        DeleteCriticalSection(&client->pointer_lock);
+        DeleteCriticalSection(&client->refresh_lock);
+        free(client);
+        g_backend_client = NULL;
+        return NULL;
+    }
+    
+    instance->PostConnect = on_post_connect;
+    instance->PostDisconnect = on_post_disconnect;
+    instance->AuthenticateEx = on_authenticate_ex;
+    instance->VerifyCertificateEx = on_verify_certificate_ex;
+    
+    return client;
+}
+
+BOOL backend_configure(BackendClient* client, 
+                       const char* hostname, 
+                       UINT16 port,
+                       const char* username, 
+                       const char* password, 
+                       const char* domain)
+{
+    if (!client || !client->context)
+        return FALSE;
+    
+    rdpSettings* settings = client->context->settings;
+    if (!settings)
+        return FALSE;
+    
+    if (hostname)
+    {
+        free(client->hostname);
+        client->hostname = strdup(hostname);
+        freerdp_settings_set_string(settings, FreeRDP_ServerHostname, hostname);
+    }
+    
+    if (port > 0)
+    {
+        client->port = port;
+        freerdp_settings_set_uint32(settings, FreeRDP_ServerPort, port);
+    }
+    
+    if (username)
+    {
+        free(client->username);
+        client->username = strdup(username);
+        freerdp_settings_set_string(settings, FreeRDP_Username, username);
+    }
+
+    if (password)
+    {
+        free(client->password);
+        client->password = strdup(password);
+        freerdp_settings_set_string(settings, FreeRDP_Password, password);
+    }
+
+    if (domain)
+    {
+        free(client->domain);
+        client->domain = strdup(domain);
+        freerdp_settings_set_string(settings, FreeRDP_Domain, domain);
+    }
+    
+    return TRUE;
+}
+
+BOOL backend_connect(BackendClient* client)
+{
+    if (!client || !client->context)
+        return FALSE;
+    
+    WLog_INFO(TAG, "Connecting to %s:%d", 
+              client->hostname ? client->hostname : "(null)",
+              client->port);
+
+    EnterCriticalSection(&client->layout_lock);
+    client->forwarded_surface_bits_count = 0;
+    client->forwarded_surface_bits_bytes = 0;
+    client->forwarded_frame_marker_count = 0;
+    client->forwarded_gfx_reset_graphics_count = 0;
+    client->forwarded_gfx_create_surface_count = 0;
+    client->forwarded_gfx_delete_surface_count = 0;
+    client->forwarded_gfx_map_surface_to_output_count = 0;
+    client->forwarded_gfx_start_frame_count = 0;
+    client->forwarded_gfx_surface_command_count = 0;
+    client->forwarded_gfx_end_frame_count = 0;
+    client->forwarded_gfx_delete_encoding_context_count = 0;
+    LeaveCriticalSection(&client->layout_lock);
+
+    EnterCriticalSection(&client->refresh_lock);
+    backend_reset_full_refresh_state_locked(client);
+    LeaveCriticalSection(&client->refresh_lock);
+
+    client->rdpgfx = NULL;
+    client->rdpgfx_channel_open = FALSE;
+    client->rdpgfx_caps_confirmed = FALSE;
+
+    WLog_INFO(TAG, "Waiting for backend RDPEGFX dynamic channel attach");
+    
+    if (!freerdp_connect(client->context->instance))
+    {
+        WLog_ERR(TAG, "Failed to connect to backend");
+        return FALSE;
+    }
+    
+    return TRUE;
+}
+
+void backend_disconnect(BackendClient* client)
+{
+    if (!client || !client->context)
+        return;
+    
+    if (client->connected)
+    {
+        EnterCriticalSection(&client->refresh_lock);
+        backend_reset_full_refresh_state_locked(client);
+        LeaveCriticalSection(&client->refresh_lock);
+        freerdp_disconnect(client->context->instance);
+        client->connected = FALSE;
+    }
+}
+
+void backend_free(BackendClient* client)
+{
+    if (!client)
+        return;
+
+    backend_disconnect(client);
+
+    if (client->context && client->context->instance)
+    {
+        freerdp* instance = client->context->instance;
+        freerdp_context_free(instance);
+        freerdp_free(instance);
+        client->context = NULL;
+    }
+
+    free(client->hostname);
+    free(client->username);
+    free(client->password);
+    free(client->domain);
+    pointer_shape_cache_free(client->pointer_shape_cache);
+    client->pointer_shape_cache = NULL;
+    client->active_pointer_shape = NULL;
+    DeleteCriticalSection(&client->layout_lock);
+    DeleteCriticalSection(&client->pointer_lock);
+    DeleteCriticalSection(&client->refresh_lock);
+    free(client);
+}
+
+BOOL backend_is_connected(BackendClient* client)
+{
+    return client && client->connected;
+}
+
+int backend_run(BackendClient* client)
+{
+    if (!client || !client->context)
+        return -1;
+
+    return freerdp_connect(client->context->instance) ? 0 : -1;
+}
+
+BOOL backend_iterate(BackendClient* client)
+{
+    if (!client || !client->context || !client->connected)
+        return FALSE;
+
+    (void)backend_service_full_refresh_request(client);
+    return freerdp_check_event_handles(client->context);
+}
+
+BOOL backend_request_full_refresh(BackendClient* client)
+{
+    BOOL queued = FALSE;
+    UINT64 now = 0;
+
+    if (!client)
+        return FALSE;
+
+    now = platform_get_timestamp_ms();
+    EnterCriticalSection(&client->refresh_lock);
+    if (!client->full_refresh_requested && !client->full_refresh_in_flight)
+    {
+        client->full_refresh_generation++;
+        client->full_refresh_requested = TRUE;
+        client->full_refresh_requested_generation = client->full_refresh_generation;
+        client->full_refresh_requested_timestamp_ms = now;
+        queued = TRUE;
+    }
+    LeaveCriticalSection(&client->refresh_lock);
+
+    return queued;
+}
+
+BOOL backend_full_refresh_in_flight(BackendClient* client)
+{
+    BOOL in_flight = FALSE;
+
+    if (!client)
+        return FALSE;
+
+    EnterCriticalSection(&client->refresh_lock);
+    in_flight = client->full_refresh_in_flight;
+    LeaveCriticalSection(&client->refresh_lock);
+
+    return in_flight;
+}
+
+void backend_mark_full_refresh_complete(BackendClient* client)
+{
+    UINT64 generation = 0;
+
+    if (!client)
+        return;
+
+    EnterCriticalSection(&client->refresh_lock);
+    generation = client->full_refresh_in_flight_generation;
+    if (generation != 0)
+    {
+        backend_complete_full_refresh_locked(client, generation,
+                                             BACKEND_FULL_REFRESH_OUTCOME_COMPLETED,
+                                             platform_get_timestamp_ms());
+    }
+    else
+    {
+        client->full_refresh_requested = FALSE;
+        client->full_refresh_in_flight = FALSE;
+        client->full_refresh_requested_generation = 0;
+        client->full_refresh_in_flight_generation = 0;
+        client->full_refresh_requested_timestamp_ms = 0;
+        client->full_refresh_in_flight_timestamp_ms = 0;
+    }
+    LeaveCriticalSection(&client->refresh_lock);
+}
+
+void backend_get_full_refresh_state(BackendClient* client, BackendFullRefreshState* state)
+{
+    if (!state)
+        return;
+
+    ZeroMemory(state, sizeof(*state));
+    state->completed_outcome = BACKEND_FULL_REFRESH_OUTCOME_NONE;
+
+    if (!client)
+        return;
+
+    EnterCriticalSection(&client->refresh_lock);
+    state->requested = client->full_refresh_requested;
+    state->in_flight = client->full_refresh_in_flight;
+    state->latest_generation = client->full_refresh_generation;
+    state->requested_generation = client->full_refresh_requested_generation;
+    state->in_flight_generation = client->full_refresh_in_flight_generation;
+    state->completed_generation = client->full_refresh_completed_generation;
+    state->requested_timestamp_ms = client->full_refresh_requested_timestamp_ms;
+    state->in_flight_timestamp_ms = client->full_refresh_in_flight_timestamp_ms;
+    state->completed_timestamp_ms = client->full_refresh_completed_timestamp_ms;
+    state->completed_outcome =
+        (BackendFullRefreshOutcome)client->full_refresh_completed_outcome;
+    LeaveCriticalSection(&client->refresh_lock);
+}
+
+BOOL backend_abandon_full_refresh_if_timed_out(BackendClient* client, UINT64 generation,
+                                               UINT64 timeout_ms)
+{
+    UINT64 started_ts = 0;
+    UINT64 now = 0;
+    BOOL timed_out = FALSE;
+
+    if (!client || (generation == 0) || (timeout_ms == 0))
+        return FALSE;
+
+    now = platform_get_timestamp_ms();
+
+    EnterCriticalSection(&client->refresh_lock);
+    if (client->full_refresh_in_flight &&
+        (client->full_refresh_in_flight_generation == generation))
+    {
+        started_ts = client->full_refresh_in_flight_timestamp_ms;
+    }
+    else if (client->full_refresh_requested &&
+             (client->full_refresh_requested_generation == generation))
+    {
+        started_ts = client->full_refresh_requested_timestamp_ms;
+    }
+
+    if ((started_ts > 0) && ((now - started_ts) >= timeout_ms))
+    {
+        backend_complete_full_refresh_locked(client, generation,
+                                             BACKEND_FULL_REFRESH_OUTCOME_TIMED_OUT, now);
+        timed_out = TRUE;
+    }
+    LeaveCriticalSection(&client->refresh_lock);
+
+    if (timed_out)
+    {
+        WLog_WARN(TAG,
+                  "Backend full refresh generation=%" PRIu64
+                  " timed out after %" PRIu64 " ms",
+                  generation, timeout_ms);
+    }
+
+    return timed_out;
+}
+
+void backend_get_desktop_layout(BackendClient* client, UINT32* width, UINT32* height,
+                                UINT32* generation)
+{
+    if (!client)
+    {
+        if (width)
+            *width = 0;
+        if (height)
+            *height = 0;
+        if (generation)
+            *generation = 0;
+        return;
+    }
+
+    EnterCriticalSection(&client->layout_lock);
+    if (width)
+        *width = client->desktop_width;
+    if (height)
+        *height = client->desktop_height;
+    if (generation)
+        *generation = client->layout_generation;
+    LeaveCriticalSection(&client->layout_lock);
+}
+
+void backend_get_pointer_snapshot(BackendClient* client, UINT16* x, UINT16* y, BOOL* visible,
+                                  UINT32* type, PointerShapeEntry** active_shape,
+                                  UINT64* position_gen, UINT64* shape_gen)
+{
+    if (!client)
+    {
+        if (x)
+            *x = 0;
+        if (y)
+            *y = 0;
+        if (visible)
+            *visible = FALSE;
+        if (type)
+            *type = SYSPTR_NULL;
+        if (active_shape)
+            *active_shape = NULL;
+        if (position_gen)
+            *position_gen = 0;
+        if (shape_gen)
+            *shape_gen = 0;
+        return;
+    }
+
+    EnterCriticalSection(&client->pointer_lock);
+    if (x)
+        *x = client->pointer_x;
+    if (y)
+        *y = client->pointer_y;
+    if (visible)
+        *visible = client->pointer_visible;
+    if (type)
+        *type = client->pointer_type;
+    if (active_shape)
+        *active_shape = client->active_pointer_shape;
+    if (position_gen)
+        *position_gen = client->pointer_position_generation;
+    if (shape_gen)
+        *shape_gen = client->pointer_shape_generation;
+    LeaveCriticalSection(&client->pointer_lock);
+}
+
+void backend_get_pointer_state(BackendClient* client, UINT16* x, UINT16* y, BOOL* visible,
+                               UINT32* type, UINT64* generation)
+{
+    UINT64 position_gen = 0;
+    UINT64 shape_gen = 0;
+
+    backend_get_pointer_snapshot(client, x, y, visible, type, NULL, &position_gen, &shape_gen);
+    if (generation)
+        *generation = position_gen + shape_gen;
+}
