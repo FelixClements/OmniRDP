@@ -810,7 +810,10 @@ static void transport_bio_error_log(rdpTransport* transport, LPCSTR biofunc,
 		char ebuffer[256] = WINPR_C_ARRAY_INIT;
 
 		if (saveerrno == 0)
-			WLog_PrintTextMessage(transport->log, level, line, file, func, "%s retries exceeded",
+			/* Clean disconnect (EOF with no SSL or system error) — this is
+			 * normal in server/peer mode when a client closes the connection.
+			 * Log at INFO level to avoid spurious ERROR spam. */
+			WLog_PrintTextMessage(transport->log, WLOG_INFO, line, file, func, "%s retries exceeded",
 			                      biofunc);
 		else
 			WLog_PrintTextMessage(transport->log, level, line, file, func,

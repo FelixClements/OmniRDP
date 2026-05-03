@@ -21,6 +21,7 @@ extern "C" {
 #define VIEWER_GFX_FRAME_RING_CAPACITY 4U
 #define VIEWER_GFX_MAX_FRAME_EVENTS 512U
 #define VIEWER_CLASSIC_QUEUE_CAPACITY 32U
+#define VIEWER_SURFACE_BITS_QUEUE_CAPACITY 1024U
 
 struct BackendClient;
 typedef struct BackendClient BackendClient;
@@ -188,6 +189,11 @@ typedef struct ViewerClassicEvent
     BITMAP_UPDATE* bitmap; /* deep-copied, owned by this event */
 } ViewerClassicEvent;
 
+typedef struct ViewerSurfaceBitsEvent
+{
+    SURFACE_BITS_COMMAND cmd; /* deep-copied, owned by this event */
+} ViewerSurfaceBitsEvent;
+
 typedef struct {
     freerdp_peer* peer;
     rdpContext* context;
@@ -223,6 +229,20 @@ UINT64 bitmap_updates_skipped_writeblock;
     UINT32 classic_queue_tail;
     UINT32 classic_queue_count;
     HANDLE classic_event;
+    /* SurfaceBits queue (NSCodec/RemoteFX classic path) */
+    ViewerSurfaceBitsEvent* surface_bits_queue[VIEWER_SURFACE_BITS_QUEUE_CAPACITY];
+    UINT32 surface_bits_queue_head;
+    UINT32 surface_bits_queue_tail;
+    UINT32 surface_bits_queue_count;
+    UINT64 surface_bits_updates_sent;
+    UINT64 surface_bits_updates_failed;
+    UINT64 surface_bits_updates_skipped_writeblock;
+    UINT64 surface_bits_updates_skipped_throttle;
+    UINT64 surface_bits_updates_queued;
+    UINT64 surface_bits_queue_dropped;
+    UINT64 surface_bits_send_time_total_us;
+    UINT64 surface_bits_send_time_max_us;
+    UINT64 surface_bits_payload_bytes_sent;
     ViewerGraphicsContext gfx;
 } Viewer;
 

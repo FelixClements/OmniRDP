@@ -42,6 +42,8 @@ static UINT64 viewer_perf_now_us(void);
 static BOOL viewer_should_log_bitmap_perf(UINT64 batch_count, UINT64 publish_us,
                                           UINT32 send_failed_count);
 static BOOL viewer_send_bitmap_update(Viewer* viewer, const BITMAP_UPDATE* bitmap);
+static BOOL viewer_send_bitmap_update_locked(Viewer* viewer, const BITMAP_UPDATE* bitmap);
+static BOOL viewer_send_surface_bits(Viewer* viewer, const SURFACE_BITS_COMMAND* cmd);
 
 static UINT64 viewer_perf_now_us(void)
 {
@@ -172,6 +174,51 @@ static void viewer_classic_event_free(ViewerClassicEvent* event)
     free(event);
 }
 
+/* ---- SurfaceBits event: deep-copy and free ---- */
+
+static ViewerSurfaceBitsEvent* viewer_surface_bits_event_new(const SURFACE_BITS_COMMAND* cmd)
+{
+    ViewerSurfaceBitsEvent* event = NULL;
+
+    if (!cmd)
+        return NULL;
+
+    event = (ViewerSurfaceBitsEvent*)calloc(1, sizeof(ViewerSurfaceBitsEvent));
+    if (!event)
+        return NULL;
+
+    /* Shallow-copy all fields */
+    event->cmd = *cmd;
+
+    /* Deep-copy the bitmapData buffer */
+    if (cmd->bmp.bitmapDataLength > 0 && cmd->bmp.bitmapData)
+    {
+        event->cmd.bmp.bitmapData = (BYTE*)malloc(cmd->bmp.bitmapDataLength);
+        if (!event->cmd.bmp.bitmapData)
+        {
+            free(event);
+            return NULL;
+        }
+        memcpy(event->cmd.bmp.bitmapData, cmd->bmp.bitmapData, cmd->bmp.bitmapDataLength);
+    }
+    else
+    {
+        event->cmd.bmp.bitmapData = NULL;
+        event->cmd.bmp.bitmapDataLength = 0;
+    }
+
+    return event;
+}
+
+static void viewer_surface_bits_event_free(ViewerSurfaceBitsEvent* event)
+{
+    if (!event)
+        return;
+
+    free(event->cmd.bmp.bitmapData);
+    free(event);
+}
+
 /* ---- Classic bitmap queue: queue operations ---- */
 
 /* Drop the oldest entry from the classic queue. Caller must hold send_lock. */
@@ -291,6 +338,83 @@ static ViewerClassicEvent* viewer_classic_dequeue_locked(Viewer* viewer)
     viewer->classic_queue_head =
         (viewer->classic_queue_head + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
     viewer->classic_queue_count--;
+
+    return event;
+}
+
+/* ---- SurfaceBits queue: queue operations ---- */
+
+/* Drop the oldest entry from the SurfaceBits queue. Caller must hold send_lock. */
+static void viewer_surface_bits_queue_drop_oldest_locked(Viewer* viewer)
+{
+    ViewerSurfaceBitsEvent* oldest = NULL;
+
+    if (viewer->surface_bits_queue_count == 0)
+        return;
+
+    oldest = viewer->surface_bits_queue[viewer->surface_bits_queue_head];
+    viewer->surface_bits_queue[viewer->surface_bits_queue_head] = NULL;
+    viewer->surface_bits_queue_head =
+        (viewer->surface_bits_queue_head + 1) % VIEWER_SURFACE_BITS_QUEUE_CAPACITY;
+    viewer->surface_bits_queue_count--;
+
+    viewer_surface_bits_event_free(oldest);
+    viewer->surface_bits_queue_dropped++;
+}
+
+static void viewer_surface_bits_queue_clear_locked(Viewer* viewer)
+{
+    while (viewer->surface_bits_queue_count > 0)
+        viewer_surface_bits_queue_drop_oldest_locked(viewer);
+}
+
+/* Enqueue a pre-built SurfaceBits event into the viewer's queue.
+ * Caller must hold send_lock. Returns TRUE on success. */
+static BOOL viewer_surface_bits_enqueue_event_locked(Viewer* viewer, ViewerSurfaceBitsEvent* event)
+{
+    if (!viewer || !event)
+        return FALSE;
+
+    /* If queue is full, drop oldest entries to make room */
+    while (viewer->surface_bits_queue_count >= VIEWER_SURFACE_BITS_QUEUE_CAPACITY)
+    {
+        WLog_WARN(TAG,
+                  "Viewer %u SurfaceBits queue full (%u entries), dropping oldest",
+                  viewer->id, viewer->surface_bits_queue_count);
+        viewer_surface_bits_queue_drop_oldest_locked(viewer);
+
+        /* Note: do NOT set needs_full_refresh here. SurfaceBits ARE the
+         * refresh data — setting needs_full_refresh would cause the pump
+         * to drop all queued SurfaceBits, creating a deadlock. */
+    }
+
+    viewer->surface_bits_queue[viewer->surface_bits_queue_tail] = event;
+    viewer->surface_bits_queue_tail =
+        (viewer->surface_bits_queue_tail + 1) % VIEWER_SURFACE_BITS_QUEUE_CAPACITY;
+    viewer->surface_bits_queue_count++;
+    viewer->surface_bits_updates_queued++;
+
+    /* Signal the viewer thread that a new event is available */
+    if (viewer->classic_event)
+        SetEvent(viewer->classic_event);
+
+    return TRUE;
+}
+
+/* Dequeue the oldest event from the SurfaceBits queue. Caller must hold send_lock.
+ * Returns NULL if queue is empty. Caller must free the returned event. */
+static ViewerSurfaceBitsEvent* viewer_surface_bits_dequeue_locked(Viewer* viewer)
+{
+    ViewerSurfaceBitsEvent* event = NULL;
+
+    if (!viewer || (viewer->surface_bits_queue_count == 0))
+        return NULL;
+
+    event = viewer->surface_bits_queue[viewer->surface_bits_queue_head];
+    viewer->surface_bits_queue[viewer->surface_bits_queue_head] = NULL;
+    viewer->surface_bits_queue_head =
+        (viewer->surface_bits_queue_head + 1) % VIEWER_SURFACE_BITS_QUEUE_CAPACITY;
+    viewer->surface_bits_queue_count--;
 
     return event;
 }
@@ -2045,12 +2169,16 @@ static BOOL viewer_pump_gfx(Viewer* viewer)
 /* Drain the classic bitmap queue and send updates to the viewer.
  * Called from the viewer thread. Returns TRUE on success, FALSE on
  * fatal error (viewer should be disconnected). */
+#define CLASSIC_GATHER_US 15000  /* 15ms gather window for coalescing */
+
 static BOOL viewer_pump_classic(Viewer* viewer)
 {
     ViewerClassicEvent* event = NULL;
     UINT32 pumped = 0;
     UINT32 coalesced = 0;
+    UINT32 sb_pumped = 0;
     BOOL classic_fallback = FALSE;
+    freerdp_peer* peer = viewer ? viewer->peer : NULL;
 
     if (!viewer)
         return FALSE;
@@ -2062,6 +2190,12 @@ static BOOL viewer_pump_classic(Viewer* viewer)
 
     if (!classic_fallback)
         return TRUE;
+
+    /* Hold rdp_update_lock across the entire drain loop so that mstsc
+     * receives all bitmap updates as a continuous stream without rendering
+     * between individual sends. */
+    if (peer && peer->context && peer->context->update)
+        rdp_update_lock(peer->context->update);
 
     for (;;)
     {
@@ -2135,12 +2269,67 @@ static BOOL viewer_pump_classic(Viewer* viewer)
         }
         LeaveCriticalSection(&viewer->send_lock);
 
+        /* Gather delay: if we only have 1 bitmap (no coalescing happened),
+         * briefly wait for more backend batches to arrive before sending.
+         * This allows multiple BitmapUpdates to accumulate and be coalesced
+         * into a single larger PDU, eliminating the "rows of boxes" effect
+         * where each small update is rendered individually by mstsc. */
+        if (coalesced == 0 && pumped == 0)
+        {
+            UINT64 gather_start = viewer_perf_now_us();
+            while ((viewer_perf_now_us() - gather_start) < CLASSIC_GATHER_US)
+            {
+                EnterCriticalSection(&viewer->send_lock);
+                if (viewer->classic_queue_count > 0)
+                {
+                    ViewerClassicEvent* next = viewer_classic_dequeue_locked(viewer);
+                    UINT32 old_number = 0;
+                    BITMAP_DATA* new_rects = NULL;
+                    UINT32 j = 0;
+
+                    LeaveCriticalSection(&viewer->send_lock);
+
+                    if (!next)
+                        break;
+
+                    old_number = event->bitmap->number;
+                    new_rects = (BITMAP_DATA*)realloc(
+                        event->bitmap->rectangles,
+                        (old_number + next->bitmap->number) * sizeof(BITMAP_DATA));
+                    if (!new_rects)
+                    {
+                        viewer_classic_event_free(next);
+                        break;
+                    }
+
+                    event->bitmap->rectangles = new_rects;
+                    for (j = 0; j < next->bitmap->number; j++)
+                    {
+                        event->bitmap->rectangles[old_number + j] = next->bitmap->rectangles[j];
+                        next->bitmap->rectangles[j].bitmapDataStream = NULL;
+                        next->bitmap->rectangles[j].bitmapLength = 0;
+                    }
+                    event->bitmap->number += next->bitmap->number;
+                    coalesced++;
+
+                    free(next->bitmap->rectangles);
+                    next->bitmap->rectangles = NULL;
+                    next->bitmap->number = 0;
+                    viewer_classic_event_free(next);
+
+                    /* Items are arriving — keep gathering until the window
+                     * expires or the queue is empty */
+                    continue;
+                }
+                LeaveCriticalSection(&viewer->send_lock);
+                platform_sleep_ms(1);
+            }
+        }
+
         /* Send the (possibly coalesced) bitmap update.
-         * The FreeRDP send call takes 1-3ms and does not need send_lock
-         * protection — rdp_update_lock provides FreeRDP's own synchronization,
-         * and the event data is locally owned after dequeue. Only the
-         * counter updates need send_lock. */
-        if (!viewer_send_bitmap_update(viewer, event->bitmap))
+         * rdp_update_lock is already held across the entire pump loop,
+         * so mstsc receives all updates as a continuous stream. */
+        if (!viewer_send_bitmap_update_locked(viewer, event->bitmap))
         {
             WLog_WARN(TAG, "Viewer %u pump-classic: send failed", viewer->id);
             viewer_classic_event_free(event);
@@ -2152,13 +2341,47 @@ static BOOL viewer_pump_classic(Viewer* viewer)
         viewer_classic_event_free(event);
     }
 
-    if (pumped > 0)
+    /* Drain SurfaceBits queue — each event is a separate codec frame, no coalescing.
+     * Unlike BitmapUpdate, SurfaceBits are NOT dropped when needs_full_refresh is true.
+     * When SurfaceBits (NSCodec/RemoteFX) is the active codec, these tiles ARE the
+     * refresh data — dropping them creates a deadlock where the viewer never receives
+     * the content needed to resync. */
+    for (;;)
+    {
+        ViewerSurfaceBitsEvent* sb_event = NULL;
+
+        EnterCriticalSection(&viewer->send_lock);
+        sb_event = viewer_surface_bits_dequeue_locked(viewer);
+        LeaveCriticalSection(&viewer->send_lock);
+
+        if (!sb_event)
+            break;
+
+        /* Send outside send_lock — rdp_update_lock provides FreeRDP's own sync,
+         * and the event data is locally owned after dequeue. */
+        if (!viewer_send_surface_bits(viewer, &sb_event->cmd))
+        {
+            WLog_WARN(TAG, "Viewer %u pump-classic: SurfaceBits send failed", viewer->id);
+            viewer_surface_bits_event_free(sb_event);
+            continue;
+        }
+
+        sb_pumped++;
+        viewer_surface_bits_event_free(sb_event);
+    }
+
+    if ((pumped > 0) || (sb_pumped > 0))
     {
         WLog_INFO(TAG,
                   "Viewer %u pump-classic: delivered %" PRIu32
-                  " updates (coalesced=%" PRIu32 ")",
-                  viewer->id, pumped, coalesced);
+                  " bitmaps (coalesced=%" PRIu32
+                  ") %" PRIu32 " SurfaceBits",
+                  viewer->id, pumped, coalesced, sb_pumped);
     }
+
+    /* Release the update lock acquired at the top of this function. */
+    if (peer && peer->context && peer->context->update)
+        rdp_update_unlock(peer->context->update);
 
     return TRUE;
 }
@@ -2411,6 +2634,19 @@ static BOOL viewer_send_state_init(Viewer* viewer)
     viewer->classic_queue_tail = 0;
     viewer->classic_queue_count = 0;
     memset(viewer->classic_queue, 0, sizeof(viewer->classic_queue));
+    viewer->surface_bits_queue_head = 0;
+    viewer->surface_bits_queue_tail = 0;
+    viewer->surface_bits_queue_count = 0;
+    memset(viewer->surface_bits_queue, 0, sizeof(viewer->surface_bits_queue));
+    viewer->surface_bits_updates_sent = 0;
+    viewer->surface_bits_updates_failed = 0;
+    viewer->surface_bits_updates_skipped_writeblock = 0;
+    viewer->surface_bits_updates_skipped_throttle = 0;
+    viewer->surface_bits_updates_queued = 0;
+    viewer->surface_bits_queue_dropped = 0;
+    viewer->surface_bits_send_time_total_us = 0;
+    viewer->surface_bits_send_time_max_us = 0;
+    viewer->surface_bits_payload_bytes_sent = 0;
     viewer->classic_event = CreateEventA(NULL, TRUE, FALSE, NULL);
     if (!viewer->classic_event)
     {
@@ -2428,6 +2664,7 @@ static void viewer_send_state_uninit(Viewer* viewer)
     /* Free any remaining classic queue entries */
     EnterCriticalSection(&viewer->send_lock);
     viewer_classic_queue_clear_locked(viewer);
+    viewer_surface_bits_queue_clear_locked(viewer);
     LeaveCriticalSection(&viewer->send_lock);
 
     if (viewer->classic_event)
@@ -2620,28 +2857,39 @@ static BOOL viewer_send_surface_bits(Viewer* viewer, const SURFACE_BITS_COMMAND*
 {
     BOOL ret = FALSE;
     freerdp_peer* peer = viewer ? viewer->peer : NULL;
+    UINT64 send_started_us = 0;
+    UINT64 send_us = 0;
 
     if (!viewer || !peer || !peer->context || !peer->context->update || !cmd)
         return FALSE;
 
+    /* Option A: Skip on write-block — don't stall the viewer thread */
     if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
     {
         viewer->write_block_events++;
-        if (!peer->DrainOutputBuffer || (peer->DrainOutputBuffer(peer) < 0) ||
-            peer->IsWriteBlocked(peer))
-        {
-            viewer->packets_failed++;
-            return FALSE;
-        }
+        viewer->surface_bits_updates_skipped_writeblock++;
+        return FALSE;
     }
 
+    send_started_us = viewer_perf_now_us();
     rdp_update_lock(peer->context->update);
     IFCALLRET(peer->context->update->SurfaceBits, ret, peer->context, cmd);
     rdp_update_unlock(peer->context->update);
+    send_us = viewer_perf_now_us() - send_started_us;
+    viewer->surface_bits_send_time_total_us += send_us;
+    if (send_us > viewer->surface_bits_send_time_max_us)
+        viewer->surface_bits_send_time_max_us = send_us;
     if (ret)
+    {
         viewer->packets_sent++;
+        viewer->surface_bits_updates_sent++;
+        viewer->surface_bits_payload_bytes_sent += cmd->bmp.bitmapDataLength;
+    }
     else
+    {
         viewer->packets_failed++;
+        viewer->surface_bits_updates_failed++;
+    }
     return ret;
 }
 
@@ -2672,6 +2920,54 @@ if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
     rdp_update_lock(peer->context->update);
     IFCALLRET(peer->context->update->BitmapUpdate, ret, peer->context, bitmap);
     rdp_update_unlock(peer->context->update);
+    send_us = viewer_perf_now_us() - send_started_us;
+    viewer->bitmap_send_time_total_us += send_us;
+    if (send_us > viewer->bitmap_send_time_max_us)
+        viewer->bitmap_send_time_max_us = send_us;
+    if (ret)
+    {
+        viewer->packets_sent++;
+        viewer->bitmap_updates_sent++;
+        viewer->bitmap_rectangles_sent += bitmap->number;
+        viewer->bitmap_payload_bytes_sent += payload_bytes;
+    }
+    else
+    {
+        viewer->packets_failed++;
+        viewer->bitmap_updates_failed++;
+    }
+    return ret;
+}
+
+/* Same as viewer_send_bitmap_update but assumes rdp_update_lock is already held.
+ * Used by viewer_pump_classic to batch multiple sends under a single lock
+ * acquisition, preventing mstsc from rendering between individual updates. */
+static BOOL viewer_send_bitmap_update_locked(Viewer* viewer, const BITMAP_UPDATE* bitmap)
+{
+    BOOL ret = FALSE;
+    freerdp_peer* peer = viewer ? viewer->peer : NULL;
+    UINT64 send_started_us = 0;
+    UINT64 send_us = 0;
+    UINT64 payload_bytes = 0;
+    UINT32 i = 0;
+
+    if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
+        return FALSE;
+
+    for (i = 0; i < bitmap->number; i++)
+        payload_bytes += bitmap->rectangles[i].bitmapLength;
+
+    if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
+    {
+        viewer->write_block_events++;
+        viewer->bitmap_write_block_events++;
+        viewer->bitmap_updates_skipped_writeblock++;
+        return FALSE;
+    }
+
+    send_started_us = viewer_perf_now_us();
+    /* rdp_update_lock is already held by the caller (viewer_pump_classic) */
+    IFCALLRET(peer->context->update->BitmapUpdate, ret, peer->context, bitmap);
     send_us = viewer_perf_now_us() - send_started_us;
     viewer->bitmap_send_time_total_us += send_us;
     if (send_us > viewer->bitmap_send_time_max_us)
@@ -3695,17 +3991,17 @@ static BOOL peer_accepted(freerdp_listener* listener, freerdp_peer* peer)
         freerdp_settings_set_uint32(settings, FreeRDP_EncryptionLevel,
                                     ENCRYPTION_LEVEL_CLIENT_COMPATIBLE);
         freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
-        freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, TRUE);
+freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
-        freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE);
-        freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
-        freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
-        freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
-        freerdp_settings_set_bool(settings, FreeRDP_SurfaceFrameMarkerEnabled, TRUE);
+        /* SurfaceFrameMarkerEnabled must match codec availability. When
+         * codecs are disabled, sending SURFACE_FRAME_MARKER PDUs to the
+         * client causes a protocol error (0xd06) because the client
+         * hasn't negotiated the Surface Bits Capability Set. */
+freerdp_settings_set_bool(settings, FreeRDP_SurfaceFrameMarkerEnabled, FALSE);
         freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, desktop_width);
         freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, desktop_height);
 
@@ -3905,14 +4201,20 @@ BOOL viewer_server_publish_surface_bits(BackendClient* backend, const SURFACE_BI
     BOOL refresh_in_flight = FALSE;
     UINT32 classic_target_count = 0;
     UINT32 gated_full_refresh_count = 0;
-    UINT32 send_failed_count = 0;
-    UINT32 sent_count = 0;
+    UINT32 throttled_count = 0;
+    UINT32 enqueue_failed_count = 0;
+    UINT32 enqueued_count = 0;
     UINT32 first_gated_viewer_id = 0;
+    UINT32 first_throttled_viewer_id = 0;
+    UINT64 publish_started_us = 0;
+    UINT64 publish_us = 0;
 
     if (!server || (server->backend != backend) || !cmd)
         return FALSE;
 
     refresh_in_flight = backend_full_refresh_in_flight(server->backend);
+
+    publish_started_us = viewer_perf_now_us();
 
     EnterCriticalSection(&server->lock);
     for (int i = 0; i < MAX_VIEWERS; i++)
@@ -3937,44 +4239,96 @@ BOOL viewer_server_publish_surface_bits(BackendClient* backend, const SURFACE_BI
     {
         Viewer* viewer = targets[i];
         BOOL ready_to_send = FALSE;
-        BOOL sent = FALSE;
+        BOOL enqueued = FALSE;
+        BOOL throttled = FALSE;
+        ViewerSurfaceBitsEvent* event = NULL;
 
+        /* Pre-build the deep copy outside send_lock to minimize lock hold time */
         EnterCriticalSection(&viewer->send_lock);
         ready_to_send = viewer->peer && viewer->connected && viewer->activated;
-        if (ready_to_send && viewer->needs_full_refresh && !refresh_in_flight)
+        LeaveCriticalSection(&viewer->send_lock);
+
+        if (!ready_to_send)
+            continue;
+
+        if (viewer->consecutive_lag_intervals >= VIEWER_THROTTLE_LAG_INTERVALS)
         {
+            /* Per-viewer throttle: skip updates for slow viewers.
+             * However, SurfaceBits ARE the refresh data — even when throttled,
+             * we must still deliver them to allow the viewer to resync.
+             * Clear the throttle gate and enqueue. */
+            EnterCriticalSection(&viewer->send_lock);
+            viewer->surface_bits_updates_skipped_throttle++;
+            /* Don't set needs_full_refresh for SurfaceBits — they ARE the
+             * refresh data. Setting it would cause the pump to drop them. */
+            LeaveCriticalSection(&viewer->send_lock);
+            throttled = TRUE;
+            throttled_count++;
+            if (first_throttled_viewer_id == 0)
+                first_throttled_viewer_id = viewer->id;
+            /* Fall through to enqueue — SurfaceBits must be delivered even
+             * for throttled viewers, because they carry the actual pixel data
+             * needed to resync. */
+        }
+
+        /* Clear needs_full_refresh if set — SurfaceBits ARE the refresh data.
+         * Unlike BitmapUpdate where a full refresh is a separate mechanism,
+         * SurfaceBits tiles are the only way the viewer receives pixel data,
+         * so they must always be delivered. */
+        if (viewer->needs_full_refresh)
+        {
+            EnterCriticalSection(&viewer->send_lock);
+            viewer->needs_full_refresh = FALSE;
+            viewer->full_refresh_deadline_ts = 0;
+            LeaveCriticalSection(&viewer->send_lock);
             gated_full_refresh_count++;
             if (first_gated_viewer_id == 0)
                 first_gated_viewer_id = viewer->id;
         }
-        else if (ready_to_send)
+
+        /* Always enqueue SurfaceBits — they carry pixel data that the viewer
+         * needs regardless of throttle or refresh state. */
+        event = viewer_surface_bits_event_new(cmd);
+        if (!event)
         {
-            sent = viewer_send_surface_bits(viewer, cmd);
-            if (sent)
-                sent_count++;
-            else
-                send_failed_count++;
+            enqueue_failed_count++;
+            continue;
+        }
+        EnterCriticalSection(&viewer->send_lock);
+        enqueued = viewer_surface_bits_enqueue_event_locked(viewer, event);
+        LeaveCriticalSection(&viewer->send_lock);
+        if (enqueued)
+            enqueued_count++;
+        else
+        {
+            enqueue_failed_count++;
+            viewer_surface_bits_event_free(event);
         }
 
-        if (sent)
+        if (enqueued)
             sent_any = TRUE;
-        LeaveCriticalSection(&viewer->send_lock);
+
+        if (throttled)
+            (void)backend_request_full_refresh(server->backend);
     }
 
+    publish_us = viewer_perf_now_us() - publish_started_us;
+
     if ((classic_target_count == 0) || (gated_full_refresh_count > 0) ||
-        (send_failed_count > 0) || (sent_count == 0))
+        (throttled_count > 0) || (enqueue_failed_count > 0) || (enqueued_count == 0))
     {
-        WLog_WARN(TAG,
+        WLog_INFO(TAG,
                   "Classic SurfaceBits publish summary rect=(%u,%u)-(%u,%u) payload=%" PRIu32
                   " codecId=%" PRIu16 " classicTargets=%" PRIu32
-                  " gatedFullRefresh=%" PRIu32 " firstGatedViewer=%" PRIu32
-                  " sendFailed=%" PRIu32 " sent=%" PRIu32
-                  " refreshInFlight=%d",
+                  " enqueued=%" PRIu32 " gatedFullRefresh=%" PRIu32
+                  " firstGatedViewer=%" PRIu32 " throttled=%" PRIu32
+                  " firstThrottledViewer=%" PRIu32 " enqueueFailed=%" PRIu32
+                  " refreshInFlight=%d publishUs=%" PRIu64,
                   cmd->destLeft, cmd->destTop, cmd->destRight, cmd->destBottom,
                   cmd->bmp.bitmapDataLength, cmd->bmp.codecID,
-                  classic_target_count, gated_full_refresh_count,
-                  first_gated_viewer_id, send_failed_count, sent_count,
-                  refresh_in_flight);
+                  classic_target_count, enqueued_count, gated_full_refresh_count,
+                  first_gated_viewer_id, throttled_count, first_throttled_viewer_id,
+                  enqueue_failed_count, refresh_in_flight, publish_us);
     }
 
     return sent_any;
@@ -4214,13 +4568,30 @@ BOOL viewer_server_publish_frame_marker(BackendClient* backend,
     }
     LeaveCriticalSection(&server->lock);
 
+    /* Only forward frame markers to viewers that have negotiated codec support
+     * (RemoteFX or NSCodec). When codecs are disabled, the client doesn't
+     * expect SURFACE_FRAME_MARKER PDUs and treats them as a protocol error
+     * (error 0xd06). Frame markers are only meaningful when SurfaceBits
+     * codec data is being sent — they delimit frame boundaries for codec
+     * tile streams. With uncompressed BitmapUpdate, frame markers are
+     * unnecessary and harmful. */
     for (size_t i = 0; i < target_count; i++)
     {
         Viewer* viewer = targets[i];
+        rdpSettings* settings = viewer->peer ? viewer->peer->context ? viewer->peer->context->settings : NULL : NULL;
+        BOOL has_codec = FALSE;
+
+        if (settings)
+        {
+            has_codec = freerdp_settings_get_bool(settings, FreeRDP_RemoteFxCodec) ||
+                        freerdp_settings_get_bool(settings, FreeRDP_NSCodec);
+        }
+
+        if (!has_codec)
+            continue;
 
         EnterCriticalSection(&viewer->send_lock);
         if (viewer->peer && viewer->connected && viewer->activated &&
-            (!viewer->needs_full_refresh || refresh_in_flight) &&
             viewer_send_frame_marker(viewer, marker))
             sent_any = TRUE;
         LeaveCriticalSection(&viewer->send_lock);

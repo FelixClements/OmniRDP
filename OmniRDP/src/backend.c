@@ -484,16 +484,15 @@ static BOOL backend_forward_surface_bits(BackendClient* client, const SURFACE_BI
     if (!client || !cmd)
         return FALSE;
 
-    /* Forward RemoteFX SurfaceBits to viewers.
-     * Other codecs (NSCodec, Planar, etc.) are decoded by GDI and not forwarded. */
-    if (cmd->bmp.codecID != RDP_CODEC_ID_REMOTEFX)
+/* SurfaceBits forwarding disabled — codecs are disabled so Windows Server
+     * sends uncompressed BitmapUpdate instead. Drop any SurfaceBits that
+     * might still arrive (e.g. from a cached codec negotiation). */
+    if (cmd->bmp.codecID != RDP_CODEC_ID_NONE)
     {
-        WLog_WARN(TAG,
-                  "Dropping SurfaceBits rect=(%u,%u)-(%u,%u) size=%ux%u bpp=%u payload=%" PRIu32
-                  " codec=%s(%" PRIu16 ") reason=rfx-only-forward-filter",
+        WLog_DBG(TAG,
+                  "Dropping SurfaceBits rect=(%u,%u)-(%u,%u) codec=%s(%" PRIu16
+                  ") reason=codecs-disabled",
                   cmd->destLeft, cmd->destTop, cmd->destRight, cmd->destBottom,
-                  cmd->bmp.width, cmd->bmp.height, cmd->bmp.bpp,
-                  cmd->bmp.bitmapDataLength,
                   backend_surface_bits_codec_name(cmd->bmp.codecID),
                   cmd->bmp.codecID);
         return TRUE;
@@ -1330,9 +1329,11 @@ BackendClient* backend_init(void)
         return NULL;
     }
     
-    /* Enable RemoteFX only for the classic SurfaceBits path.
-     * RFX uses 64x64 tiles and is the only forwarded codec in this configuration. */
-    freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, TRUE);
+/* Disable all codec-based SurfaceBits (NSCodec, RemoteFX).
+     * Windows Server falls back to uncompressed BitmapUpdate which
+     * batches all rectangles into a single PDU — much faster than
+     * 510 individual 64x64 tile PDUs per frame. */
+    freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
