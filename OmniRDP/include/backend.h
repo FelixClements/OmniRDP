@@ -13,6 +13,9 @@
 #include <freerdp/client.h>
 #include <freerdp/client/rdpgfx.h>
 #include <freerdp/pointer.h>
+#include <freerdp/update.h>
+#include <freerdp/primary.h>
+#include <freerdp/secondary.h>
 #include <winpr/synch.h>
 #include <winpr/wtypes.h>
 #include "pointer_shape.h"
@@ -61,8 +64,31 @@ typedef struct BackendClient {
     PointerShapeCache* pointer_shape_cache;
     PointerShapeEntry* active_pointer_shape;
     CRITICAL_SECTION pointer_lock;
+    BOOL (*orig_begin_paint)(rdpContext* context);
+    BOOL (*orig_end_paint)(rdpContext* context);
+    BOOL (*orig_bitmap_update)(rdpContext* context, const BITMAP_UPDATE* bitmap);
     BOOL (*orig_surface_bits)(rdpContext* context, const SURFACE_BITS_COMMAND* cmd);
     BOOL (*orig_surface_frame_marker)(rdpContext* context, const SURFACE_FRAME_MARKER* marker);
+    BOOL (*orig_primary_order_info)(rdpContext* context, const ORDER_INFO* order_info,
+                                    const char* order_name);
+    BOOL (*orig_secondary_cache_order_info)(rdpContext* context, INT16 orderLength,
+                                            UINT16 extraFlags, UINT8 orderType,
+                                            const char* orderName);
+    UINT64 begin_paint_count;
+    UINT64 end_paint_count;
+    UINT64 bitmap_update_count;
+    UINT64 primary_order_info_count;
+    UINT64 secondary_cache_order_info_count;
+    UINT64 forwarded_bitmap_update_count;
+    UINT64 forwarded_bitmap_update_rectangles;
+    UINT64 forwarded_bitmap_update_bytes;
+    UINT64 bitmap_update_callback_time_total_us;
+    UINT64 bitmap_update_callback_time_max_us;
+    UINT64 bitmap_update_publish_time_total_us;
+    UINT64 bitmap_update_publish_time_max_us;
+    UINT64 bitmap_update_batches_total;
+    UINT64 bitmap_update_rectangles_total;
+    UINT64 bitmap_update_payload_bytes_total;
     UINT64 forwarded_surface_bits_count;
     UINT64 forwarded_surface_bits_bytes;
     UINT64 forwarded_frame_marker_count;

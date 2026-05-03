@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <inttypes.h>
 #ifdef _WIN32
 #include <winsock2.h>
 #endif
@@ -136,6 +137,7 @@ int main(int argc, char* argv[])
 
     time_t last_stats = time(NULL);
     UINT64 last_tile_count = 0;
+    UINT64 last_bitmap_batch_count = 0;
 
     while (running && backend_is_connected(client))
     {
@@ -152,13 +154,38 @@ int main(int argc, char* argv[])
             const UINT64 tile_count = client->forwarded_surface_bits_count;
             const UINT64 total_bytes = client->forwarded_surface_bits_bytes;
             const UINT64 frame_markers = client->forwarded_frame_marker_count;
+            const UINT64 bitmap_batches = client->bitmap_update_batches_total;
+            const UINT64 bitmap_rectangles = client->bitmap_update_rectangles_total;
+            const UINT64 bitmap_bytes = client->bitmap_update_payload_bytes_total;
+            const double avg_rects_per_batch =
+                (bitmap_batches > 0) ? ((double)bitmap_rectangles / (double)bitmap_batches) : 0.0;
+            const double avg_callback_us =
+                (bitmap_batches > 0)
+                    ? ((double)client->bitmap_update_callback_time_total_us /
+                       (double)bitmap_batches)
+                    : 0.0;
+            const double avg_publish_us =
+                (bitmap_batches > 0)
+                    ? ((double)client->bitmap_update_publish_time_total_us /
+                       (double)bitmap_batches)
+                    : 0.0;
             const double fps = (seconds > 0.0) ? ((double)(tile_count - last_tile_count) / seconds) : 0.0;
 
-            if (tile_count != last_tile_count)
+            if ((tile_count != last_tile_count) || (bitmap_batches != last_bitmap_batch_count))
             {
-                printf("[Stats] Tiles: %" PRIu64 " | Bytes: %" PRIu64 " | Markers: %" PRIu64 " | Rate: %.1f updates/s\n",
-                       tile_count, total_bytes, frame_markers, fps);
+                printf("[Stats] Tiles: %" PRIu64 " | Bytes: %" PRIu64
+                       " | Markers: %" PRIu64 " | Rate: %.1f updates/s"
+                       " | Bitmap batches: %" PRIu64 " rects: %" PRIu64
+                       " bytes: %" PRIu64 " avgRectBatch: %.2f"
+                       " avgCbUs: %.1f avgPubUs: %.1f"
+                       " maxCbUs: %" PRIu64 " maxPubUs: %" PRIu64 "\n",
+                       tile_count, total_bytes, frame_markers, fps,
+                       bitmap_batches, bitmap_rectangles, bitmap_bytes, avg_rects_per_batch,
+                       avg_callback_us, avg_publish_us,
+                       client->bitmap_update_callback_time_max_us,
+                       client->bitmap_update_publish_time_max_us);
                 last_tile_count = tile_count;
+                last_bitmap_batch_count = bitmap_batches;
             }
             else
             {

@@ -33,6 +33,7 @@ typedef struct
 } ViewerLateJoinPolicyInputs;
 
 #define VIEWER_SEVERE_LAG_INTERVALS 96U
+#define VIEWER_THROTTLE_LAG_INTERVALS 16U
 
 BOOL viewer_input_try_acquire(ViewerInputOwnershipState* state, UINT32 viewer_id,
                               BOOL viewer_connected, BOOL viewer_activated,

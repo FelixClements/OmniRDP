@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(multiplexer-v2 VERSION 1.0.0 LANGUAGES C)
+project(OmniRDP VERSION 1.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -59,7 +59,7 @@ find_library(FREERDP_SERVER_LIB NAMES freerdp-server3 freerdp-server HINTS ${FRE
 find_library(WINPR_LIB NAMES winpr3 winpr HINTS ${FREERDP_LIB_HINTS} REQUIRED)
 
 # Executable
-add_executable(multiplexer-v2 ${SOURCES} ${HEADERS})
+add_executable(OmniRDP ${SOURCES} ${HEADERS})
 
 # Link libraries
 set(MULTIPLEXER_LIBS
@@ -94,10 +94,10 @@ else()
     endif()
 endif()
 
-target_link_libraries(multiplexer-v2 ${MULTIPLEXER_LIBS})
+target_link_libraries(OmniRDP ${MULTIPLEXER_LIBS})
 
 # Install
-install(TARGETS multiplexer-v2
+install(TARGETS OmniRDP
     RUNTIME DESTINATION bin
 )
 

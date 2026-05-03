@@ -12,8 +12,13 @@
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/channels/drdynvc.h>
 #include <winpr/wlog.h>
+#include <inttypes.h>
 #include <string.h>
 #include <stdlib.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define TAG "multiplexer.viewer"
 #define INPUT_IDLE_TIMEOUT_MS 2500U
@@ -33,6 +38,262 @@ static BOOL viewer_gfx_request_backend_refresh(ViewerServer* server, Viewer* vie
 static BOOL viewer_gfx_bootstrap_direct_live(ViewerServer* server, Viewer* viewer, UINT64 now,
                                              const char* reason);
 static void viewer_gfx_queue_clear_locked(ViewerGraphicsContext* gfx);
+static UINT64 viewer_perf_now_us(void);
+static BOOL viewer_should_log_bitmap_perf(UINT64 batch_count, UINT64 publish_us,
+                                          UINT32 send_failed_count);
+static BOOL viewer_send_bitmap_update(Viewer* viewer, const BITMAP_UPDATE* bitmap);
+
+static UINT64 viewer_perf_now_us(void)
+{
+#ifdef _WIN32
+    static LARGE_INTEGER frequency = { 0 };
+    LARGE_INTEGER counter = { 0 };
+
+    if (frequency.QuadPart == 0)
+    {
+        if (!QueryPerformanceFrequency(&frequency) || (frequency.QuadPart <= 0))
+            return platform_get_timestamp_ms() * 1000ULL;
+    }
+
+    if (!QueryPerformanceCounter(&counter))
+        return platform_get_timestamp_ms() * 1000ULL;
+
+    return (UINT64)((counter.QuadPart * 1000000ULL) / frequency.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((UINT64)ts.tv_sec * 1000000ULL) + ((UINT64)ts.tv_nsec / 1000ULL);
+#endif
+}
+
+static BOOL viewer_should_log_bitmap_perf(UINT64 batch_count, UINT64 publish_us,
+                                          UINT32 send_failed_count)
+{
+    return (batch_count <= 5) || ((batch_count % 100) == 0) || (publish_us >= 5000ULL) ||
+           (send_failed_count > 0);
+}
+
+/* ---- Classic bitmap queue: deep-copy helpers ---- */
+
+static ViewerClassicEvent* viewer_classic_event_new(const BITMAP_UPDATE* bitmap)
+{
+    ViewerClassicEvent* event = NULL;
+    UINT32 i = 0;
+
+    if (!bitmap)
+        return NULL;
+
+    event = (ViewerClassicEvent*)calloc(1, sizeof(ViewerClassicEvent));
+    if (!event)
+        return NULL;
+
+    event->bitmap = (BITMAP_UPDATE*)calloc(1, sizeof(BITMAP_UPDATE));
+    if (!event->bitmap)
+    {
+        free(event);
+        return NULL;
+    }
+
+    /* Shallow-copy top-level fields */
+    event->bitmap->number = bitmap->number;
+    event->bitmap->skipCompression = bitmap->skipCompression;
+
+    if (bitmap->number == 0)
+    {
+        event->bitmap->rectangles = NULL;
+        return event;
+    }
+
+    /* Deep-copy the rectangles array */
+    event->bitmap->rectangles =
+        (BITMAP_DATA*)calloc(bitmap->number, sizeof(BITMAP_DATA));
+    if (!event->bitmap->rectangles)
+    {
+        free(event->bitmap);
+        free(event);
+        return NULL;
+    }
+
+    for (i = 0; i < bitmap->number; i++)
+    {
+        /* Copy inline fields */
+        event->bitmap->rectangles[i] = bitmap->rectangles[i];
+
+        /* Deep-copy the bitmap data stream */
+        if (bitmap->rectangles[i].bitmapLength > 0 && bitmap->rectangles[i].bitmapDataStream)
+        {
+            event->bitmap->rectangles[i].bitmapDataStream =
+                (BYTE*)malloc(bitmap->rectangles[i].bitmapLength);
+            if (!event->bitmap->rectangles[i].bitmapDataStream)
+            {
+                /* Free already-allocated rectangles on failure */
+                for (UINT32 j = 0; j < i; j++)
+                {
+                    free(event->bitmap->rectangles[j].bitmapDataStream);
+                    event->bitmap->rectangles[j].bitmapDataStream = NULL;
+                }
+                free(event->bitmap->rectangles);
+                free(event->bitmap);
+                free(event);
+                return NULL;
+            }
+            memcpy(event->bitmap->rectangles[i].bitmapDataStream,
+                   bitmap->rectangles[i].bitmapDataStream,
+                   bitmap->rectangles[i].bitmapLength);
+        }
+        else
+        {
+            event->bitmap->rectangles[i].bitmapDataStream = NULL;
+        }
+    }
+
+    return event;
+}
+
+static void viewer_classic_event_free(ViewerClassicEvent* event)
+{
+    UINT32 i = 0;
+
+    if (!event)
+        return;
+
+    if (event->bitmap)
+    {
+        if (event->bitmap->rectangles)
+        {
+            for (i = 0; i < event->bitmap->number; i++)
+            {
+                free(event->bitmap->rectangles[i].bitmapDataStream);
+            }
+            free(event->bitmap->rectangles);
+        }
+        free(event->bitmap);
+    }
+    free(event);
+}
+
+/* ---- Classic bitmap queue: queue operations ---- */
+
+/* Drop the oldest entry from the classic queue. Caller must hold send_lock. */
+static void viewer_classic_queue_drop_oldest_locked(Viewer* viewer)
+{
+    ViewerClassicEvent* oldest = NULL;
+
+    if (viewer->classic_queue_count == 0)
+        return;
+
+    oldest = viewer->classic_queue[viewer->classic_queue_head];
+    viewer->classic_queue[viewer->classic_queue_head] = NULL;
+    viewer->classic_queue_head =
+        (viewer->classic_queue_head + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
+    viewer->classic_queue_count--;
+
+    viewer_classic_event_free(oldest);
+    viewer->bitmap_queue_dropped++;
+}
+
+static void viewer_classic_queue_clear_locked(Viewer* viewer)
+{
+    while (viewer->classic_queue_count > 0)
+        viewer_classic_queue_drop_oldest_locked(viewer);
+}
+
+/* Enqueue a deep-copied BITMAP_UPDATE for a viewer.
+ * Called from the backend thread under viewer->send_lock.
+ * Returns TRUE on success, FALSE if the viewer should be disconnected. */
+static BOOL viewer_classic_enqueue_locked(Viewer* viewer, const BITMAP_UPDATE* bitmap)
+{
+    ViewerClassicEvent* event = NULL;
+
+    if (!viewer || !bitmap)
+        return FALSE;
+
+    /* If queue is full, drop oldest entries to make room */
+    while (viewer->classic_queue_count >= VIEWER_CLASSIC_QUEUE_CAPACITY)
+    {
+        WLog_WARN(TAG,
+                  "Viewer %u classic queue full (%u entries), dropping oldest",
+                  viewer->id, viewer->classic_queue_count);
+        viewer_classic_queue_drop_oldest_locked(viewer);
+
+        /* After dropping, mark viewer for full refresh to resync */
+        viewer->needs_full_refresh = TRUE;
+        viewer->full_refresh_deadline_ts =
+            platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
+    }
+
+    event = viewer_classic_event_new(bitmap);
+    if (!event)
+    {
+        WLog_ERR(TAG, "Viewer %u failed to allocate classic event", viewer->id);
+        return FALSE;
+    }
+
+    viewer->classic_queue[viewer->classic_queue_tail] = event;
+    viewer->classic_queue_tail =
+        (viewer->classic_queue_tail + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
+    viewer->classic_queue_count++;
+    viewer->bitmap_updates_queued++;
+
+    /* Signal the viewer thread that a new event is available */
+    if (viewer->classic_event)
+        SetEvent(viewer->classic_event);
+
+    return TRUE;
+}
+
+/* Enqueue a pre-built event into the viewer's classic queue.
+ * Caller must hold send_lock. The event must have been deep-copied
+ * by the caller before acquiring the lock. Returns TRUE on success. */
+static BOOL viewer_classic_enqueue_event_locked(Viewer* viewer, ViewerClassicEvent* event)
+{
+    if (!viewer || !event)
+        return FALSE;
+
+    /* If queue is full, drop oldest entries to make room */
+    while (viewer->classic_queue_count >= VIEWER_CLASSIC_QUEUE_CAPACITY)
+    {
+        WLog_WARN(TAG,
+                  "Viewer %u classic queue full (%u entries), dropping oldest",
+                  viewer->id, viewer->classic_queue_count);
+        viewer_classic_queue_drop_oldest_locked(viewer);
+
+        /* After dropping, mark viewer for full refresh to resync */
+        viewer->needs_full_refresh = TRUE;
+        viewer->full_refresh_deadline_ts =
+            platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
+    }
+
+    viewer->classic_queue[viewer->classic_queue_tail] = event;
+    viewer->classic_queue_tail =
+        (viewer->classic_queue_tail + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
+    viewer->classic_queue_count++;
+    viewer->bitmap_updates_queued++;
+
+    /* Signal the viewer thread that a new event is available */
+    if (viewer->classic_event)
+        SetEvent(viewer->classic_event);
+
+    return TRUE;
+}
+
+/* Dequeue the oldest event from the classic queue. Caller must hold send_lock.
+ * Returns NULL if queue is empty. Caller must free the returned event. */
+static ViewerClassicEvent* viewer_classic_dequeue_locked(Viewer* viewer)
+{
+    ViewerClassicEvent* event = NULL;
+
+    if (!viewer || (viewer->classic_queue_count == 0))
+        return NULL;
+
+    event = viewer->classic_queue[viewer->classic_queue_head];
+    viewer->classic_queue[viewer->classic_queue_head] = NULL;
+    viewer->classic_queue_head =
+        (viewer->classic_queue_head + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
+    viewer->classic_queue_count--;
+
+    return event;
+}
 
 static const char* viewer_join_state_name(ViewerJoinState state)
 {
@@ -1781,6 +2042,127 @@ static BOOL viewer_pump_gfx(Viewer* viewer)
     return TRUE;
 }
 
+/* Drain the classic bitmap queue and send updates to the viewer.
+ * Called from the viewer thread. Returns TRUE on success, FALSE on
+ * fatal error (viewer should be disconnected). */
+static BOOL viewer_pump_classic(Viewer* viewer)
+{
+    ViewerClassicEvent* event = NULL;
+    UINT32 pumped = 0;
+    UINT32 coalesced = 0;
+    BOOL classic_fallback = FALSE;
+
+    if (!viewer)
+        return FALSE;
+
+    /* Only pump for classic-fallback viewers */
+    EnterCriticalSection(&viewer->gfx.lock);
+    classic_fallback = viewer_gfx_negotiation_is_classic_fallback(&viewer->gfx);
+    LeaveCriticalSection(&viewer->gfx.lock);
+
+    if (!classic_fallback)
+        return TRUE;
+
+    for (;;)
+    {
+        /* Option C: Frame coalescing — drain the entire queue and merge
+         * multiple BITMAP_UPDATEs into a single send when possible. */
+        EnterCriticalSection(&viewer->send_lock);
+
+        /* Skip if viewer needs full refresh (will resync via refresh path) */
+        if (viewer->needs_full_refresh)
+        {
+            /* Drop all queued updates — they're stale relative to the
+             * upcoming full refresh */
+            if (viewer->classic_queue_count > 0)
+            {
+                WLog_INFO(TAG,
+                          "Viewer %u pump-classic: dropping %" PRIu32
+                          " queued updates (needs full refresh)",
+                          viewer->id, viewer->classic_queue_count);
+                viewer_classic_queue_clear_locked(viewer);
+            }
+            LeaveCriticalSection(&viewer->send_lock);
+            break;
+        }
+
+        event = viewer_classic_dequeue_locked(viewer);
+        LeaveCriticalSection(&viewer->send_lock);
+
+        if (!event)
+            break;
+
+        /* Option C: Coalesce — if there are more entries in the queue,
+         * merge their rectangles into this event's bitmap before sending. */
+        EnterCriticalSection(&viewer->send_lock);
+        while (viewer->classic_queue_count > 0)
+        {
+            ViewerClassicEvent* next = viewer_classic_dequeue_locked(viewer);
+            UINT32 old_number = 0;
+            BITMAP_DATA* new_rects = NULL;
+            UINT32 j = 0;
+
+            if (!next)
+                break;
+
+            old_number = event->bitmap->number;
+            new_rects = (BITMAP_DATA*)realloc(
+                event->bitmap->rectangles,
+                (old_number + next->bitmap->number) * sizeof(BITMAP_DATA));
+            if (!new_rects)
+            {
+                /* Coalescing failed — send what we have and queue the rest */
+                viewer_classic_event_free(next);
+                break;
+            }
+
+            event->bitmap->rectangles = new_rects;
+            for (j = 0; j < next->bitmap->number; j++)
+            {
+                event->bitmap->rectangles[old_number + j] = next->bitmap->rectangles[j];
+                /* Transfer ownership of bitmapDataStream to avoid double-free */
+                next->bitmap->rectangles[j].bitmapDataStream = NULL;
+                next->bitmap->rectangles[j].bitmapLength = 0;
+            }
+            event->bitmap->number += next->bitmap->number;
+            coalesced++;
+
+            /* Free the next event struct (but not the transferred data) */
+            free(next->bitmap->rectangles);
+            next->bitmap->rectangles = NULL;
+            next->bitmap->number = 0;
+            viewer_classic_event_free(next);
+        }
+        LeaveCriticalSection(&viewer->send_lock);
+
+        /* Send the (possibly coalesced) bitmap update.
+         * The FreeRDP send call takes 1-3ms and does not need send_lock
+         * protection — rdp_update_lock provides FreeRDP's own synchronization,
+         * and the event data is locally owned after dequeue. Only the
+         * counter updates need send_lock. */
+        if (!viewer_send_bitmap_update(viewer, event->bitmap))
+        {
+            WLog_WARN(TAG, "Viewer %u pump-classic: send failed", viewer->id);
+            viewer_classic_event_free(event);
+            /* Send failure is not fatal — the viewer may recover */
+            continue;
+        }
+
+        pumped++;
+        viewer_classic_event_free(event);
+    }
+
+    if (pumped > 0)
+    {
+        WLog_INFO(TAG,
+                  "Viewer %u pump-classic: delivered %" PRIu32
+                  " updates (coalesced=%" PRIu32 ")",
+                  viewer->id, pumped, coalesced);
+    }
+
+    return TRUE;
+}
+
 static BOOL viewer_server_publish_gfx_event(BackendClient* backend, ViewerGfxEvent* event)
 {
     ViewerServer* server = g_viewer_server;
@@ -2010,10 +2392,31 @@ static BOOL viewer_send_state_init(Viewer* viewer)
     viewer->packets_sent = 0;
     viewer->packets_failed = 0;
     viewer->write_block_events = 0;
+    viewer->bitmap_updates_sent = 0;
+    viewer->bitmap_updates_failed = 0;
+    viewer->bitmap_rectangles_sent = 0;
+    viewer->bitmap_payload_bytes_sent = 0;
+    viewer->bitmap_write_block_events = 0;
+    viewer->bitmap_send_time_total_us = 0;
+    viewer->bitmap_send_time_max_us = 0;
+    viewer->bitmap_updates_skipped_writeblock = 0;
+    viewer->bitmap_updates_skipped_throttle = 0;
+    viewer->bitmap_updates_queued = 0;
+    viewer->bitmap_queue_dropped = 0;
     viewer->consecutive_lag_intervals = 0;
     viewer->sustained_lag_start_ts = 0;
     viewer->last_pointer_position_generation = 0;
     viewer->last_pointer_shape_generation = 0;
+    viewer->classic_queue_head = 0;
+    viewer->classic_queue_tail = 0;
+    viewer->classic_queue_count = 0;
+    memset(viewer->classic_queue, 0, sizeof(viewer->classic_queue));
+    viewer->classic_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (!viewer->classic_event)
+    {
+        DeleteCriticalSection(&viewer->send_lock);
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -2021,6 +2424,17 @@ static void viewer_send_state_uninit(Viewer* viewer)
 {
     if (!viewer || !viewer->gfx.initialized)
         return;
+
+    /* Free any remaining classic queue entries */
+    EnterCriticalSection(&viewer->send_lock);
+    viewer_classic_queue_clear_locked(viewer);
+    LeaveCriticalSection(&viewer->send_lock);
+
+    if (viewer->classic_event)
+    {
+        CloseHandle(viewer->classic_event);
+        viewer->classic_event = NULL;
+    }
 
     DeleteCriticalSection(&viewer->send_lock);
 }
@@ -2228,6 +2642,52 @@ static BOOL viewer_send_surface_bits(Viewer* viewer, const SURFACE_BITS_COMMAND*
         viewer->packets_sent++;
     else
         viewer->packets_failed++;
+    return ret;
+}
+
+static BOOL viewer_send_bitmap_update(Viewer* viewer, const BITMAP_UPDATE* bitmap)
+{
+    BOOL ret = FALSE;
+    freerdp_peer* peer = viewer ? viewer->peer : NULL;
+    UINT64 send_started_us = 0;
+    UINT64 send_us = 0;
+    UINT64 payload_bytes = 0;
+    UINT32 i = 0;
+
+    if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
+        return FALSE;
+
+    for (i = 0; i < bitmap->number; i++)
+        payload_bytes += bitmap->rectangles[i].bitmapLength;
+
+if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer))
+    {
+        viewer->write_block_events++;
+        viewer->bitmap_write_block_events++;
+        viewer->bitmap_updates_skipped_writeblock++;
+        return FALSE;
+    }
+
+    send_started_us = viewer_perf_now_us();
+    rdp_update_lock(peer->context->update);
+    IFCALLRET(peer->context->update->BitmapUpdate, ret, peer->context, bitmap);
+    rdp_update_unlock(peer->context->update);
+    send_us = viewer_perf_now_us() - send_started_us;
+    viewer->bitmap_send_time_total_us += send_us;
+    if (send_us > viewer->bitmap_send_time_max_us)
+        viewer->bitmap_send_time_max_us = send_us;
+    if (ret)
+    {
+        viewer->packets_sent++;
+        viewer->bitmap_updates_sent++;
+        viewer->bitmap_rectangles_sent += bitmap->number;
+        viewer->bitmap_payload_bytes_sent += payload_bytes;
+    }
+    else
+    {
+        viewer->packets_failed++;
+        viewer->bitmap_updates_failed++;
+    }
     return ret;
 }
 
@@ -2856,11 +3316,23 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg)
                 break;
             }
 
+            /* Add classic_event to the wait set so the viewer thread wakes
+             * immediately when a bitmap update is enqueued (Option B). */
+            if (viewer->classic_event && (wait_count < MAXIMUM_WAIT_OBJECTS))
+            {
+                wait_objects[wait_count] = viewer->classic_event;
+                wait_count++;
+            }
+
             wait_status = WaitForMultipleObjects(wait_count, wait_objects, FALSE, wait_timeout_ms);
             if (wait_status == WAIT_TIMEOUT)
                 wait_status = WAIT_OBJECT_0;
             if (wait_status == WAIT_FAILED)
                 break;
+
+            /* Reset the classic event signal — we'll drain the queue below */
+            if (viewer->classic_event)
+                ResetEvent(viewer->classic_event);
         }
         else if (peer && peer->CheckFileDescriptor)
         {
@@ -2947,6 +3419,10 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg)
             break;
 
         if (!viewer_pump_gfx(viewer))
+            break;
+
+        /* Drain the classic bitmap queue (Option B: async delivery) */
+        if (!viewer_pump_classic(viewer))
             break;
 
         (void)viewer_forward_pointer(viewer, FALSE);
@@ -3220,12 +3696,12 @@ static BOOL peer_accepted(freerdp_listener* listener, freerdp_peer* peer)
                                     ENCRYPTION_LEVEL_CLIENT_COMPATIBLE);
         freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
         freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, TRUE);
-        freerdp_settings_set_bool(settings, FreeRDP_NSCodec, TRUE);
-        freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, TRUE);
+        freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE);
+        freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
-        freerdp_settings_set_bool(settings, FreeRDP_NSCodec, TRUE);
+        freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
         freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
@@ -3427,6 +3903,11 @@ BOOL viewer_server_publish_surface_bits(BackendClient* backend, const SURFACE_BI
     size_t target_count = 0;
     BOOL sent_any = FALSE;
     BOOL refresh_in_flight = FALSE;
+    UINT32 classic_target_count = 0;
+    UINT32 gated_full_refresh_count = 0;
+    UINT32 send_failed_count = 0;
+    UINT32 sent_count = 0;
+    UINT32 first_gated_viewer_id = 0;
 
     if (!server || (server->backend != backend) || !cmd)
         return FALSE;
@@ -3448,19 +3929,252 @@ BOOL viewer_server_publish_surface_bits(BackendClient* backend, const SURFACE_BI
             continue;
 
         targets[target_count++] = viewer;
+        classic_target_count++;
     }
     LeaveCriticalSection(&server->lock);
 
     for (size_t i = 0; i < target_count; i++)
     {
         Viewer* viewer = targets[i];
+        BOOL ready_to_send = FALSE;
+        BOOL sent = FALSE;
 
         EnterCriticalSection(&viewer->send_lock);
-        if (viewer->peer && viewer->connected && viewer->activated &&
-            (!viewer->needs_full_refresh || refresh_in_flight) &&
-            viewer_send_surface_bits(viewer, cmd))
+        ready_to_send = viewer->peer && viewer->connected && viewer->activated;
+        if (ready_to_send && viewer->needs_full_refresh && !refresh_in_flight)
+        {
+            gated_full_refresh_count++;
+            if (first_gated_viewer_id == 0)
+                first_gated_viewer_id = viewer->id;
+        }
+        else if (ready_to_send)
+        {
+            sent = viewer_send_surface_bits(viewer, cmd);
+            if (sent)
+                sent_count++;
+            else
+                send_failed_count++;
+        }
+
+        if (sent)
             sent_any = TRUE;
         LeaveCriticalSection(&viewer->send_lock);
+    }
+
+    if ((classic_target_count == 0) || (gated_full_refresh_count > 0) ||
+        (send_failed_count > 0) || (sent_count == 0))
+    {
+        WLog_WARN(TAG,
+                  "Classic SurfaceBits publish summary rect=(%u,%u)-(%u,%u) payload=%" PRIu32
+                  " codecId=%" PRIu16 " classicTargets=%" PRIu32
+                  " gatedFullRefresh=%" PRIu32 " firstGatedViewer=%" PRIu32
+                  " sendFailed=%" PRIu32 " sent=%" PRIu32
+                  " refreshInFlight=%d",
+                  cmd->destLeft, cmd->destTop, cmd->destRight, cmd->destBottom,
+                  cmd->bmp.bitmapDataLength, cmd->bmp.codecID,
+                  classic_target_count, gated_full_refresh_count,
+                  first_gated_viewer_id, send_failed_count, sent_count,
+                  refresh_in_flight);
+    }
+
+    return sent_any;
+}
+
+BOOL viewer_server_publish_bitmap_update(BackendClient* backend, const BITMAP_UPDATE* bitmap)
+{
+    ViewerServer* server = g_viewer_server;
+    Viewer* targets[MAX_VIEWERS] = { 0 };
+    size_t target_count = 0;
+    BOOL sent_any = FALSE;
+    BOOL refresh_in_flight = FALSE;
+    UINT32 classic_target_count = 0;
+    UINT32 gated_full_refresh_count = 0;
+    UINT32 throttled_count = 0;
+    UINT32 enqueue_failed_count = 0;
+    UINT32 enqueued_count = 0;
+    UINT32 first_gated_viewer_id = 0;
+    UINT32 first_throttled_viewer_id = 0;
+    UINT32 first_rect_payload = 0;
+    UINT64 total_payload_bytes = 0;
+    UINT64 publish_started_us = 0;
+    UINT64 publish_us = 0;
+    UINT32 rect_index = 0;
+
+    if (!server || (server->backend != backend) || !bitmap)
+        return FALSE;
+
+    refresh_in_flight = backend_full_refresh_in_flight(server->backend);
+    if (bitmap->number > 0)
+        first_rect_payload = bitmap->rectangles[0].bitmapLength;
+    for (rect_index = 0; rect_index < bitmap->number; rect_index++)
+        total_payload_bytes += bitmap->rectangles[rect_index].bitmapLength;
+
+    publish_started_us = viewer_perf_now_us();
+
+    EnterCriticalSection(&server->lock);
+    for (int i = 0; i < MAX_VIEWERS; i++)
+    {
+        Viewer* viewer = &server->viewers[i];
+        BOOL classic_fallback = FALSE;
+        if (!viewer->peer || !viewer->connected || !viewer->activated)
+            continue;
+
+        EnterCriticalSection(&viewer->gfx.lock);
+        classic_fallback = viewer_gfx_negotiation_is_classic_fallback(&viewer->gfx);
+        LeaveCriticalSection(&viewer->gfx.lock);
+        if (!classic_fallback)
+            continue;
+
+        targets[target_count++] = viewer;
+        classic_target_count++;
+    }
+    LeaveCriticalSection(&server->lock);
+
+    for (size_t i = 0; i < target_count; i++)
+    {
+        Viewer* viewer = targets[i];
+        BOOL ready_to_send = FALSE;
+        BOOL enqueued = FALSE;
+        BOOL throttled = FALSE;
+        ViewerClassicEvent* event = NULL;
+
+        /* Pre-build the deep copy outside send_lock to minimize lock hold time.
+         * The bitmap pointer is const and immutable during this call. */
+        EnterCriticalSection(&viewer->send_lock);
+        ready_to_send = viewer->peer && viewer->connected && viewer->activated;
+        LeaveCriticalSection(&viewer->send_lock);
+
+        if (!ready_to_send)
+            continue;
+
+        if (viewer->needs_full_refresh && !refresh_in_flight)
+        {
+            /* The viewer needs a full refresh but no refresh is in flight.
+             * This happens when:
+             * 1. The viewer just joined and the backend refresh has already
+             *    completed (backend_mark_full_refresh_complete was called)
+             * 2. The viewer was throttled and the refresh completed
+             * In the classic path there are no frame markers to clear
+             * needs_full_refresh, so we clear it here and enqueue the
+             * current bitmap update. The viewer will receive this and
+             * subsequent updates normally. */
+            EnterCriticalSection(&viewer->send_lock);
+            viewer->needs_full_refresh = FALSE;
+            viewer->full_refresh_deadline_ts = 0;
+            LeaveCriticalSection(&viewer->send_lock);
+            gated_full_refresh_count++;
+            if (first_gated_viewer_id == 0)
+                first_gated_viewer_id = viewer->id;
+
+            /* Deep copy outside lock, then enqueue under lock */
+            event = viewer_classic_event_new(bitmap);
+            if (!event)
+            {
+                enqueue_failed_count++;
+                continue;
+            }
+            EnterCriticalSection(&viewer->send_lock);
+            enqueued = viewer_classic_enqueue_event_locked(viewer, event);
+            LeaveCriticalSection(&viewer->send_lock);
+            if (enqueued)
+                enqueued_count++;
+            else
+            {
+                enqueue_failed_count++;
+                viewer_classic_event_free(event);
+            }
+        }
+        else if (viewer->needs_full_refresh && refresh_in_flight)
+        {
+            /* A full refresh is in flight — this bitmap IS the refresh data.
+             * Clear the gate and enqueue so the viewer receives it. */
+            EnterCriticalSection(&viewer->send_lock);
+            viewer->needs_full_refresh = FALSE;
+            viewer->full_refresh_deadline_ts = 0;
+            LeaveCriticalSection(&viewer->send_lock);
+
+            event = viewer_classic_event_new(bitmap);
+            if (!event)
+            {
+                enqueue_failed_count++;
+                continue;
+            }
+            EnterCriticalSection(&viewer->send_lock);
+            enqueued = viewer_classic_enqueue_event_locked(viewer, event);
+            LeaveCriticalSection(&viewer->send_lock);
+            if (enqueued)
+                enqueued_count++;
+            else
+            {
+                enqueue_failed_count++;
+                viewer_classic_event_free(event);
+            }
+        }
+        else if (viewer->consecutive_lag_intervals >= VIEWER_THROTTLE_LAG_INTERVALS)
+        {
+            /* Per-viewer throttle: skip updates for slow viewers.
+             * They will resync via full refresh when they recover. */
+            EnterCriticalSection(&viewer->send_lock);
+            viewer->bitmap_updates_skipped_throttle++;
+            viewer->needs_full_refresh = TRUE;
+            viewer->full_refresh_deadline_ts =
+                platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
+            LeaveCriticalSection(&viewer->send_lock);
+            throttled = TRUE;
+            throttled_count++;
+            if (first_throttled_viewer_id == 0)
+                first_throttled_viewer_id = viewer->id;
+        }
+        else
+        {
+            /* Option B: Enqueue the bitmap update for async delivery
+             * by the viewer thread. Deep copy outside lock, then
+             * enqueue under lock to minimize send_lock hold time. */
+            event = viewer_classic_event_new(bitmap);
+            if (!event)
+            {
+                enqueue_failed_count++;
+                continue;
+            }
+            EnterCriticalSection(&viewer->send_lock);
+            enqueued = viewer_classic_enqueue_event_locked(viewer, event);
+            LeaveCriticalSection(&viewer->send_lock);
+            if (enqueued)
+                enqueued_count++;
+            else
+            {
+                enqueue_failed_count++;
+                viewer_classic_event_free(event);
+            }
+        }
+
+        if (enqueued)
+            sent_any = TRUE;
+
+        if (throttled)
+            (void)backend_request_full_refresh(server->backend);
+    }
+
+    publish_us = viewer_perf_now_us() - publish_started_us;
+
+    if ((classic_target_count == 0) || (gated_full_refresh_count > 0) ||
+        (throttled_count > 0) || (enqueue_failed_count > 0) || (enqueued_count == 0) ||
+        viewer_should_log_bitmap_perf(backend->bitmap_update_batches_total + 1ULL, publish_us,
+                                      enqueue_failed_count))
+    {
+        WLog_INFO(TAG,
+                  "Classic BitmapUpdate publish summary batch=%" PRIu64
+                  " rectangles=%" PRIu32 " payload=%" PRIu64
+                  " skipCompression=%d firstRectPayload=%" PRIu32
+                  " classicTargets=%" PRIu32 " enqueued=%" PRIu32
+                  " gatedFullRefresh=%" PRIu32 " firstGatedViewer=%" PRIu32
+                  " throttled=%" PRIu32 " firstThrottledViewer=%" PRIu32
+                  " enqueueFailed=%" PRIu32 " refreshInFlight=%d publishUs=%" PRIu64,
+                  backend->bitmap_update_batches_total + 1ULL, bitmap->number,
+                  total_payload_bytes, bitmap->skipCompression, first_rect_payload,
+                  classic_target_count, enqueued_count, gated_full_refresh_count,
+                  first_gated_viewer_id, throttled_count, first_throttled_viewer_id,
+                  enqueue_failed_count, refresh_in_flight, publish_us);
     }
 
     return sent_any;
@@ -3533,29 +4247,15 @@ BOOL viewer_server_publish_frame_marker(BackendClient* backend,
             LeaveCriticalSection(&viewer->gfx.lock);
         }
 
-        EnterCriticalSection(&server->lock);
-        for (int i = 0; i < MAX_VIEWERS; i++)
+        /* Only check classic-fallback targets for pending refresh needs.
+         * GFX viewers manage their own refresh lifecycle and should not
+         * block classic refresh completion. Viewers that were not targets
+         * of this frame marker (e.g., newly joined or throttled viewers)
+         * should also not block completion — they will request their own
+         * refresh cycle independently. */
+        for (size_t i = 0; i < target_count; i++)
         {
-            Viewer* viewer = &server->viewers[i];
-            BOOL is_gfx_viewer = FALSE;
-
-            if (!viewer->peer)
-                continue;
-
-            EnterCriticalSection(&viewer->gfx.lock);
-            is_gfx_viewer = viewer_gfx_negotiation_is_rdpgfx_ready(&viewer->gfx) &&
-                            !viewer->gfx.rdpgfx_temporarily_disabled;
-            LeaveCriticalSection(&viewer->gfx.lock);
-
-            if (is_gfx_viewer)
-            {
-                /* GFX viewers handle their own refresh lifecycle through the
-                 * WAIT_BACKEND_REFRESH / surface preamble / LIVE state machine.
-                 * Their needs_full_refresh flag should not block the classic
-                 * refresh completion that the backend full-refresh mechanism
-                 * depends on. */
-                continue;
-            }
+            Viewer* viewer = targets[i];
 
             EnterCriticalSection(&viewer->send_lock);
             if (viewer->needs_full_refresh)
@@ -3565,7 +4265,6 @@ BOOL viewer_server_publish_frame_marker(BackendClient* backend,
             if (pending_viewers_remain)
                 break;
         }
-        LeaveCriticalSection(&server->lock);
 
         if (!pending_viewers_remain)
             backend_mark_full_refresh_complete(server->backend);

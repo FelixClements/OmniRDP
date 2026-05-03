@@ -57,6 +57,74 @@ static void backend_reset_full_refresh_state_locked(BackendClient* client);
 static void backend_complete_full_refresh_locked(BackendClient* client, UINT64 generation,
                                                  BackendFullRefreshOutcome outcome,
                                                  UINT64 completed_ts);
+static const char* backend_surface_bits_codec_name(UINT16 codec_id);
+static BOOL backend_should_log_path_event(UINT64 count);
+static UINT64 backend_perf_now_us(void);
+static BOOL backend_should_log_bitmap_perf(UINT64 batch_count, UINT64 callback_us,
+                                           UINT64 publish_us);
+static BOOL backend_forward_bitmap_update(BackendClient* client, const BITMAP_UPDATE* bitmap);
+static BOOL on_begin_paint(rdpContext* context);
+static BOOL on_end_paint(rdpContext* context);
+static BOOL on_bitmap_update(rdpContext* context, const BITMAP_UPDATE* bitmap);
+static BOOL on_primary_order_info(rdpContext* context, const ORDER_INFO* order_info,
+                                  const char* order_name);
+static BOOL on_secondary_cache_order_info(rdpContext* context, INT16 orderLength,
+                                          UINT16 extraFlags, UINT8 orderType,
+                                          const char* orderName);
+
+static const char* backend_surface_bits_codec_name(UINT16 codec_id)
+{
+    switch (codec_id)
+    {
+        case RDP_CODEC_ID_NONE:
+            return "NONE";
+        case RDP_CODEC_ID_NSCODEC:
+            return "NSCODEC";
+        case RDP_CODEC_ID_JPEG:
+            return "JPEG";
+        case RDP_CODEC_ID_REMOTEFX:
+            return "REMOTEFX";
+        case RDP_CODEC_ID_IMAGE_REMOTEFX:
+            return "IMAGE_REMOTEFX";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static BOOL backend_should_log_path_event(UINT64 count)
+{
+    return (count <= 5) || ((count % 100) == 0);
+}
+
+static UINT64 backend_perf_now_us(void)
+{
+#ifdef _WIN32
+    static LARGE_INTEGER frequency = { 0 };
+    LARGE_INTEGER counter = { 0 };
+
+    if (frequency.QuadPart == 0)
+    {
+        if (!QueryPerformanceFrequency(&frequency) || (frequency.QuadPart <= 0))
+            return platform_get_timestamp_ms() * 1000ULL;
+    }
+
+    if (!QueryPerformanceCounter(&counter))
+        return platform_get_timestamp_ms() * 1000ULL;
+
+    return (UINT64)((counter.QuadPart * 1000000ULL) / frequency.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((UINT64)ts.tv_sec * 1000000ULL) + ((UINT64)ts.tv_nsec / 1000ULL);
+#endif
+}
+
+static BOOL backend_should_log_bitmap_perf(UINT64 batch_count, UINT64 callback_us,
+                                           UINT64 publish_us)
+{
+    return (batch_count <= 5) || ((batch_count % 100) == 0) || (callback_us >= 5000ULL) ||
+           (publish_us >= 5000ULL);
+}
 
 #ifdef _WIN32
 static BOOL backend_configure_addin_dll_directory(void)
@@ -416,12 +484,18 @@ static BOOL backend_forward_surface_bits(BackendClient* client, const SURFACE_BI
     if (!client || !cmd)
         return FALSE;
 
-    /* Forward NSCodec and RemoteFX SurfaceBits to viewers.
-     * Other codecs (Planar, etc.) are decoded by GDI and not forwarded. */
-    if (cmd->bmp.codecID != RDP_CODEC_ID_NSCODEC &&
-        cmd->bmp.codecID != RDP_CODEC_ID_REMOTEFX)
+    /* Forward RemoteFX SurfaceBits to viewers.
+     * Other codecs (NSCodec, Planar, etc.) are decoded by GDI and not forwarded. */
+    if (cmd->bmp.codecID != RDP_CODEC_ID_REMOTEFX)
     {
-        WLog_DBG(TAG, "Ignoring non-NS/RemoteFX SurfaceBits codecId=%" PRIu16, cmd->bmp.codecID);
+        WLog_WARN(TAG,
+                  "Dropping SurfaceBits rect=(%u,%u)-(%u,%u) size=%ux%u bpp=%u payload=%" PRIu32
+                  " codec=%s(%" PRIu16 ") reason=rfx-only-forward-filter",
+                  cmd->destLeft, cmd->destTop, cmd->destRight, cmd->destBottom,
+                  cmd->bmp.width, cmd->bmp.height, cmd->bmp.bpp,
+                  cmd->bmp.bitmapDataLength,
+                  backend_surface_bits_codec_name(cmd->bmp.codecID),
+                  cmd->bmp.codecID);
         return TRUE;
     }
 
@@ -432,6 +506,14 @@ static BOOL backend_forward_surface_bits(BackendClient* client, const SURFACE_BI
     }
 
     return TRUE;
+}
+
+static BOOL backend_forward_bitmap_update(BackendClient* client, const BITMAP_UPDATE* bitmap)
+{
+    if (!client || !bitmap)
+        return FALSE;
+
+    return viewer_server_publish_bitmap_update(client, bitmap);
 }
 
 static BOOL backend_forward_frame_marker(BackendClient* client, const SURFACE_FRAME_MARKER* marker)
@@ -794,6 +876,195 @@ static BOOL on_desktop_resize(rdpContext* context)
     return TRUE;
 }
 
+static BOOL on_begin_paint(rdpContext* context)
+{
+    BackendClient* client = g_backend_client;
+    BOOL rc = FALSE;
+
+    if (!client)
+        return TRUE;
+
+    if (!client->orig_begin_paint)
+        return TRUE;
+
+    rc = client->orig_begin_paint(context);
+    if (rc)
+    {
+        client->begin_paint_count++;
+        if (backend_should_log_path_event(client->begin_paint_count))
+        {
+            WLog_INFO(TAG, "Received BeginPaint count=%" PRIu64,
+                      client->begin_paint_count);
+        }
+    }
+
+    return rc;
+}
+
+static BOOL on_end_paint(rdpContext* context)
+{
+    BackendClient* client = g_backend_client;
+    BOOL rc = FALSE;
+
+    if (!client)
+        return TRUE;
+
+    if (!client->orig_end_paint)
+        return TRUE;
+
+    rc = client->orig_end_paint(context);
+    if (rc)
+    {
+        client->end_paint_count++;
+        if (backend_should_log_path_event(client->end_paint_count))
+        {
+            WLog_INFO(TAG, "Received EndPaint count=%" PRIu64,
+                      client->end_paint_count);
+        }
+    }
+
+    return rc;
+}
+
+static BOOL on_bitmap_update(rdpContext* context, const BITMAP_UPDATE* bitmap)
+{
+    BackendClient* client = g_backend_client;
+    BOOL rc = FALSE;
+    UINT64 callback_started_us = 0;
+
+    if (!client)
+        return TRUE;
+
+    if (!client->orig_bitmap_update)
+        return TRUE;
+
+    callback_started_us = backend_perf_now_us();
+    rc = client->orig_bitmap_update(context, bitmap);
+    if (rc && bitmap)
+    {
+        const BITMAP_DATA* first = (bitmap->number > 0) ? &bitmap->rectangles[0] : NULL;
+        UINT64 publish_started_us = 0;
+        UINT64 publish_us = 0;
+        UINT64 callback_us = 0;
+        UINT64 total_bytes = 0;
+        UINT32 i = 0;
+        BOOL forwarded = FALSE;
+
+        for (i = 0; i < bitmap->number; i++)
+            total_bytes += bitmap->rectangles[i].bitmapLength;
+
+        client->bitmap_update_count++;
+
+        publish_started_us = backend_perf_now_us();
+        forwarded = backend_forward_bitmap_update(client, bitmap);
+        publish_us = backend_perf_now_us() - publish_started_us;
+        callback_us = backend_perf_now_us() - callback_started_us;
+
+        client->bitmap_update_batches_total++;
+        client->bitmap_update_rectangles_total += bitmap->number;
+        client->bitmap_update_payload_bytes_total += total_bytes;
+        client->bitmap_update_callback_time_total_us += callback_us;
+        client->bitmap_update_publish_time_total_us += publish_us;
+        if (callback_us > client->bitmap_update_callback_time_max_us)
+            client->bitmap_update_callback_time_max_us = callback_us;
+        if (publish_us > client->bitmap_update_publish_time_max_us)
+            client->bitmap_update_publish_time_max_us = publish_us;
+
+if (backend_should_log_path_event(client->bitmap_update_count) ||
+            backend_should_log_bitmap_perf(client->bitmap_update_batches_total, callback_us,
+                                           publish_us))
+        {
+            WLog_INFO(TAG,
+                      "Received BitmapUpdate count=%" PRIu64 " rectangles=%" PRIu32
+                      " skipCompression=%d firstRect=(%" PRIu32 ",%" PRIu32 ")-(%" PRIu32
+                      ",%" PRIu32 ") size=%" PRIu32 "x%" PRIu32 " bpp=%" PRIu32
+                      " compressed=%d payload=%" PRIu32
+                      " batch=%" PRIu64 " batchBytes=%" PRIu64 " callbackUs=%" PRIu64
+                      " publishUs=%" PRIu64 " publishOk=%d",
+                      client->bitmap_update_count, bitmap->number, bitmap->skipCompression,
+                      first ? first->destLeft : 0, first ? first->destTop : 0,
+                      first ? first->destRight : 0, first ? first->destBottom : 0,
+                      first ? first->width : 0, first ? first->height : 0,
+                      first ? first->bitsPerPixel : 0, first ? first->compressed : 0,
+                      first ? first->bitmapLength : 0, client->bitmap_update_batches_total,
+                      total_bytes, callback_us, publish_us, forwarded);
+        }
+
+        /* For the classic (non-RDPEGFX) path, the RDP server does not send
+         * SURFACE_FRAME_MARKER PDUs. Each BitmapUpdate is a frame boundary.
+         * Mark the backend full refresh as complete after the first bitmap
+         * update following a refresh request, so that refreshInFlight
+         * transitions to FALSE and viewers can receive normal updates. */
+        if (client->full_refresh_in_flight)
+        {
+            backend_mark_full_refresh_complete(client);
+        }
+    }
+
+    return rc;
+}
+
+static BOOL on_primary_order_info(rdpContext* context, const ORDER_INFO* order_info,
+                                  const char* order_name)
+{
+    BackendClient* client = g_backend_client;
+    BOOL rc = FALSE;
+
+    if (!client)
+        return TRUE;
+
+    if (!client->orig_primary_order_info)
+        return TRUE;
+
+    rc = client->orig_primary_order_info(context, order_info, order_name);
+    if (rc)
+    {
+        client->primary_order_info_count++;
+        if (backend_should_log_path_event(client->primary_order_info_count))
+        {
+            WLog_INFO(TAG,
+                      "Received primary drawing order count=%" PRIu64 " order=%s type=%" PRIu32,
+                      client->primary_order_info_count,
+                      order_name ? order_name : "unknown",
+                      order_info ? order_info->orderType : 0);
+        }
+    }
+
+    return rc;
+}
+
+static BOOL on_secondary_cache_order_info(rdpContext* context, INT16 orderLength,
+                                          UINT16 extraFlags, UINT8 orderType,
+                                          const char* orderName)
+{
+    BackendClient* client = g_backend_client;
+    BOOL rc = FALSE;
+
+    if (!client)
+        return TRUE;
+
+    if (!client->orig_secondary_cache_order_info)
+        return TRUE;
+
+    rc = client->orig_secondary_cache_order_info(context, orderLength, extraFlags,
+                                                 orderType, orderName);
+    if (rc)
+    {
+        client->secondary_cache_order_info_count++;
+        if (backend_should_log_path_event(client->secondary_cache_order_info_count))
+        {
+            WLog_INFO(TAG,
+                      "Received secondary/cache order count=%" PRIu64 " order=%s type=%" PRIu8
+                      " length=%" PRIi16 " extraFlags=%" PRIu16,
+                      client->secondary_cache_order_info_count,
+                      orderName ? orderName : "unknown",
+                      orderType, orderLength, extraFlags);
+        }
+    }
+
+    return rc;
+}
+
 static BOOL on_surface_frame_marker(rdpContext* context, const SURFACE_FRAME_MARKER* marker)
 {
     (void)context;
@@ -804,12 +1075,36 @@ static BOOL on_surface_frame_marker(rdpContext* context, const SURFACE_FRAME_MAR
 static BOOL on_surface_bits(rdpContext* context, const SURFACE_BITS_COMMAND* cmd)
 {
     BackendClient* client = g_backend_client;
+    BOOL rc = FALSE;
+
     if (!client || !client->orig_surface_bits)
         return FALSE;
 
-    BOOL rc = client->orig_surface_bits(context, cmd);
-    if (!rc || !cmd)
+    rc = client->orig_surface_bits(context, cmd);
+    if (!cmd)
         return rc;
+
+    if (!rc)
+    {
+        WLog_WARN(TAG,
+                  "SurfaceBits decode failed rect=(%u,%u)-(%u,%u) size=%ux%u bpp=%u payload=%" PRIu32
+                  " codec=%s(%" PRIu16 ")",
+                  cmd->destLeft, cmd->destTop, cmd->destRight, cmd->destBottom,
+                  cmd->bmp.width, cmd->bmp.height, cmd->bmp.bpp,
+                  cmd->bmp.bitmapDataLength,
+                  backend_surface_bits_codec_name(cmd->bmp.codecID),
+                  cmd->bmp.codecID);
+        return rc;
+    }
+
+    WLog_INFO(TAG,
+              "Received SurfaceBits rect=(%u,%u)-(%u,%u) size=%ux%u bpp=%u payload=%" PRIu32
+              " codec=%s(%" PRIu16 ") cmdType=%" PRIu16,
+              cmd->destLeft, cmd->destTop, cmd->destRight, cmd->destBottom,
+              cmd->bmp.width, cmd->bmp.height, cmd->bmp.bpp,
+              cmd->bmp.bitmapDataLength,
+              backend_surface_bits_codec_name(cmd->bmp.codecID),
+              cmd->bmp.codecID, cmd->cmdType);
 
     backend_refresh_desktop_layout(client, context);
     (void)backend_forward_surface_bits(client, cmd);
@@ -850,10 +1145,28 @@ static BOOL on_post_connect(freerdp* instance)
     WLog_INFO(TAG, "GDI initialized");
     if (client->context && client->context->update)
     {
+        client->orig_begin_paint = client->context->update->BeginPaint;
+        client->context->update->BeginPaint = on_begin_paint;
+        client->orig_end_paint = client->context->update->EndPaint;
+        client->context->update->EndPaint = on_end_paint;
+        client->orig_bitmap_update = client->context->update->BitmapUpdate;
+        client->context->update->BitmapUpdate = on_bitmap_update;
         client->orig_surface_bits = client->context->update->SurfaceBits;
         client->context->update->SurfaceBits = on_surface_bits;
         client->orig_surface_frame_marker = client->context->update->SurfaceFrameMarker;
         client->context->update->SurfaceFrameMarker = on_surface_frame_marker_wrapped;
+        if (client->context->update->primary)
+        {
+            client->orig_primary_order_info = client->context->update->primary->OrderInfo;
+            client->context->update->primary->OrderInfo = on_primary_order_info;
+        }
+        if (client->context->update->secondary)
+        {
+            client->orig_secondary_cache_order_info =
+                client->context->update->secondary->CacheOrderInfo;
+            client->context->update->secondary->CacheOrderInfo =
+                on_secondary_cache_order_info;
+        }
     }
     backend_refresh_desktop_layout(client, client->context);
     client->connected = TRUE;
@@ -1017,10 +1330,10 @@ BackendClient* backend_init(void)
         return NULL;
     }
     
-    /* Enable RemoteFX alongside NSCodec. RFX uses better compression
-     * for large changed areas (window drags) though still 64×64 tiles. */
+    /* Enable RemoteFX only for the classic SurfaceBits path.
+     * RFX uses 64x64 tiles and is the only forwarded codec in this configuration. */
     freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_NSCodec, TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
@@ -1122,6 +1435,16 @@ BOOL backend_connect(BackendClient* client)
               client->port);
 
     EnterCriticalSection(&client->layout_lock);
+    client->forwarded_bitmap_update_count = 0;
+    client->forwarded_bitmap_update_rectangles = 0;
+    client->forwarded_bitmap_update_bytes = 0;
+    client->bitmap_update_callback_time_total_us = 0;
+    client->bitmap_update_callback_time_max_us = 0;
+    client->bitmap_update_publish_time_total_us = 0;
+    client->bitmap_update_publish_time_max_us = 0;
+    client->bitmap_update_batches_total = 0;
+    client->bitmap_update_rectangles_total = 0;
+    client->bitmap_update_payload_bytes_total = 0;
     client->forwarded_surface_bits_count = 0;
     client->forwarded_surface_bits_bytes = 0;
     client->forwarded_frame_marker_count = 0;

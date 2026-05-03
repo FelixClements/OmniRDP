@@ -20,6 +20,7 @@ extern "C" {
 #define VIEWER_GFX_MAX_ACTIVE_SURFACES 256U
 #define VIEWER_GFX_FRAME_RING_CAPACITY 4U
 #define VIEWER_GFX_MAX_FRAME_EVENTS 512U
+#define VIEWER_CLASSIC_QUEUE_CAPACITY 32U
 
 struct BackendClient;
 typedef struct BackendClient BackendClient;
@@ -182,6 +183,11 @@ typedef struct {
     CRITICAL_SECTION lock;
 } ViewerGraphicsContext;
 
+typedef struct ViewerClassicEvent
+{
+    BITMAP_UPDATE* bitmap; /* deep-copied, owned by this event */
+} ViewerClassicEvent;
+
 typedef struct {
     freerdp_peer* peer;
     rdpContext* context;
@@ -197,10 +203,26 @@ typedef struct {
     UINT64 packets_sent;
     UINT64 packets_failed;
     UINT64 write_block_events;
+    UINT64 bitmap_updates_sent;
+    UINT64 bitmap_updates_failed;
+    UINT64 bitmap_rectangles_sent;
+    UINT64 bitmap_payload_bytes_sent;
+    UINT64 bitmap_write_block_events;
+UINT64 bitmap_send_time_total_us;
+    UINT64 bitmap_send_time_max_us;
+UINT64 bitmap_updates_skipped_writeblock;
+    UINT64 bitmap_updates_skipped_throttle;
+    UINT64 bitmap_updates_queued;
+    UINT64 bitmap_queue_dropped;
     UINT32 consecutive_lag_intervals;
     UINT64 sustained_lag_start_ts;
     UINT64 last_pointer_position_generation;
     UINT64 last_pointer_shape_generation;
+    ViewerClassicEvent* classic_queue[VIEWER_CLASSIC_QUEUE_CAPACITY];
+    UINT32 classic_queue_head;
+    UINT32 classic_queue_tail;
+    UINT32 classic_queue_count;
+    HANDLE classic_event;
     ViewerGraphicsContext gfx;
 } Viewer;
 
@@ -235,6 +257,8 @@ void viewer_server_notify_backend_layout_change(BackendClient* backend, UINT32 w
                                                 UINT32 generation);
 
 BOOL viewer_server_publish_surface_bits(BackendClient* backend, const SURFACE_BITS_COMMAND* cmd);
+
+BOOL viewer_server_publish_bitmap_update(BackendClient* backend, const BITMAP_UPDATE* bitmap);
 
 BOOL viewer_server_publish_frame_marker(BackendClient* backend,
                                         const SURFACE_FRAME_MARKER* marker);
