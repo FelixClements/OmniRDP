@@ -1,52 +1,81 @@
-# RDP Multiplexer
+# OmniRDP
 
-This repository is centered on `multiplexer-v2/`: a standalone true N:1 RDP multiplexer built on FreeRDP client and server APIs.
+Standalone N:1 RDP multiplexer — one backend Windows RDP session fanned out to multiple simultaneous viewers.
 
-## Active direction
+Built on FreeRDP 3.25.0 client and server APIs. The process sits in the middle: it connects to one Windows target as an RDP client and accepts multiple viewer connections as an RDP server, forwarding display updates and arbitrating input between viewers.
 
-- one backend Windows RDP session
-- multiple simultaneous viewers
-- standalone server process, not a FreeRDP proxy plugin
-- true N:1 based on FreeRDP implementation so the project does not have to keep rebuilding protocol state by hand where a native FreeRDP path exists
+## Features
 
-The active roadmap is:
+- **N:1 multiplexing** — multiple viewers see the same remote desktop simultaneously
+- **Input arbitration** — one viewer at a time holds the input lock; idle timeout releases it automatically
+- **Cursor visibility** — passive viewers (without input lock) see the current mouse position via `PointerPosition` PDUs
+- **Multi-monitor support** — configure 1–16 monitors (each 1920×1080) for the backend session
+- **Classic SurfaceBits/NSCodec path** — stable display pipeline using encoded bitmap transport
+- **Late-join** — new viewers receive a full refresh on connect
+- **Slow-viewer disconnect** — viewers that can't keep up are automatically disconnected
 
-- `.sisyphus/plans/n1-multiplexer-v2-plan.md`
+## Architecture
 
-## Repository layout
+```
+┌──────────────┐
+│  Windows RDP │
+│    Server    │
+└──────┬───────┘
+       │ RDP client connection
+       │ (FreeRDP client APIs)
+┌──────┴───────┐
+│   OmniRDP    │  ← standalone multiplexer process
+│  (port 3389  │     backend client + viewer server
+│   → backend, │     in one binary)
+│   port 13389 │
+│   → viewers) │
+└──────┬───────┘
+       │ RDP server connections
+       │ (FreeRDP server APIs)
+  ┌────┼────┐
+  │    │    │
+  V    V    V
+Viewer Viewer Viewer ...
+(active) (passive) (passive)
+```
 
-- `multiplexer-v2/` — active standalone project
-- `freerdp-3.25.0/` — FreeRDP dependency used by `multiplexer-v2`
-- `FreeRDP-upstream/` — upstream reference tree for comparison only
-- `archive/legacy-proxy-plugin/` — archived proxy-module implementation and superseded proxy-era plans/docs
+- **Backend side**: connects to one Windows RDP target using FreeRDP client APIs
+- **Viewer side**: accepts multiple incoming viewer connections using FreeRDP server APIs on port 13389
+- **Display path**: classic `SurfaceBits`/NSCodec — the multiplexer forwards encoded bitmap updates from the backend to all viewers
+- **Input path**: only the viewer holding the input lock can send keyboard/mouse input to the backend; other viewers' input is silently dropped
 
-## Why the project restarted as standalone
+## Project Structure
 
-The clearest local rationale is preserved in:
-
-- `archive/legacy-proxy-plugin/.sisyphus/plans/rdp-multiplexer-plan-adjusted.md`
-
-That archived history captures the earlier proxy-module direction and why the project eventually moved to a standalone v2 path.
-
-## Current v2 status
-
-- backend FreeRDP client connection works
-- viewer listener works
-- multi-viewer latest-frame fanout exists
-- takeover-style keyboard/mouse input arbitration exists
-- per-viewer RDPEGFX negotiation and delivery path now exists in first-pass form, with classic fallback still preserved
-- real-environment hardening is still in progress
+```
+OmniRDP/
+├── CMakeLists.txt
+├── include/
+│   ├── backend.h              — BackendClient API and types
+│   ├── viewer_server.h         — ViewerServer, Viewer, MonitorLayout types
+│   └── platform_compat.h       — Cross-platform helpers
+├── src/
+│   ├── main.c                 — Entrypoint, CLI parsing, event loop
+│   ├── backend.c               — FreeRDP client to Windows target
+│   ├── viewer_server.c         — FreeRDP server for viewer connections
+│   ├── viewer_internal.c      — Pure helper logic (input policy, caps, late-join)
+│   ├── viewer_internal.h       — Internal helpers header
+│   ├── pointer_shape.c         — Pointer shape cache
+│   ├── pointer_shape.h         — Pointer shape types
+│   └── platform_compat.c       — Sleep, timestamps, signal handling
+└── tests/
+    ├── CMakeLists.txt
+    ├── test_late_join_policy.c
+    ├── test_pointer_shape.c
+    └── test_viewer_state.c
+```
 
 ## Build
 
-### Linux
+### Prerequisites
 
-```bash
-cmake -S freerdp-3.25.0 -B freerdp-3.25.0/build -DWITH_SERVER=ON -DWITH_SHADOW=ON -DWITH_PROXY=OFF
-cmake --build freerdp-3.25.0/build -j$(nproc)
-cmake -S multiplexer-v2 -B multiplexer-v2/build
-cmake --build multiplexer-v2/build -j$(nproc)
-```
+- CMake 3.20+
+- FreeRDP 3.25.0 (vendored in `freerdp-3.25.0/`, must be built first)
+- C11 compiler
 
 ### Windows (Visual Studio 2022)
 
@@ -66,54 +95,79 @@ cmake -S freerdp-3.25.0 -B freerdp-3.25.0/build `
 
 cmake --build freerdp-3.25.0/build --config Release -j
 
-# 2. Build multiplexer-v2
-cmake -S multiplexer-v2 -B multiplexer-v2/build -G "Visual Studio 17 2022" -A x64
-cmake --build multiplexer-v2/build --config Release -j
+# 2. Build OmniRDP
+cmake -S OmniRDP -B OmniRDP/build -G "Visual Studio 17 2022" -A x64
+cmake --build OmniRDP/build --config Release -j
 ```
 
-## Run
+## Usage
 
-### Linux
+```
+OmniRDP <hostname> <port> <username> <password> [domain] [monitors]
+```
+
+| Argument   | Required | Description                                      |
+|------------|----------|--------------------------------------------------|
+| hostname   | Yes      | Windows RDP server hostname or IP                |
+| port       | Yes      | RDP port (typically 3389)                         |
+| username   | Yes      | RDP username                                      |
+| password   | Yes      | RDP password                                      |
+| domain     | No       | Domain (use `.` for workgroup)                   |
+| monitors   | No       | Number of 1920×1080 monitors (1–16, default: 1)  |
+
+### Examples
+
+Single monitor (1920×1080 desktop):
 
 ```bash
-./multiplexer-v2/build/multiplexer-v2 <backend-host> 3389 <username> <password> [domain]
+# Windows
+.\OmniRDP\build\Release\OmniRDP.exe 192.168.1.209 3389 localadmin mypassword
 ```
 
-Example:
+Dual monitor (3840×1080 desktop):
 
 ```bash
-./multiplexer-v2/build/multiplexer-v2 192.168.1.209 3389 localadmin localadmin .
+# Windows
+.\OmniRDP\build\Release\OmniRDP.exe 192.168.1.209 3389 localadmin mypassword . 2
 ```
 
-### Windows
+With domain:
 
-```powershell
-.\multiplexer-v2\build\Release\multiplexer-v2.exe <backend-host> 3389 <username> <password> [domain]
+```bash
+OmniRDP 192.168.1.209 3389 admin password MYDOMAIN 2
 ```
 
-Example:
+### Connecting Viewers
 
-```powershell
-.\multiplexer-v2\build\Release\multiplexer-v2.exe 192.168.1.209 3389 localadmin localadmin .
+Viewers connect to the multiplexer on port **13389**:
+
+```bash
+# Using xfreerdp (Linux)
+xfreerdp /v:127.0.0.1:13389 /u:viewer /p:viewer /sec:rdp
+
+# Using mstsc (Windows)
+# Connect to 127.0.0.1:13389 in Remote Desktop Connection
 ```
 
 > **Note:** On Windows, ensure the FreeRDP DLLs (`freerdp3.dll`, `freerdp-client3.dll`, `freerdp-server3.dll`, `winpr3.dll`) are either in the same directory as the executable or on your `PATH`.
 
-## Local smoke tests
+## Input Arbitration
 
-Plain viewer:
+- The first viewer to send input automatically acquires the **input lock**
+- Only the viewer holding the input lock can send keyboard/mouse events to the backend
+- If the input owner is idle for the timeout period, the lock is released and another viewer can take over
+- Passive viewers (without the input lock) still see the desktop and the current mouse cursor position
 
-```bash
-timeout 10 xvfb-run -a ./freerdp-3.25.0/build/client/X11/xfreerdp /v:127.0.0.1:13389 /u:viewer /p:viewer /sec:rdp +clipboard /log-level:warn
+Unit tests cover input ownership policy, late-join strategy, and pointer shape cache logic.
+
+## Repository Layout
+
+```
+OmniRDP/              — Active project source
+freerdp-3.25.0/       — Vendored FreeRDP dependency (must be built first)
+archive/              — Historical plans, architecture notes, and prior proxy-plugin work
 ```
 
-RDPEGFX viewer:
+## License
 
-```bash
-timeout 15 xvfb-run -a ./freerdp-3.25.0/build/client/X11/xfreerdp /v:127.0.0.1:13389 /u:viewer /p:viewer /sec:rdp /gfx +clipboard /log-level:warn
-```
-
-## Notes
-
-- `build/`, `build-review/`, `build-review-ci/`, `build-review-ci2/`, and `build-review-test/` are local build artifact directories, not active project source.
-- `CERT-C-QUICKREF.md` remains active as a coding reference.
+See [LICENSE](../LICENSE) for details.
