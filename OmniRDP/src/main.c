@@ -10,6 +10,7 @@
 #include <winpr/wtsapi.h>
 #include "backend.h"
 #include "viewer_server.h"
+#include "viewer_internal.h"
 #include "platform_compat.h"
 
 static volatile int running = 1;
@@ -31,8 +32,9 @@ static DWORD WINAPI server_thread(LPVOID arg)
 
 void print_usage(const char* program)
 {
-    printf("Usage: %s <hostname> <port> <username> <password> [domain]\n", program);
-    printf("Example: %s 192.168.1.209 3389 localadmin localadmin .\n", program);
+    printf("Usage: %s <hostname> <port> <username> <password> [domain] [monitors]\n", program);
+    printf("Example: %s 192.168.1.209 3389 localadmin localadmin . 2\n", program);
+    printf("  monitors: number of 1920x1080 monitors (1-16, default: 1)\n");
 }
 
 int main(int argc, char* argv[])
@@ -56,13 +58,52 @@ int main(int argc, char* argv[])
     UINT16 port = (UINT16)atoi(argv[2]);
     const char* username = argv[3];
     const char* password = argv[4];
-    const char* domain = (argc > 5) ? argv[5] : NULL;
+    const char* domain = NULL;
+    UINT32 monitor_count = 1;
+
+    /* Parse optional 5th and 6th arguments.
+     * Format: [domain] [monitors] or just [monitors] (no domain).
+     * Detect whether argv[5] is a monitor count (small integer) or a domain.
+     * If both domain and monitors are needed, use: <hostname> <port> <user> <pass> <domain> <monitors> */
+    if (argc > 6)
+    {
+        /* Both domain and monitors provided */
+        domain = argv[5];
+        monitor_count = (UINT32)atoi(argv[6]);
+    }
+    else if (argc > 5)
+    {
+        /* Only one optional arg — is it a monitor count or a domain? */
+        const char* maybe_monitors = argv[5];
+        int parsed = atoi(maybe_monitors);
+        if (parsed > 0 && parsed <= OMNIRDP_MAX_MONITORS &&
+            strchr(maybe_monitors, '.') == NULL && strlen(maybe_monitors) < 3)
+        {
+            /* Looks like a monitor count (small positive integer), not a domain */
+            monitor_count = (UINT32)parsed;
+            domain = NULL;
+        }
+        else
+        {
+            /* Looks like a domain name, not a monitor count */
+            domain = argv[5];
+        }
+    }
+
+    if (monitor_count == 0 || monitor_count > OMNIRDP_MAX_MONITORS)
+    {
+        fprintf(stderr, "Monitor count must be 1-%d, got %u\n", OMNIRDP_MAX_MONITORS, monitor_count);
+        print_usage(argv[0]);
+        return 1;
+    }
 
     platform_signal_init(shutdown_handler);
 
     printf("N:1 Multiplexer v2 - SurfaceBits Passthrough\n");
     printf("============================================\n");
     printf("Connecting to: %s:%d\n", hostname, port);
+    printf("Monitors: %u (%ux%u desktop)\n", monitor_count,
+           monitor_count * 1920, 1080);
     printf("Username: %s\n", username);
     printf("Domain: %s\n", domain ? domain : "(workgroup)");
     printf("\n");
@@ -73,6 +114,8 @@ int main(int argc, char* argv[])
         fprintf(stderr, "Failed to initialize backend client\n");
         return 1;
     }
+
+    backend_set_monitor_count(client, monitor_count);
 
     if (!backend_configure(client, hostname, port, username, password, domain))
     {

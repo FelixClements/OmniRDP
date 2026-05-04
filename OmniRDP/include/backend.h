@@ -19,6 +19,7 @@
 #include <winpr/synch.h>
 #include <winpr/wtypes.h>
 #include "pointer_shape.h"
+#include "viewer_server.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,7 @@ typedef struct BackendClient {
     void* user_data;
     UINT32 desktop_width;
     UINT32 desktop_height;
+    MonitorLayout monitor_layout;
     UINT32 layout_generation;
     CRITICAL_SECTION layout_lock;
     CRITICAL_SECTION refresh_lock;
@@ -215,8 +217,12 @@ void backend_get_pointer_snapshot(BackendClient* client, UINT16* x, UINT16* y, B
                                   UINT32* type, PointerShapeEntry** active_shape,
                                   UINT64* position_gen, UINT64* shape_gen);
 
+void backend_store_pointer_position(BackendClient* client, UINT16 x, UINT16 y);
+
 void backend_get_pointer_state(BackendClient* client, UINT16* x, UINT16* y, BOOL* visible,
                                UINT32* type, UINT64* generation);
+
+void backend_set_monitor_count(BackendClient* client, UINT32 monitor_count);
 
 #ifdef __cplusplus
 }

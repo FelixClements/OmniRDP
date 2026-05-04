@@ -87,6 +87,8 @@ BOOL viewer_disconnect_due(const Viewer* viewer, UINT32 disconnect_ms, UINT64 no
 
 BOOL viewer_monitor_from_size(UINT32 width, UINT32 height, MONITOR_DEF* monitor);
 
+void monitor_layout_init(MonitorLayout* layout, UINT32 monitor_count);
+
 #ifdef __cplusplus
 }
 #endif

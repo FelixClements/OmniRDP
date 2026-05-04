@@ -1,5 +1,6 @@
 #include "backend.h"
 #include "viewer_server.h"
+#include "viewer_internal.h"
 #include <freerdp/freerdp.h>
 #include <freerdp/addin.h>
 #include <freerdp/client.h>
@@ -380,7 +381,7 @@ static void backend_complete_full_refresh_locked(BackendClient* client, UINT64 g
     client->full_refresh_completed_outcome = outcome;
 }
 
-static void backend_store_pointer_position(BackendClient* client, UINT16 x, UINT16 y)
+void backend_store_pointer_position(BackendClient* client, UINT16 x, UINT16 y)
 {
     if (!client)
         return;
@@ -1169,6 +1170,38 @@ static BOOL on_post_connect(freerdp* instance)
     }
     backend_refresh_desktop_layout(client, client->context);
     client->connected = TRUE;
+
+    {
+        rdpSettings* s = client->context ? client->context->settings : NULL;
+        if (s)
+        {
+            UINT32 monCount = freerdp_settings_get_uint32(s, FreeRDP_MonitorCount);
+            UINT32 negoFlags = freerdp_settings_get_uint32(s, FreeRDP_NegotiationFlags);
+            UINT32 k = 0;
+            WLog_INFO(TAG, "on_post_connect: Negotiated settings: DesktopWidth=%"PRIu32", DesktopHeight=%"PRIu32", UseMultimon=%s, ForceMultimon=%s, SpanMonitors=%s, SupportMonitorLayoutPdu=%s, MonitorCount=%"PRIu32", MonitorDefArraySize=%"PRIu32,
+                      freerdp_settings_get_uint32(s, FreeRDP_DesktopWidth),
+                      freerdp_settings_get_uint32(s, FreeRDP_DesktopHeight),
+                      freerdp_settings_get_bool(s, FreeRDP_UseMultimon) ? "TRUE" : "FALSE",
+                      freerdp_settings_get_bool(s, FreeRDP_ForceMultimon) ? "TRUE" : "FALSE",
+                      freerdp_settings_get_bool(s, FreeRDP_SpanMonitors) ? "TRUE" : "FALSE",
+                      freerdp_settings_get_bool(s, FreeRDP_SupportMonitorLayoutPdu) ? "TRUE" : "FALSE",
+                      monCount,
+                      freerdp_settings_get_uint32(s, FreeRDP_MonitorDefArraySize));
+            WLog_INFO(TAG, "on_post_connect: NegotiationFlags=0x%08"PRIx32" EXTENDED_CLIENT_DATA_SUPPORTED=%s",
+                      negoFlags,
+                      (negoFlags & 0x01) ? "YES" : "NO");
+            for (k = 0; k < monCount; k++)
+            {
+                const rdpMonitor* m = (const rdpMonitor*)freerdp_settings_get_pointer_array(
+                    s, FreeRDP_MonitorDefArray, k);
+                if (m)
+                    WLog_INFO(TAG, "on_post_connect:   monitor[%"PRIu32"]: x=%"PRId32", y=%"PRId32", width=%"PRId32", height=%"PRId32", is_primary=%s",
+                              k, m->x, m->y, m->width, m->height,
+                              m->is_primary ? "TRUE" : "FALSE");
+            }
+        }
+    }
+
     return TRUE;
 }
 
@@ -1216,6 +1249,108 @@ static DWORD on_verify_certificate_ex(freerdp* instance, const char* host, UINT1
 
     WLog_WARN(TAG, "Certificate verification bypassed (insecure!)");
     return 1;
+}
+
+void backend_set_monitor_count(BackendClient* client, UINT32 monitor_count)
+{
+    rdpSettings* settings = NULL;
+
+    if (!client)
+        return;
+
+    WLog_INFO(TAG, "backend_set_monitor_count: monitor_count=%"PRIu32, monitor_count);
+
+    monitor_layout_init(&client->monitor_layout, monitor_count);
+    client->desktop_width = client->monitor_layout.total_width;
+    client->desktop_height = client->monitor_layout.total_height;
+
+    WLog_INFO(TAG, "backend_set_monitor_count: layout: total_width=%"PRIu32", total_height=%"PRIu32", monitor_count=%"PRIu32,
+              client->monitor_layout.total_width, client->monitor_layout.total_height,
+              client->monitor_layout.monitor_count);
+
+    /* Update FreeRDP settings if the context has already been initialized
+     * (i.e., backend_init() has been called). These settings must be
+     * configured before backend_connect() is called. */
+    if (client->context && client->context->settings)
+    {
+        UINT32 i = 0;
+        settings = client->context->settings;
+
+        freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth,
+                                    client->monitor_layout.total_width);
+        freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight,
+                                    client->monitor_layout.total_height);
+
+        if (client->monitor_layout.monitor_count > 1)
+        {
+            rdpMonitor monitors[OMNIRDP_MAX_MONITORS];
+            UINT32 count = client->monitor_layout.monitor_count;
+
+            memset(monitors, 0, sizeof(monitors));
+
+            freerdp_settings_set_bool(settings, FreeRDP_UseMultimon, TRUE);
+            /* CRITICAL: SupportMonitorLayoutPdu must be TRUE for the server
+             * to honor CS_MONITOR data. Without this, Windows ignores the
+             * monitor definitions and creates a spanned desktop. */
+            freerdp_settings_set_bool(settings, FreeRDP_SupportMonitorLayoutPdu, TRUE);
+            /* CRITICAL: ForceMultimon must be TRUE to ensure CS_MONITOR data
+             * is sent even if the server does not advertise
+             * EXTENDED_CLIENT_DATA_SUPPORTED. Without ForceMultimon, FreeRDP
+             * silently skips CS_MONITOR when the server lacks this flag,
+             * resulting in a spanned desktop. This is safe because
+             * SupportMonitorLayoutPdu=TRUE ensures the
+             * RNS_UD_CS_SUPPORT_MONITOR_LAYOUT_PDU flag is set in the
+             * Client Core Data, so the server will honor the monitor layout. */
+            freerdp_settings_set_bool(settings, FreeRDP_ForceMultimon, TRUE);
+
+            WLog_INFO(TAG, "backend_set_monitor_count: Setting UseMultimon=TRUE, SupportMonitorLayoutPdu=TRUE, ForceMultimon=TRUE, DesktopWidth=%"PRIu32", DesktopHeight=%"PRIu32" for %"PRIu32" monitors",
+                      client->monitor_layout.total_width, client->monitor_layout.total_height, count);
+
+            for (i = 0; i < count; i++)
+            {
+                monitors[i].x = client->monitor_layout.monitors[i].left;
+                monitors[i].y = client->monitor_layout.monitors[i].top;
+                monitors[i].width = client->monitor_layout.monitors[i].right -
+                                    client->monitor_layout.monitors[i].left;
+                monitors[i].height = client->monitor_layout.monitors[i].bottom -
+                                     client->monitor_layout.monitors[i].top;
+                monitors[i].is_primary = (client->monitor_layout.monitors[i].flags & MONITOR_PRIMARY)
+                                        ? TRUE : FALSE;
+
+                WLog_INFO(TAG, "backend_set_monitor_count: monitor[%"PRIu32"]: x=%"PRId32", y=%"PRId32", width=%"PRId32", height=%"PRId32", is_primary=%s",
+                          i, monitors[i].x, monitors[i].y,
+                          monitors[i].width, monitors[i].height,
+                          monitors[i].is_primary ? "TRUE" : "FALSE");
+            }
+            freerdp_settings_set_monitor_def_array_sorted(settings, monitors, count);
+
+            {
+                UINT32 k = 0;
+                UINT32 monCountAfter = freerdp_settings_get_uint32(settings, FreeRDP_MonitorCount);
+                WLog_INFO(TAG, "backend_set_monitor_count: After set_monitor_def_array_sorted: MonitorCount=%"PRIu32", UseMultimon=%s, DesktopWidth=%"PRIu32", DesktopHeight=%"PRIu32,
+                          monCountAfter,
+                          freerdp_settings_get_bool(settings, FreeRDP_UseMultimon) ? "TRUE" : "FALSE",
+                          freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth),
+                          freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight));
+                for (k = 0; k < monCountAfter; k++)
+                {
+                    const rdpMonitor* m = (const rdpMonitor*)freerdp_settings_get_pointer_array(
+                        settings, FreeRDP_MonitorDefArray, k);
+                    if (m)
+                        WLog_INFO(TAG, "backend_set_monitor_count:   settings[%"PRIu32"]: x=%"PRId32", y=%"PRId32", width=%"PRId32", height=%"PRId32", is_primary=%s",
+                                  k, m->x, m->y, m->width, m->height,
+                                  m->is_primary ? "TRUE" : "FALSE");
+                }
+            }
+        }
+        else
+        {
+            freerdp_settings_set_bool(settings, FreeRDP_UseMultimon, FALSE);
+            freerdp_settings_set_bool(settings, FreeRDP_ForceMultimon, FALSE);
+            WLog_INFO(TAG, "backend_set_monitor_count: Single monitor: UseMultimon=FALSE, ForceMultimon=FALSE, DesktopWidth=%"PRIu32", DesktopHeight=%"PRIu32,
+                      client->monitor_layout.total_width, client->monitor_layout.total_height);
+        }
+    }
 }
 
 BackendClient* backend_init(void)
@@ -1347,11 +1482,87 @@ BackendClient* backend_init(void)
     freerdp_settings_set_uint32(settings, FreeRDP_FrameAcknowledge, 4);
     freerdp_settings_set_bool(settings, FreeRDP_DeactivateClientDecoding, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, FALSE);
-    freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, 1920);
-    freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, 1080);
+    /* CRITICAL: SupportMonitorLayoutPdu must be TRUE for the server to honor
+     * CS_MONITOR data. Without this flag, the GCC Client Core Data omits
+     * RNS_UD_CS_SUPPORT_MONITOR_LAYOUT_PDU from earlyCapabilityFlags,
+     * and per MS-RDPBCGR 2.2.1.3.6 the server MUST ignore CS_MONITOR,
+     * resulting in a spanned desktop instead of true multimon. */
+    freerdp_settings_set_bool(settings, FreeRDP_SupportMonitorLayoutPdu, TRUE);
+    /* Initialize single-monitor layout as default; backend_set_monitor_count()
+     * must be called before backend_connect() to configure multi-monitor. */
+    monitor_layout_init(&client->monitor_layout, 1);
+    freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth,
+                                client->monitor_layout.total_width);
+    freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight,
+                                client->monitor_layout.total_height);
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
-    client->desktop_width = 1920;
-    client->desktop_height = 1080;
+    client->desktop_width = client->monitor_layout.total_width;
+    client->desktop_height = client->monitor_layout.total_height;
+
+    WLog_INFO(TAG, "backend_init: Initial monitor layout: total_width=%"PRIu32", total_height=%"PRIu32", monitor_count=%"PRIu32,
+              client->monitor_layout.total_width, client->monitor_layout.total_height,
+              client->monitor_layout.monitor_count);
+    WLog_INFO(TAG, "backend_init: Setting DesktopWidth=%"PRIu32", DesktopHeight=%"PRIu32", ColorDepth=32",
+              client->monitor_layout.total_width, client->monitor_layout.total_height);
+
+    if (client->monitor_layout.monitor_count > 1)
+    {
+        rdpMonitor monitors[OMNIRDP_MAX_MONITORS];
+        UINT32 i = 0;
+        UINT32 count = client->monitor_layout.monitor_count;
+
+        memset(monitors, 0, sizeof(monitors));
+
+        freerdp_settings_set_bool(settings, FreeRDP_UseMultimon, TRUE);
+        /* SupportMonitorLayoutPdu is also set unconditionally above,
+         * but reinforce it here for clarity in the multimon path. */
+        freerdp_settings_set_bool(settings, FreeRDP_SupportMonitorLayoutPdu, TRUE);
+        /* ForceMultimon must be TRUE to ensure CS_MONITOR data is sent
+         * even if the server does not advertise EXTENDED_CLIENT_DATA_SUPPORTED.
+         * This is safe because SupportMonitorLayoutPdu=TRUE ensures the
+         * RNS_UD_CS_SUPPORT_MONITOR_LAYOUT_PDU flag is set in Client Core Data. */
+        freerdp_settings_set_bool(settings, FreeRDP_ForceMultimon, TRUE);
+
+        WLog_INFO(TAG, "backend_init: Setting UseMultimon=TRUE, SupportMonitorLayoutPdu=TRUE, ForceMultimon=TRUE for %"PRIu32" monitors", count);
+
+        for (i = 0; i < count; i++)
+        {
+            monitors[i].x = client->monitor_layout.monitors[i].left;
+            monitors[i].y = client->monitor_layout.monitors[i].top;
+            monitors[i].width = client->monitor_layout.monitors[i].right -
+                                client->monitor_layout.monitors[i].left;
+            monitors[i].height = client->monitor_layout.monitors[i].bottom -
+                                 client->monitor_layout.monitors[i].top;
+            monitors[i].is_primary = (client->monitor_layout.monitors[i].flags & MONITOR_PRIMARY)
+                                     ? TRUE : FALSE;
+
+            WLog_INFO(TAG, "backend_init: monitor[%"PRIu32"]: x=%"PRId32", y=%"PRId32", width=%"PRId32", height=%"PRId32", is_primary=%s",
+                      i, monitors[i].x, monitors[i].y,
+                      monitors[i].width, monitors[i].height,
+                      monitors[i].is_primary ? "TRUE" : "FALSE");
+        }
+        freerdp_settings_set_monitor_def_array_sorted(settings, monitors, count);
+
+        {
+            UINT32 k = 0;
+            UINT32 monCountAfter = freerdp_settings_get_uint32(settings, FreeRDP_MonitorCount);
+            WLog_INFO(TAG, "backend_init: After set_monitor_def_array_sorted: MonitorCount=%"PRIu32", UseMultimon=%s, DesktopWidth=%"PRIu32", DesktopHeight=%"PRIu32,
+                      monCountAfter,
+                      freerdp_settings_get_bool(settings, FreeRDP_UseMultimon) ? "TRUE" : "FALSE",
+                      freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth),
+                      freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight));
+            for (k = 0; k < monCountAfter; k++)
+            {
+                const rdpMonitor* m = (const rdpMonitor*)freerdp_settings_get_pointer_array(
+                    settings, FreeRDP_MonitorDefArray, k);
+                if (m)
+                    WLog_INFO(TAG, "backend_init:   settings[%"PRIu32"]: x=%"PRId32", y=%"PRId32", width=%"PRId32", height=%"PRId32", is_primary=%s",
+                              k, m->x, m->y, m->width, m->height,
+                              m->is_primary ? "TRUE" : "FALSE");
+            }
+        }
+    }
+
     client->port = 3389;
 
     if (!backend_prepare_rdpgfx_channels(client))

@@ -23,6 +23,15 @@ extern "C" {
 #define VIEWER_CLASSIC_QUEUE_CAPACITY 32U
 #define VIEWER_SURFACE_BITS_QUEUE_CAPACITY 1024U
 
+#define OMNIRDP_MAX_MONITORS 16
+
+typedef struct {
+    UINT32 monitor_count;
+    UINT32 total_width;
+    UINT32 total_height;
+    MONITOR_DEF monitors[OMNIRDP_MAX_MONITORS];
+} MonitorLayout;
+
 struct BackendClient;
 typedef struct BackendClient BackendClient;
 
@@ -259,6 +268,7 @@ typedef struct {
     UINT32 slow_viewer_disconnect_ms;
     char* bind_address;
     UINT16 port;
+    MonitorLayout monitor_layout;  /* shared monitor layout */
     BackendClient* backend;
     ViewerGfxPublisherState gfx;
 } ViewerServer;
@@ -307,6 +317,8 @@ BOOL viewer_server_publish_gfx_end_frame(BackendClient* backend,
 BOOL viewer_server_publish_gfx_delete_encoding_context(
     BackendClient* backend,
     const RDPGFX_DELETE_ENCODING_CONTEXT_PDU* delete_encoding_context);
+
+void monitor_layout_init(MonitorLayout* layout, UINT32 monitor_count);
 
 #ifdef __cplusplus
 }

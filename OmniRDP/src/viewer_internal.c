@@ -1,6 +1,8 @@
 #include "viewer_internal.h"
 
 #include <stdlib.h>
+#include <stdio.h>
+#include <inttypes.h>
 
 BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET* canonical_caps,
                                        BOOL canonical_caps_valid,
@@ -245,4 +247,41 @@ BOOL viewer_monitor_from_size(UINT32 width, UINT32 height, MONITOR_DEF* monitor)
     monitor->bottom = (INT32)height;
     monitor->flags = MONITOR_PRIMARY;
     return TRUE;
+}
+
+void monitor_layout_init(MonitorLayout* layout, UINT32 monitor_count)
+{
+    UINT32 i = 0;
+
+    if (!layout)
+        return;
+
+    memset(layout, 0, sizeof(*layout));
+
+    if (monitor_count == 0)
+        monitor_count = 1;
+    if (monitor_count > OMNIRDP_MAX_MONITORS)
+        monitor_count = OMNIRDP_MAX_MONITORS;
+
+    layout->monitor_count = monitor_count;
+    layout->total_width = monitor_count * 1920;
+    layout->total_height = 1080;
+
+    fprintf(stderr, "[viewer.internal] monitor_layout_init: monitor_count=%"PRIu32", total_width=%"PRIu32", total_height=%"PRIu32"\n",
+              monitor_count, layout->total_width, layout->total_height);
+
+    for (i = 0; i < monitor_count; i++)
+    {
+        layout->monitors[i].left = (INT32)(i * 1920);
+        layout->monitors[i].top = 0;
+        layout->monitors[i].right = (INT32)((i + 1) * 1920);
+        layout->monitors[i].bottom = 1080;
+        layout->monitors[i].flags = (i == 0) ? MONITOR_PRIMARY : 0;
+
+        fprintf(stderr, "[viewer.internal] monitor_layout_init: monitor[%"PRIu32"]: left=%"PRId32", top=%"PRId32", right=%"PRId32", bottom=%"PRId32", flags=0x%08"PRIx32"%s\n",
+                  i, layout->monitors[i].left, layout->monitors[i].top,
+                  layout->monitors[i].right, layout->monitors[i].bottom,
+                  layout->monitors[i].flags,
+                  (layout->monitors[i].flags & MONITOR_PRIMARY) ? " PRIMARY" : "");
+    }
 }
