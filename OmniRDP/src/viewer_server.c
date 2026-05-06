@@ -2914,7 +2914,7 @@ static BOOL can_viewer_send_input(Viewer *viewer) {
       !viewer_input_owner_alive_locked(server, server->input_owner_viewer_id))
     clear_reason = "disconnected, input ownership cleared";
   else if (server->input_owner_active &&
-           ((GetTickCount64() - server->input_owner_last_input_ts) >=
+           ((platform_get_timestamp_ms() - server->input_owner_last_input_ts) >=
             INPUT_IDLE_TIMEOUT_MS))
     clear_reason = "timed out, input now free";
 
@@ -2928,7 +2928,7 @@ static BOOL can_viewer_send_input(Viewer *viewer) {
   allowed = viewer_input_try_acquire(
       &state, viewer->id, viewer->connected, viewer->activated,
       viewer_input_owner_alive_locked(server, state.owner_viewer_id),
-      GetTickCount64(), INPUT_IDLE_TIMEOUT_MS);
+      platform_get_timestamp_ms(), INPUT_IDLE_TIMEOUT_MS);
   server->input_owner_active = state.owner_active;
   server->input_owner_viewer_id = state.owner_viewer_id;
   server->input_owner_last_input_ts = state.last_input_ts;
