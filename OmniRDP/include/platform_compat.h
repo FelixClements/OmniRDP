@@ -1,8 +1,8 @@
 #ifndef PLATFORM_COMPAT_H
 #define PLATFORM_COMPAT_H
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -14,15 +14,16 @@ void platform_sleep_ms(uint32_t ms);
 /* Get monotonic timestamp in milliseconds */
 uint64_t platform_get_timestamp_ms(void);
 
-/* Initialize shutdown signal handling (SIGINT on POSIX, console handler on Windows) */
+/* Initialize shutdown signal handling (SIGINT on POSIX, console handler on
+ * Windows) */
 typedef void (*platform_shutdown_fn)(void);
 void platform_signal_init(platform_shutdown_fn handler);
 
 /* Get default certificate file path */
-const char* platform_cert_path(void);
+const char *platform_cert_path(void);
 
 /* Get default private key file path */
-const char* platform_key_path(void);
+const char *platform_key_path(void);
 
 #ifdef __cplusplus
 }
