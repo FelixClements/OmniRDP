@@ -46,12 +46,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout FreeRDP 3.25.0
+      - name: Checkout FreeRDP 3.26.0
         uses: actions/checkout@v4
         with:
           repository: FreeRDP/FreeRDP
-          ref: 3.25.0
-          path: freerdp-3.25.0
+          ref: 3.26.0
+          path: freerdp-3.26.0
           fetch-depth: 1
 
       - name: Checkout vcpkg
@@ -88,7 +88,7 @@ jobs:
 
       - name: Configure FreeRDP
         run: |
-          cmake -S freerdp-3.25.0 -B freerdp-3.25.0/build \
+          cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DWITH_SERVER=ON \
             -DWITH_SHADOW=OFF \
@@ -107,7 +107,7 @@ jobs:
             -A x64
 
       - name: Build FreeRDP
-        run: cmake --build freerdp-3.25.0/build --config ${{ matrix.build_type }} -j
+        run: cmake --build freerdp-3.26.0/build --config ${{ matrix.build_type }} -j
 
       - name: Configure OmniRDP
         run: |
@@ -125,7 +125,7 @@ jobs:
         run: |
           mkdir -p artifacts/windows-${{ matrix.build_type }}/bin
           find OmniRDP/build-windows -name 'OmniRDP.exe' -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
-          find freerdp-3.25.0/build -name '*.dll' -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+          find freerdp-3.26.0/build -name '*.dll' -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
 
       - name: Upload Windows artifacts if build succeeds
         if: success()
@@ -143,12 +143,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout FreeRDP 3.25.0
+      - name: Checkout FreeRDP 3.26.0
         uses: actions/checkout@v4
         with:
           repository: FreeRDP/FreeRDP
-          ref: 3.25.0
-          path: freerdp-3.25.0
+          ref: 3.26.0
+          path: freerdp-3.26.0
           fetch-depth: 1
 
       - name: Install dependencies
@@ -171,7 +171,7 @@ jobs:
 
       - name: Configure FreeRDP
         run: |
-          cmake -S freerdp-3.25.0 -B freerdp-3.25.0/build-valgrind \
+          cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build-valgrind \
             -DCMAKE_BUILD_TYPE=Debug \
             -DWITH_SERVER=ON \
             -DWITH_SHADOW=ON \
@@ -180,13 +180,13 @@ jobs:
             -G Ninja
 
       - name: Build FreeRDP
-        run: cmake --build freerdp-3.25.0/build-valgrind -j $(nproc)
+        run: cmake --build freerdp-3.26.0/build-valgrind -j $(nproc)
 
       - name: Configure OmniRDP
         run: |
           cmake -S OmniRDP -B OmniRDP/build-valgrind \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DFREERDP_BUILD="$GITHUB_WORKSPACE/freerdp-3.25.0/build-valgrind" \
+            -DFREERDP_BUILD="$GITHUB_WORKSPACE/freerdp-3.26.0/build-valgrind" \
             -G Ninja
 
       - name: Build OmniRDP
