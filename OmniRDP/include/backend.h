@@ -69,13 +69,13 @@ typedef struct BackendClient {
   BOOL (*orig_begin_paint)(rdpContext *context);
   BOOL (*orig_end_paint)(rdpContext *context);
   BOOL (*orig_bitmap_update)(rdpContext *context, const BITMAP_UPDATE *bitmap);
-  BOOL (*orig_surface_bits)
+  BOOL(*orig_surface_bits)
   (rdpContext *context, const SURFACE_BITS_COMMAND *cmd);
-  BOOL (*orig_surface_frame_marker)
+  BOOL(*orig_surface_frame_marker)
   (rdpContext *context, const SURFACE_FRAME_MARKER *marker);
-  BOOL (*orig_primary_order_info)
+  BOOL(*orig_primary_order_info)
   (rdpContext *context, const ORDER_INFO *order_info, const char *order_name);
-  BOOL (*orig_secondary_cache_order_info)
+  BOOL(*orig_secondary_cache_order_info)
   (rdpContext *context, INT16 orderLength, UINT16 extraFlags, UINT8 orderType,
    const char *orderName);
   UINT64 begin_paint_count;

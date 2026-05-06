@@ -823,7 +823,7 @@ static BOOL viewer_gfx_frame_buffer_begin_frame_locked(
     viewer_gfx_complete_frame_unref(frame);
     WLog_ERR(TAG,
              "Frame %" PRIu32 " capture failed; live forwarding continues but "
-                              "replay buffer unavailable",
+             "replay buffer unavailable",
              start_frame->frameId);
     return FALSE;
   }
@@ -848,7 +848,7 @@ static BOOL viewer_gfx_frame_buffer_append_surface_command_locked(
   if (!viewer_gfx_complete_frame_append_event(frame, event)) {
     WLog_ERR(TAG,
              "Frame %" PRIu32 " capture failed; live forwarding continues but "
-                              "replay buffer unavailable",
+             "replay buffer unavailable",
              frame->frame_id);
     viewer_gfx_complete_frame_unref(frame);
     buffer->capture_frame = NULL;
@@ -894,7 +894,7 @@ viewer_gfx_frame_buffer_end_frame_locked(ViewerGfxFrameBuffer *buffer,
   if (!viewer_gfx_complete_frame_append_event(frame, event)) {
     WLog_ERR(TAG,
              "Frame %" PRIu32 " capture failed; live forwarding continues but "
-                              "replay buffer unavailable",
+             "replay buffer unavailable",
              frame->frame_id);
     viewer_gfx_complete_frame_unref(frame);
     buffer->capture_frame = NULL;
@@ -4861,7 +4861,7 @@ BOOL viewer_server_publish_gfx_start_frame(
                                                   start_frame, event)) {
     WLog_ERR(TAG,
              "Frame %" PRIu32 " capture failed; live forwarding continues but "
-                              "replay buffer unavailable",
+             "replay buffer unavailable",
              start_frame->frameId);
   }
   LeaveCriticalSection(&server->gfx.lock);
