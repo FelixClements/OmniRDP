@@ -6,7 +6,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Find FreeRDP 3.25.0
 set(FREERDP_ROOT ${CMAKE_SOURCE_DIR}/../freerdp-3.25.0)
-set(FREERDP_BUILD ${FREERDP_ROOT}/build)
+if(NOT FREERDP_BUILD)
+    set(FREERDP_BUILD ${FREERDP_ROOT}/build)
+endif()
 
 # Include directories
 include_directories(
