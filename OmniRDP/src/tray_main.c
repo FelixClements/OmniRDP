@@ -12,6 +12,12 @@
  *   OmniRDP-tray.exe --uninstall  Remove from HKLM Run key
  */
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include <windows.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,7 +25,6 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
-#include <windows.h>
 
 #include "svc_log.h"
 #include "tray_icon.h"

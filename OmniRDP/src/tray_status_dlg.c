@@ -16,10 +16,14 @@
 #include "svc_log.h"
 #include "tray_pipe_client.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 #include <commctrl.h>
 #include <stdio.h>
 #include <string.h>
-#include <windows.h>
 
 /* ── Log tag ───────────────────────────────────────────────────── */
 #define LOG_TAG "status_dlg"

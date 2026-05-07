@@ -17,11 +17,15 @@
 #include "svc_dpapi.h"
 #include "svc_log.h"
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 #include <aclapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
 
 /* ── Internal helpers ──────────────────────────────────────────── */
 
