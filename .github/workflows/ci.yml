@@ -17,34 +17,27 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Find clang-format
+      - name: Install clang-format
+        shell: pwsh
         run: |
-          $llvm = Get-ChildItem -Path "C:\Program Files\LLVM" -Recurse -Filter "clang-format.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($llvm) {
-            Write-Output "clang-format found: $($llvm.FullName)"
-            Write-Output "Version: & ""$($llvm.FullName)"" --version"
-          } else {
-            Write-Output "ERROR: clang-format not found in C:\Program Files\LLVM"
-            exit 1
-          }
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-20.1.8/LLVM-20.1.8-win64.exe"
+          $out = "$env:TEMP\LLVM-20.1.8-win64.exe"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Start-Process -FilePath $out -ArgumentList "/S" -Wait
+          Write-Output "clang-format installed"
 
       - name: Check formatting
         shell: pwsh
         run: |
           $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
-          $failed = $false
           Get-ChildItem -Path "OmniRDP/src", "OmniRDP/include" -Recurse -Include "*.c", "*.h" | ForEach-Object {
-            $out = & clang-format --dry-run $_.FullName 2>&1
-            if ($LASTEXITCODE -ne 0) {
-              Write-Output "$($_.FullName): $out"
-              $failed = $true
-            }
-          }
-          if ($failed) {
-            Write-Output "Formatting issues detected - auto-fixing..."
+            & clang-format --dry-run --Werror $_.FullName 2>&1 | ForEach-Object { Write-Output "$($_.FullName): $_" }
+            if ($LASTEXITCODE -ne 0) { exit 1 }
           }
 
       - name: Auto-fix formatting
+        if: failure()
         shell: pwsh
         run: |
           $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
