@@ -3925,27 +3925,6 @@ static BOOL peer_reached_state(freerdp_peer *peer, CONNECTION_STATE state) {
   return TRUE;
 }
 
-/**
- * @brief Handle the RDP finalization handshake with the client
- *
- * This callback is required for proper mstsc compatibility in FreeRDP 3.x.
- * Without it, the default handler can get confused by the bidirectional
- * finalization PDU sequence from Windows mstsc.
- */
-static BOOL on_peer_finalize(freerdp_peer *peer, UINT32 finalizeFlags) {
-  /* Log the finalization flags received from the client */
-  WLog_DBG(TAG, "on_peer_finalize: flags=0x%08X", finalizeFlags);
-
-  /* Finalize the server side: send all pending SC PDUs */
-  if (!peer->FinalizeServer(peer, finalizeFlags, TRUE)) {
-    WLog_WARN(TAG, "on_peer_finalize: FinalizeServer failed");
-    return FALSE;
-  }
-
-  WLog_INFO(TAG, "on_peer_finalize: complete, transitioning to active");
-  return TRUE;
-}
-
 static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
   ViewerServer *server = g_viewer_server;
   Viewer *viewer = NULL;
@@ -3961,7 +3940,8 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
   peer->PostConnect = peer_post_connect;
   peer->Activate = peer_activate;
   peer->ReachedState = peer_reached_state;
-  peer->OnFinalize = on_peer_finalize;
+
+
 
   if (!freerdp_peer_context_new(peer))
     return FALSE;
