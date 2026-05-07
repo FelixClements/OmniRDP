@@ -17,8 +17,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install clang-format
-        run: choco install llvm --version=18.1.8 -y
+      - name: Find clang-format
+        run: |
+          $llvm = Get-ChildItem -Path "C:\Program Files\LLVM" -Recurse -Filter "clang-format.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($llvm) {
+            Write-Output "clang-format found: $($llvm.FullName)"
+            Write-Output "Version: & ""$($llvm.FullName)"" --version"
+          } else {
+            Write-Output "ERROR: clang-format not found in C:\Program Files\LLVM"
+            exit 1
+          }
 
       - name: Check formatting
         shell: pwsh
