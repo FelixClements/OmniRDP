@@ -248,18 +248,22 @@ int instance_runner_main(int argc, char *argv[]) {
         LOG_I("instance_runner", "Instance '%s' starting (config=%s)",
               args.instance_name, args.config_path);
 
-        /* Configure FreeRDP WLog to write to a file in the instance log directory.
-         * This captures detailed session logs (mouse moves, input ownership,
-         * frame delivery, etc.) from the viewer server. */
+        /* Configure FreeRDP WLog via env vars (what to log + level).
+         * WLOG_LEVEL and WLOG_PREFIX work on Windows; WLOG_FILEAPPENDER does not.
+         * Instead, redirect stderr to viewer.log to capture WLog output. */
+        _putenv_s("WLOG_LEVEL", "INFO");
+        _putenv_s("WLOG_PREFIX", "*");
+
+        /* Redirect stderr to viewer.log so WLog output is captured */
         {
-            char wlog_path[512];
-            snprintf(wlog_path, sizeof(wlog_path), "%s\\viewer.log", instance_log_dir);
-            char wlog_val[600];
-            snprintf(wlog_val, sizeof(wlog_val), "%s", wlog_path);
-            _putenv_s("WLOG_FILEAPPENDER", wlog_val);
-            _putenv_s("WLOG_LEVEL", "INFO");
-            _putenv_s("WLOG_PREFIX", "*");
-            LOG_I("instance_runner", "FreeRDP WLog configured -> %s", wlog_path);
+            char viewer_log_path[512];
+            snprintf(viewer_log_path, sizeof(viewer_log_path), "%s\\viewer.log", instance_log_dir);
+            if (freopen(viewer_log_path, "a", stderr)) {
+                setbuf(stderr, NULL);  /* unbuffered for real-time logging */
+                LOG_I("instance_runner", "FreeRDP WLog -> %s", viewer_log_path);
+            } else {
+                LOG_W("instance_runner", "Failed to redirect stderr to %s (err=%lu)", viewer_log_path, GetLastError());
+            }
         }
     }
 
