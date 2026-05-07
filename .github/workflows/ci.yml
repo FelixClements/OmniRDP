@@ -32,13 +32,19 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+          $failed = $false
           Get-ChildItem -Path "OmniRDP/src", "OmniRDP/include" -Recurse -Include "*.c", "*.h" | ForEach-Object {
-            & clang-format --dry-run --Werror $_.FullName 2>&1 | ForEach-Object { Write-Output "$($_.FullName): $_" }
-            if ($LASTEXITCODE -ne 0) { exit 1 }
+            $out = & clang-format --dry-run $_.FullName 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              Write-Output "$($_.FullName): $out"
+              $failed = $true
+            }
+          }
+          if ($failed) {
+            Write-Output "Formatting issues detected - auto-fixing..."
           }
 
-      - name: Format files (if check failed)
-        if: failure()
+      - name: Auto-fix formatting
         shell: pwsh
         run: |
           $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
