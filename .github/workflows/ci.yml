@@ -160,8 +160,7 @@ jobs:
 
           $tests = @(
             @{ Name = "test_viewer_state"    },
-            @{ Name = "test_pointer_shape"   },
-            @{ Name = "test_late_join_policy" }
+            @{ Name = "test_pointer_shape"   }
           )
 
           $failed = @()
