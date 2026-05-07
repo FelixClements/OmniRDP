@@ -28,6 +28,11 @@ set(SOURCES
     src/viewer_server.c
     src/platform_compat.c
     src/pointer_shape.c
+    src/instance_runner.c
+    src/ini_parser.c
+    src/svc_config.c
+    src/svc_log.c
+    src/svc_dpapi.c
 )
 
 # Header files
@@ -37,6 +42,11 @@ set(HEADERS
     include/platform_compat.h
     src/pointer_shape.h
     src/viewer_internal.h
+    src/ini_parser.h
+    src/svc_config.h
+    src/svc_log.h
+    src/svc_dpapi.h
+    src/pipe_protocol.h
 )
 
 # Find FreeRDP libraries in the local build tree
@@ -98,8 +108,95 @@ endif()
 
 target_link_libraries(OmniRDP ${MULTIPLEXER_LIBS})
 
+# ── OmniRDP-svc: Windows Service ──────────────────────────────────
+
+set(SVC_SOURCES
+    src/svc_main.c
+    src/svc_service.c
+    src/svc_instance_mgr.c
+    src/svc_config.c
+    src/svc_log.c
+    src/svc_dpapi.c
+    src/ini_parser.c
+    src/pipe_protocol.c
+    src/svc_pipe_server.c
+)
+
+set(SVC_HEADERS
+    src/svc_service.h
+    src/svc_instance_mgr.h
+    src/svc_config.h
+    src/svc_log.h
+    src/svc_dpapi.h
+    src/ini_parser.h
+    src/pipe_protocol.h
+    src/svc_pipe_server.h
+)
+
+add_executable(OmniRDP-svc ${SVC_SOURCES} ${SVC_HEADERS})
+
+# Service-only libraries (no FreeRDP dependency)
+set(SVC_LIBS
+    advapi32    # SCM, DPAPI, security
+    crypt32     # DPAPI
+    kernel32    # Job objects, processes
+    wtsapi32    # WTSQueryUserToken, WTSGetActiveConsoleSessionId
+)
+
+target_link_libraries(OmniRDP-svc ${SVC_LIBS})
+
+# ── OmniRDP-tray: System Tray Application ─────────────────────────
+
+set(TRAY_SOURCES
+    src/tray_main.c
+    src/tray_icon.c
+    src/tray_log_viewer.c
+    src/tray_status_dlg.c
+    src/tray_pipe_client.c
+    src/pipe_protocol.c
+    src/svc_log.c
+)
+
+set(TRAY_HEADERS
+    src/tray_icon.h
+    src/tray_log_viewer.h
+    src/tray_status_dlg.h
+    src/tray_pipe_client.h
+    src/pipe_protocol.h
+    src/svc_log.h
+)
+
+add_executable(OmniRDP-tray ${TRAY_SOURCES} ${TRAY_HEADERS})
+
+# Tray app links comctl32 (for ListView) and shell32 (for Shell_NotifyIcon)
+# plus the same kernel32/advapi32 used by the service
+set(TRAY_LIBS
+    comctl32
+    shell32
+    advapi32
+    kernel32
+    wtsapi32
+)
+
+target_link_libraries(OmniRDP-tray ${TRAY_LIBS})
+
+# Tray app is a Windows GUI app (no console window)
+if(WIN32)
+    set_target_properties(OmniRDP-tray PROPERTIES
+        WIN32_EXECUTABLE TRUE
+    )
+endif()
+
 # Install
 install(TARGETS OmniRDP
+    RUNTIME DESTINATION bin
+)
+
+install(TARGETS OmniRDP-svc
+    RUNTIME DESTINATION bin
+)
+
+install(TARGETS OmniRDP-tray
     RUNTIME DESTINATION bin
 )
 

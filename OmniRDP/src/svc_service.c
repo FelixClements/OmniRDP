@@ -1,0 +1,742 @@
+/**
+ * @file svc_service.c
+ * @brief OmniRDP service lifecycle implementation
+ *
+ * Implements service install/uninstall, the SCM-controlled main
+ * service loop (svc_service_start), and a console-mode equivalent
+ * for debugging (svc_service_run_console).
+ *
+ * Windows-only; no FreeRDP dependency.
+ */
+
+#include "svc_service.h"
+#include "svc_config.h"
+#include "svc_log.h"
+#include "svc_instance_mgr.h"
+#include "svc_pipe_server.h"
+
+#include <windows.h>
+#include <aclapi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ── Forward declarations ──────────────────────────────────────── */
+
+static void WINAPI service_ctrl_handler(DWORD dwControl);
+static BOOL WINAPI console_ctrl_handler(DWORD dwCtrlType);
+
+/* ── Module-global state ───────────────────────────────────────── */
+
+/*
+ * Points to the active OmniRDPSvcContext so that the SCM control
+ * handler and the console control handler can signal the main loop.
+ * Only one service instance can be active at a time (which is the
+ * normal behaviour for a service process).
+ */
+static OmniRDPSvcContext *g_ctx = NULL;
+
+/* ── Helpers ───────────────────────────────────────────────────── */
+
+/**
+ * @brief Map a log level string to a SvcLogLevel enum value.
+ *
+ * Accepted values (case-insensitive): "debug", "info", "warn", "error".
+ * Returns SVC_LOG_INFO for unrecognised strings.
+ */
+static SvcLogLevel parse_log_level(const char *str) {
+    if (!str)
+        return SVC_LOG_INFO;
+    if (_stricmp(str, "debug") == 0)
+        return SVC_LOG_DEBUG;
+    if (_stricmp(str, "info") == 0)
+        return SVC_LOG_INFO;
+    if (_stricmp(str, "warn") == 0)
+        return SVC_LOG_WARN;
+    if (_stricmp(str, "error") == 0)
+        return SVC_LOG_ERROR;
+    return SVC_LOG_INFO;
+}
+
+/**
+ * @brief Build the full path to a binary located in the same directory
+ *        as the current executable.
+ *
+ * @param binary_name  File name (e.g. "OmniRDP.exe")
+ * @param out          Output buffer for the full path
+ * @param out_size     Size of the output buffer
+ * @return 0 on success, -1 on failure
+ */
+static int get_binary_path(const char *binary_name,
+                           char *out, size_t out_size) {
+    char module_path[MAX_PATH];
+    DWORD len = GetModuleFileNameA(NULL, module_path, sizeof(module_path));
+    if (len == 0 || len >= sizeof(module_path))
+        return -1;
+
+    /* Find the last backslash and truncate to the directory portion */
+    char *last_slash = strrchr(module_path, '\\');
+    if (!last_slash)
+        return -1;
+
+    *(last_slash + 1) = '\0';  /* keep the trailing backslash */
+
+    if (_snprintf(out, out_size, "%s%s", module_path, binary_name) < 0)
+        return -1;
+
+    return 0;
+}
+
+/**
+ * @brief Set ACL on the config file
+ *
+ * Grants:
+ * - SYSTEM: Full Control
+ * - BUILTIN\Administrators: Full Control
+ * - NT AUTHORITY\Authenticated Users: Read-only
+ */
+static int set_config_file_acl(const char *filePath) {
+    DWORD dwRes;
+    PSECURITY_DESCRIPTOR pSD = NULL;
+    EXPLICIT_ACCESSA ea[3];
+    PACL pACL = NULL;
+
+    /* SYSTEM SID */
+    SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
+    PSID pSystemSid = NULL;
+    AllocateAndInitializeSid(&ntAuth, 1, SECURITY_LOCAL_SYSTEM_RID,
+                              0, 0, 0, 0, 0, 0, 0, &pSystemSid);
+
+    /* Administrators SID */
+    PSID pAdminSid = NULL;
+    AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                              DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &pAdminSid);
+
+    /* Authenticated Users SID */
+    PSID pAuthUsersSid = NULL;
+    AllocateAndInitializeSid(&ntAuth, 1, SECURITY_AUTHENTICATED_USER_RID,
+                              0, 0, 0, 0, 0, 0, 0, &pAuthUsersSid);
+
+    /* Build explicit access array */
+    ZeroMemory(ea, sizeof(ea));
+
+    /* SYSTEM: Full Control */
+    ea[0].grfAccessPermissions = GENERIC_ALL;
+    ea[0].grfAccessMode = SET_ACCESS;
+    ea[0].grfInheritance = NO_INHERITANCE;
+    ea[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea[0].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea[0].Trustee.ptstrName = (LPSTR)pSystemSid;
+
+    /* Administrators: Full Control */
+    ea[1].grfAccessPermissions = GENERIC_ALL;
+    ea[1].grfAccessMode = SET_ACCESS;
+    ea[1].grfInheritance = NO_INHERITANCE;
+    ea[1].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea[1].Trustee.TrusteeType = TRUSTEE_IS_GROUP;
+    ea[1].Trustee.ptstrName = (LPSTR)pAdminSid;
+
+    /* Authenticated Users: Read-only */
+    ea[2].grfAccessPermissions = GENERIC_READ;
+    ea[2].grfAccessMode = SET_ACCESS;
+    ea[2].grfInheritance = NO_INHERITANCE;
+    ea[2].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea[2].Trustee.TrusteeType = TRUSTEE_IS_GROUP;
+    ea[2].Trustee.ptstrName = (LPSTR)pAuthUsersSid;
+
+    /* Create ACL */
+    dwRes = SetEntriesInAclA(3, ea, NULL, &pACL);
+    if (dwRes != ERROR_SUCCESS) {
+        if (pSystemSid) FreeSid(pSystemSid);
+        if (pAdminSid) FreeSid(pAdminSid);
+        if (pAuthUsersSid) FreeSid(pAuthUsersSid);
+        return -1;
+    }
+
+    /* Apply ACL to file */
+    dwRes = SetNamedSecurityInfoA((LPSTR)filePath, SE_FILE_OBJECT,
+                                   DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                   NULL, NULL, pACL, NULL);
+
+    /* Cleanup */
+    if (pACL) LocalFree(pACL);
+    if (pSystemSid) FreeSid(pSystemSid);
+    if (pAdminSid) FreeSid(pAdminSid);
+    if (pAuthUsersSid) FreeSid(pAuthUsersSid);
+
+    return (dwRes == ERROR_SUCCESS) ? 0 : -1;
+}
+
+/* ── Service Control Handler ───────────────────────────────────── */
+
+/**
+ * @brief SCM control handler (registered via RegisterServiceCtrlHandlerA).
+ *
+ * Dispatches control codes from the Service Control Manager.
+ * The module-global g_ctx must point to a valid OmniRDPSvcContext
+ * when this callback is invoked.
+ */
+static void WINAPI service_ctrl_handler(DWORD dwControl) {
+    if (!g_ctx)
+        return;
+
+    switch (dwControl) {
+        case SERVICE_CONTROL_STOP:
+            LOG_I("ServiceCtrlHandler", "Received SERVICE_CONTROL_STOP");
+            g_ctx->shuttingDown = TRUE;
+            g_ctx->status.dwCurrentState = SERVICE_STOP_PENDING;
+            g_ctx->status.dwWaitHint = 30000; /* 30 seconds */
+            SetServiceStatus(g_ctx->statusHandle, &g_ctx->status);
+            SetEvent(g_ctx->hStopEvent);
+            break;
+
+        case SERVICE_CONTROL_INTERROGATE:
+            SetServiceStatus(g_ctx->statusHandle, &g_ctx->status);
+            break;
+
+        /*
+         * SERVICE_CONTROL_PARAMCHANGE is reserved for future use
+         * (hot-reload configuration at runtime).
+         */
+        default:
+            break;
+    }
+}
+
+/* ── Console Control Handler ───────────────────────────────────── */
+
+/**
+ * @brief Console control handler (registered via SetConsoleCtrlHandler).
+ *
+ * Translates Ctrl+C / Ctrl+Break into a stop-event signal so that
+ * the console main loop exits cleanly.
+ */
+static BOOL WINAPI console_ctrl_handler(DWORD dwCtrlType) {
+    if (dwCtrlType == CTRL_C_EVENT || dwCtrlType == CTRL_BREAK_EVENT) {
+        if (g_ctx) {
+            LOG_I("ConsoleCtrlHandler",
+                  "Received Ctrl+C / Ctrl+Break");
+            g_ctx->shuttingDown = TRUE;
+            SetEvent(g_ctx->hStopEvent);
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* ── svc_service_install ───────────────────────────────────────── */
+
+int svc_service_install(const char *serviceName, const char *configPath) {
+    if (!serviceName || serviceName[0] == '\0') {
+        fprintf(stderr, "svc_service_install: serviceName is required\n");
+        return -1;
+    }
+
+    SC_HANDLE schSCManager = OpenSCManagerA(
+        NULL, NULL, SC_MANAGER_CREATE_SERVICE);
+    if (!schSCManager) {
+        fprintf(stderr, "OpenSCManager failed: %lu\n", GetLastError());
+        return -1;
+    }
+
+    /* Get the current executable's full path */
+    char modulePath[MAX_PATH];
+    DWORD len = GetModuleFileNameA(NULL, modulePath, sizeof(modulePath));
+    if (len == 0 || len >= sizeof(modulePath)) {
+        fprintf(stderr, "GetModuleFileName failed: %lu\n", GetLastError());
+        CloseServiceHandle(schSCManager);
+        return -1;
+    }
+
+    /*
+     * Build the service binary command line:
+     *   "<exePath>" --service --service-name "<svcName>" [--config "<configPath>"]
+     *
+     * Including --service-name ensures the SCM restarts the service
+     * with the correct custom name rather than falling back to "OmniRDP".
+     */
+    char binaryPath[2048];
+    int ret = _snprintf(binaryPath, sizeof(binaryPath),
+                        "\"%s\" --service --service-name \"%s\"",
+                        modulePath, serviceName);
+    if (ret < 0 || (size_t)ret >= sizeof(binaryPath)) {
+        fprintf(stderr, "Binary path too long\n");
+        CloseServiceHandle(schSCManager);
+        return -1;
+    }
+
+    if (configPath && configPath[0] != '\0') {
+        size_t existing = strlen(binaryPath);
+        ret = _snprintf(binaryPath + existing,
+                        sizeof(binaryPath) - existing,
+                        " --config \"%s\"", configPath);
+        if (ret < 0 || existing + (size_t)ret >= sizeof(binaryPath)) {
+            fprintf(stderr, "Binary path with config too long\n");
+            CloseServiceHandle(schSCManager);
+            return -1;
+        }
+    }
+
+    SC_HANDLE schService = CreateServiceA(
+        schSCManager,                    /* SCM database */
+        serviceName,                     /* service name */
+        serviceName,                     /* display name */
+        SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG,              /* desired access */
+        SERVICE_WIN32_OWN_PROCESS,       /* service type */
+        SERVICE_AUTO_START,              /* start type */
+        SERVICE_ERROR_NORMAL,            /* error control */
+        binaryPath,                      /* binary path */
+        NULL,                            /* load order group */
+        NULL,                            /* tag identifier */
+        NULL,                            /* dependencies */
+        "NT AUTHORITY\\NetworkService",  /* service start account */
+        NULL);                           /* password */
+
+    if (!schService) {
+        fprintf(stderr, "CreateService failed: %lu\n", GetLastError());
+        CloseServiceHandle(schSCManager);
+        return -1;
+    }
+
+    /* Set a human-readable description */
+    SERVICE_DESCRIPTIONA desc;
+    desc.lpDescription = "OmniRDP RDP Multiplexer Service";
+    ChangeServiceConfig2A(schService, SERVICE_CONFIG_DESCRIPTION, &desc);
+
+    CloseServiceHandle(schService);
+    CloseServiceHandle(schSCManager);
+
+    return 0;
+}
+
+/* ── svc_service_uninstall ─────────────────────────────────────── */
+
+int svc_service_uninstall(const char *serviceName) {
+    if (!serviceName || serviceName[0] == '\0') {
+        fprintf(stderr, "svc_service_uninstall: serviceName is required\n");
+        return -1;
+    }
+
+    SC_HANDLE schSCManager = OpenSCManagerA(
+        NULL, NULL, SC_MANAGER_CONNECT);
+    if (!schSCManager) {
+        fprintf(stderr, "OpenSCManager failed: %lu\n", GetLastError());
+        return -1;
+    }
+
+    SC_HANDLE schService = OpenServiceA(
+        schSCManager, serviceName, SERVICE_STOP | DELETE);
+    if (!schService) {
+        fprintf(stderr, "OpenService failed: %lu\n", GetLastError());
+        CloseServiceHandle(schSCManager);
+        return -1;
+    }
+
+    /* Try to stop the service if it is running */
+    SERVICE_STATUS status;
+    if (ControlService(schService, SERVICE_CONTROL_STOP, &status)) {
+        /* Poll for up to 30 seconds waiting for SERVICE_STOPPED */
+        for (int i = 0; i < 30; i++) {
+            if (!QueryServiceStatus(schService, &status))
+                break;
+            if (status.dwCurrentState == SERVICE_STOPPED)
+                break;
+            Sleep(1000);
+        }
+    }
+
+    /* Delete the service */
+    if (!DeleteService(schService)) {
+        fprintf(stderr, "DeleteService failed: %lu\n", GetLastError());
+        CloseServiceHandle(schService);
+        CloseServiceHandle(schSCManager);
+        return -1;
+    }
+
+    CloseServiceHandle(schService);
+    CloseServiceHandle(schSCManager);
+
+    return 0;
+}
+
+/* ── svc_service_start ─────────────────────────────────────────── */
+
+int svc_service_start(const char *serviceName, const char *configPath) {
+    OmniRDPSvcContext ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    g_ctx = &ctx;
+
+    /* ── Determine service name ─────────────────────────────── */
+    if (serviceName && serviceName[0] != '\0') {
+        strncpy(ctx.serviceName, serviceName, sizeof(ctx.serviceName) - 1);
+        ctx.serviceName[sizeof(ctx.serviceName) - 1] = '\0';
+    } else {
+        strncpy(ctx.serviceName, "OmniRDP", sizeof(ctx.serviceName) - 1);
+    }
+    ctx.shuttingDown = FALSE;
+
+    /* ── 1. Register the service control handler ────────────── */
+    ctx.statusHandle = RegisterServiceCtrlHandlerA(
+        ctx.serviceName, service_ctrl_handler);
+    if (!ctx.statusHandle) {
+        /* Cannot log yet; fall back to debug output */
+        OutputDebugStringA("[svc_service] RegisterServiceCtrlHandlerA failed\n");
+        g_ctx = NULL;
+        return -1;
+    }
+
+    /* ── 2. Report SERVICE_START_PENDING ────────────────────── */
+    ctx.status.dwServiceType             = SERVICE_WIN32_OWN_PROCESS;
+    ctx.status.dwCurrentState            = SERVICE_START_PENDING;
+    ctx.status.dwControlsAccepted        = SERVICE_ACCEPT_STOP;
+    ctx.status.dwWin32ExitCode           = NO_ERROR;
+    ctx.status.dwServiceSpecificExitCode = 0;
+    ctx.status.dwCheckPoint              = 0;
+    ctx.status.dwWaitHint                = 10000; /* 10 seconds */
+    SetServiceStatus(ctx.statusHandle, &ctx.status);
+
+    /* ── 3. Create the stop event ───────────────────────────── */
+    ctx.hStopEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (!ctx.hStopEvent) {
+        OutputDebugStringA("[svc_service] CreateEvent failed\n");
+        g_ctx = NULL;
+        return -1;
+    }
+
+    /* ── 4. Load configuration ──────────────────────────────── */
+    if (!configPath || configPath[0] == '\0')
+        configPath = "C:\\ProgramData\\OmniRDP\\config.ini";
+
+    strncpy(ctx.configPath, configPath, sizeof(ctx.configPath) - 1);
+    ctx.configPath[sizeof(ctx.configPath) - 1] = '\0';
+
+    ctx.config = svc_config_load(configPath);
+    /* If config fails we continue with defaults for logging */
+
+    /* Set ACL on config file */
+    if (set_config_file_acl(configPath) != 0) {
+        LOG_W("svc_service", "Failed to set config file ACL (error %lu)", GetLastError());
+        /* Non-fatal: continue with reduced security */
+    } else {
+        LOG_I("svc_service", "Config file ACL set successfully");
+    }
+
+    SvcServiceConfig *svcCfg =
+        ctx.config ? &ctx.config->service : NULL;
+
+    /* ── 5. Initialize logging (per-service log directory) ──── */
+    {
+        char          log_dir[MAX_PATH];
+        SvcLogLevel   log_level   = SVC_LOG_INFO;
+        unsigned int  max_size_mb = 10;
+        unsigned int  max_files   = 5;
+
+        if (svcCfg && svcCfg->log_dir[0] != '\0') {
+            /* Use configured log dir, but append service name for per-service isolation */
+            snprintf(log_dir, sizeof(log_dir), "%s\\%s",
+                     svcCfg->log_dir, ctx.serviceName);
+        } else {
+            snprintf(log_dir, sizeof(log_dir),
+                     "C:\\ProgramData\\OmniRDP\\logs\\%s", ctx.serviceName);
+        }
+
+        if (svcCfg) {
+            log_level   = parse_log_level(svcCfg->log_level);
+            max_size_mb = svcCfg->log_max_size_mb;
+            max_files   = svcCfg->log_max_files;
+        }
+
+        svc_log_init(log_dir, log_level, max_size_mb, max_files);
+    }
+
+    LOG_I("svc_service_start",
+          "OmniRDP service starting (serviceName=%s, configPath=%s)",
+          ctx.serviceName, ctx.configPath);
+
+    /* ── 6. Find the OmniRDP.exe path ───────────────────────── */
+    if (get_binary_path("OmniRDP.exe", ctx.exePath,
+                        sizeof(ctx.exePath)) != 0) {
+        LOG_W("svc_service_start",
+              "Failed to locate OmniRDP.exe; using fallback name");
+        strncpy(ctx.exePath, "OmniRDP.exe", sizeof(ctx.exePath) - 1);
+        ctx.exePath[sizeof(ctx.exePath) - 1] = '\0';
+    }
+
+    /* ── 7. Initialize the instance manager ─────────────────── */
+    if (inst_mgr_init(&ctx.mgr, ctx.config, ctx.configPath,
+                      ctx.exePath) != 0) {
+        LOG_E("svc_service_start", "inst_mgr_init failed");
+        SetEvent(ctx.hStopEvent);
+        /* Fall through to the shutdown path */
+    } else {
+        /* ── 8. Report SERVICE_RUNNING ───────────────────────── */
+        ctx.status.dwCurrentState = SERVICE_RUNNING;
+        ctx.status.dwCheckPoint   = 0;
+        ctx.status.dwWaitHint     = 0;
+        SetServiceStatus(ctx.statusHandle, &ctx.status);
+
+        /* ── Start all enabled instances ────────────────────── */
+        inst_mgr_start_all(&ctx.mgr);
+
+        LOG_I("svc_service_start",
+              "Service is running with %u instances",
+              ctx.config ? ctx.config->instance_count : 0);
+    }
+
+    /* Initialize pipe server for tray app communication */
+    {
+        char pipeName[256];
+        snprintf(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName);
+        /* Replace hyphens with underscores for Windows pipe name compatibility */
+        for (char *p = pipeName; *p; p++) {
+            if (*p == '-') *p = '_';
+        }
+        if (pipe_server_init(&ctx.pipeServer, pipeName, &ctx.mgr) != 0) {
+            LOG_E("svc_service_start", "Failed to initialize pipe server");
+            /* Continue anyway — pipe server is not critical for operation */
+        }
+    }
+
+    /* ── 9. Main service loop ───────────────────────────────── */
+    {
+        unsigned int intervalSec = 2; /* default */
+        if (svcCfg && svcCfg->health_poll_interval_sec > 0)
+            intervalSec = svcCfg->health_poll_interval_sec;
+        DWORD pollIntervalMs = intervalSec * 1000;
+
+        while (!ctx.shuttingDown) {
+            DWORD wr = WaitForSingleObject(ctx.hStopEvent,
+                                           pollIntervalMs);
+            if (wr == WAIT_OBJECT_0)
+                break; /* stop event was signaled */
+
+            /* Poll instance health and reconnection logic */
+            inst_mgr_poll(&ctx.mgr);
+
+            /* Push stats to connected tray apps every 5 seconds */
+            {
+                static ULONGLONG lastStatsPushMs = 0;
+                ULONGLONG nowMs = GetTickCount64();
+                if (nowMs - lastStatsPushMs >= 5000) {
+                    pipe_server_push_stats(&ctx.pipeServer);
+                    lastStatsPushMs = nowMs;
+                }
+            }
+        }
+    }
+
+    /* ── 10. Shutdown sequence ──────────────────────────────── */
+    LOG_I("svc_service_start", "Service shutting down");
+
+    ctx.status.dwCurrentState = SERVICE_STOP_PENDING;
+    ctx.status.dwCheckPoint   = 0;
+    ctx.status.dwWaitHint     = (svcCfg && svcCfg->graceful_shutdown_sec > 0)
+                                    ? svcCfg->graceful_shutdown_sec * 1000
+                                    : 10000;
+    SetServiceStatus(ctx.statusHandle, &ctx.status);
+
+    inst_mgr_stop_all(&ctx.mgr);
+    inst_mgr_cleanup(&ctx.mgr);
+
+    pipe_server_stop(&ctx.pipeServer);
+
+    if (ctx.config) {
+        svc_config_free(ctx.config);
+        ctx.config = NULL;
+    }
+
+    svc_log_shutdown();
+
+    CloseHandle(ctx.hStopEvent);
+    ctx.hStopEvent = NULL;
+
+    /* Report SERVICE_STOPPED back to the SCM */
+    ctx.status.dwCurrentState = SERVICE_STOPPED;
+    ctx.status.dwCheckPoint   = 0;
+    ctx.status.dwWaitHint     = 0;
+    SetServiceStatus(ctx.statusHandle, &ctx.status);
+
+    g_ctx = NULL;
+
+    return 0;
+}
+
+/* ── svc_service_run_console ───────────────────────────────────── */
+
+int svc_service_run_console(const char *serviceName,
+                            const char *configPath) {
+    OmniRDPSvcContext ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    g_ctx = &ctx;
+
+    /* ── Service name ──────────────────────────────────────────── */
+    if (serviceName && serviceName[0] != '\0') {
+        strncpy(ctx.serviceName, serviceName, sizeof(ctx.serviceName) - 1);
+        ctx.serviceName[sizeof(ctx.serviceName) - 1] = '\0';
+    } else {
+        strncpy(ctx.serviceName, "OmniRDP", sizeof(ctx.serviceName) - 1);
+    }
+    ctx.shuttingDown = FALSE;
+
+    /* ── Register Ctrl+C / Ctrl+Break handler ──────────────────── */
+    if (!SetConsoleCtrlHandler(console_ctrl_handler, TRUE)) {
+        fprintf(stderr, "SetConsoleCtrlHandler failed: %lu\n",
+                GetLastError());
+        g_ctx = NULL;
+        return -1;
+    }
+
+    /* ── Create the stop event ─────────────────────────────────── */
+    ctx.hStopEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (!ctx.hStopEvent) {
+        fprintf(stderr, "CreateEvent failed: %lu\n", GetLastError());
+        g_ctx = NULL;
+        return -1;
+    }
+
+    /* ── Load configuration ────────────────────────────────────── */
+    if (!configPath || configPath[0] == '\0')
+        configPath = "C:\\ProgramData\\OmniRDP\\config.ini";
+
+    strncpy(ctx.configPath, configPath, sizeof(ctx.configPath) - 1);
+    ctx.configPath[sizeof(ctx.configPath) - 1] = '\0';
+
+    ctx.config = svc_config_load(configPath);
+
+    /* Set ACL on config file */
+    if (set_config_file_acl(configPath) != 0) {
+        LOG_W("svc_service", "Failed to set config file ACL (error %lu)", GetLastError());
+        /* Non-fatal: continue with reduced security */
+    } else {
+        LOG_I("svc_service", "Config file ACL set successfully");
+    }
+
+    SvcServiceConfig *svcCfg =
+        ctx.config ? &ctx.config->service : NULL;
+
+    /* ── Initialize logging (per-service log directory) ────────── */
+    {
+        char          log_dir[MAX_PATH];
+        SvcLogLevel   log_level   = SVC_LOG_INFO;
+        unsigned int  max_size_mb = 10;
+        unsigned int  max_files   = 5;
+
+        if (svcCfg && svcCfg->log_dir[0] != '\0') {
+            /* Use configured log dir, but append service name for per-service isolation */
+            snprintf(log_dir, sizeof(log_dir), "%s\\%s",
+                     svcCfg->log_dir, ctx.serviceName);
+        } else {
+            snprintf(log_dir, sizeof(log_dir),
+                     "C:\\ProgramData\\OmniRDP\\logs\\%s", ctx.serviceName);
+        }
+
+        if (svcCfg) {
+            log_level   = parse_log_level(svcCfg->log_level);
+            max_size_mb = svcCfg->log_max_size_mb;
+            max_files   = svcCfg->log_max_files;
+        }
+
+        svc_log_init(log_dir, log_level, max_size_mb, max_files);
+    }
+
+    LOG_I("svc_service_run_console",
+          "OmniRDP running in console mode (serviceName=%s, "
+          "configPath=%s)",
+          ctx.serviceName, ctx.configPath);
+
+    printf("[OmniRDP] Running in console mode. Press Ctrl+C to stop.\n");
+    printf("[OmniRDP] Service name: %s\n", ctx.serviceName);
+    printf("[OmniRDP] Config path:  %s\n", ctx.configPath);
+
+    /* ── Find the OmniRDP.exe path ─────────────────────────────── */
+    if (get_binary_path("OmniRDP.exe", ctx.exePath,
+                        sizeof(ctx.exePath)) != 0) {
+        LOG_W("svc_service_run_console",
+              "Failed to locate OmniRDP.exe; using fallback name");
+        strncpy(ctx.exePath, "OmniRDP.exe", sizeof(ctx.exePath) - 1);
+        ctx.exePath[sizeof(ctx.exePath) - 1] = '\0';
+    }
+
+    /* ── Initialize the instance manager ───────────────────────── */
+    if (inst_mgr_init(&ctx.mgr, ctx.config, ctx.configPath,
+                      ctx.exePath) != 0) {
+        LOG_E("svc_service_run_console", "inst_mgr_init failed");
+        printf("[OmniRDP] ERROR: instance manager initialization "
+               "failed\n");
+        SetEvent(ctx.hStopEvent);
+    } else {
+        /* ── Start all enabled instances ───────────────────────── */
+        inst_mgr_start_all(&ctx.mgr);
+
+        LOG_I("svc_service_run_console",
+              "Console mode running with %u instances",
+               ctx.config ? ctx.config->instance_count : 0);
+        printf("[OmniRDP] %u instance(s) configured\n",
+               ctx.config ? ctx.config->instance_count : 0);
+    }
+
+    /* Initialize pipe server for tray app communication */
+    {
+        char pipeName[256];
+        snprintf(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName);
+        /* Replace hyphens with underscores for Windows pipe name compatibility */
+        for (char *p = pipeName; *p; p++) {
+            if (*p == '-') *p = '_';
+        }
+        if (pipe_server_init(&ctx.pipeServer, pipeName, &ctx.mgr) != 0) {
+            LOG_E("svc_service_run_console", "Failed to initialize pipe server");
+            /* Continue anyway — pipe server is not critical for operation */
+        }
+    }
+
+    /* ── Main loop ──────────────────────────────────────────────── */
+    {
+        unsigned int intervalSec = 2;
+        if (svcCfg && svcCfg->health_poll_interval_sec > 0)
+            intervalSec = svcCfg->health_poll_interval_sec;
+        DWORD pollIntervalMs = intervalSec * 1000;
+
+        while (!ctx.shuttingDown) {
+            DWORD wr = WaitForSingleObject(ctx.hStopEvent,
+                                           pollIntervalMs);
+            if (wr == WAIT_OBJECT_0)
+                break;
+            inst_mgr_poll(&ctx.mgr);
+
+            /* Push stats to connected tray apps every 5 seconds */
+            {
+                static ULONGLONG lastStatsPushMs = 0;
+                ULONGLONG nowMs = GetTickCount64();
+                if (nowMs - lastStatsPushMs >= 5000) {
+                    pipe_server_push_stats(&ctx.pipeServer);
+                    lastStatsPushMs = nowMs;
+                }
+            }
+        }
+    }
+
+    /* ── Shutdown ───────────────────────────────────────────────── */
+    LOG_I("svc_service_run_console", "Shutting down...");
+    printf("[OmniRDP] Shutting down...\n");
+
+    inst_mgr_stop_all(&ctx.mgr);
+    inst_mgr_cleanup(&ctx.mgr);
+
+    pipe_server_stop(&ctx.pipeServer);
+
+    if (ctx.config) {
+        svc_config_free(ctx.config);
+        ctx.config = NULL;
+    }
+
+    svc_log_shutdown();
+
+    CloseHandle(ctx.hStopEvent);
+    ctx.hStopEvent = NULL;
+
+    g_ctx = NULL;
+
+    printf("[OmniRDP] Done.\n");
+
+    return 0;
+}

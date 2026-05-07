@@ -13,6 +13,9 @@
 #include <winpr/thread.h>
 #include <winpr/wtsapi.h>
 
+/* Instance runner entry point (instance_runner.c) */
+int instance_runner_main(int argc, char *argv[]);
+
 static volatile int running = 1;
 static ViewerServer *g_server = NULL;
 
@@ -29,11 +32,18 @@ static DWORD WINAPI server_thread(LPVOID arg) {
 }
 
 void print_usage(const char *program) {
-  printf(
-      "Usage: %s <hostname> <port> <username> <password> [domain] [monitors]\n",
-      program);
-  printf("Example: %s 192.168.1.209 3389 localadmin localadmin . 2\n", program);
+  printf("Usage:\n");
+  printf("  %s <hostname> <port> <username> <password> [domain] [monitors]\n",
+         program);
+  printf("  %s --instance <name> --secrets-handle <handle> [--config <path>]\n",
+         program);
+  printf("\nStandalone mode:\n");
+  printf("  Example: %s 192.168.1.209 3389 localadmin localadmin . 2\n", program);
   printf("  monitors: number of 1920x1080 monitors (1-16, default: 1)\n");
+  printf("\nInstance mode (spawned by OmniRDP-svc):\n");
+  printf("  --instance     Instance name from config.ini\n");
+  printf("  --secrets-handle  Windows HANDLE for password pipe\n");
+  printf("  --config       Path to config.ini (default: C:\\ProgramData\\OmniRDP\\config.ini)\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -44,6 +54,15 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 #endif
+
+  /* Instance mode: --instance <name> --secrets-handle <handle> [--config <path>] */
+  if (argc >= 2 && strcmp(argv[1], "--instance") == 0) {
+    int ret = instance_runner_main(argc, argv);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+    return ret;
+  }
 
   if (argc < 5) {
     print_usage(argv[0]);
