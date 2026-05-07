@@ -181,6 +181,24 @@ int instance_runner_main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* Set working directory to the executable's directory so that
+     * relative paths (server.crt, server.key) are resolved correctly.
+     * This is needed because the service spawns us with a different
+     * working directory (typically C:\Windows\System32). */
+    {
+        char exePath[MAX_PATH];
+        char exeDir[MAX_PATH];
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        char *lastSlash = strrchr(exePath, '\\');
+        if (lastSlash) {
+            size_t dirLen = (size_t)(lastSlash - exePath);
+            memcpy(exeDir, exePath, dirLen);
+            exeDir[dirLen] = '\0';
+            SetCurrentDirectoryA(exeDir);
+            LOG_I("instance_runner", "Working directory set to: %s", exeDir);
+        }
+    }
+
     printf("Instance runner: name=%s, config=%s\n", args.instance_name, args.config_path);
 
     /* Load config */
@@ -199,7 +217,7 @@ int instance_runner_main(int argc, char *argv[]) {
     }
 
     if (!inst->enabled) {
-        fprintf(stderr, "Instance '%s' is disabled\n", args.instance_name);
+        LOG_W("instance_runner", "Instance '%s' is disabled", args.instance_name);
         svc_config_free(config);
         return 1;
     }
@@ -214,10 +232,9 @@ int instance_runner_main(int argc, char *argv[]) {
     /* Setup signal handling */
     platform_signal_init(instance_shutdown_handler);
 
-    printf("Instance '%s': Connecting to %s:%u\n", args.instance_name,
-           inst->backend_hostname, inst->backend_port);
-    printf("  Viewer: %s:%u, Monitors: %u\n", inst->viewer_bind_address,
-           inst->viewer_port, inst->display_monitor_count);
+    LOG_I("instance_runner", "Backend target: %s:%u, Viewer: %s:%u, Monitors: %u",
+          inst->backend_hostname, inst->backend_port,
+          inst->viewer_bind_address, inst->viewer_port, inst->display_monitor_count);
 
     /* Initialize logging */
     {
@@ -227,7 +244,7 @@ int instance_runner_main(int argc, char *argv[]) {
         char instance_log_dir[512];
         snprintf(instance_log_dir, sizeof(instance_log_dir), "%s\\%s",
                  log_dir, args.instance_name);
-        svc_log_init(instance_log_dir, SVC_LOG_INFO, 10, 5);
+        svc_log_init(instance_log_dir, SVC_LOG_DEBUG, 10, 5);
         LOG_I("instance_runner", "Instance '%s' starting (config=%s)",
               args.instance_name, args.config_path);
     }
@@ -235,7 +252,7 @@ int instance_runner_main(int argc, char *argv[]) {
     /* Initialize backend */
     BackendClient *client = backend_init();
     if (!client) {
-        fprintf(stderr, "Failed to initialize backend client\n");
+        LOG_E("instance_runner", "Failed to initialize backend client for '%s'", args.instance_name);
         /* Zero out password before freeing config */
         SecureZeroMemory(password, sizeof(password));
         svc_config_free(config);
@@ -246,7 +263,7 @@ int instance_runner_main(int argc, char *argv[]) {
 
     if (!backend_configure(client, inst->backend_hostname, inst->backend_port,
                            inst->backend_username, password, inst->backend_domain)) {
-        fprintf(stderr, "Failed to configure backend\n");
+        LOG_E("instance_runner", "Failed to configure backend for '%s'", args.instance_name);
         SecureZeroMemory(password, sizeof(password));
         backend_free(client);
         svc_config_free(config);
@@ -257,20 +274,19 @@ int instance_runner_main(int argc, char *argv[]) {
     SecureZeroMemory(password, sizeof(password));
 
     if (!backend_connect(client)) {
-        fprintf(stderr, "Failed to connect to backend %s:%u\n",
-                inst->backend_hostname, inst->backend_port);
+        LOG_E("instance_runner", "Failed to connect to backend %s:%u", inst->backend_hostname, inst->backend_port);
         backend_free(client);
         svc_config_free(config);
         return 1;
     }
 
-    printf("Connected to backend successfully\n");
+    LOG_I("instance_runner", "Connected to backend %s:%u successfully", inst->backend_hostname, inst->backend_port);
 
     /* Initialize viewer server */
     ViewerServer *server = viewer_server_init(inst->viewer_bind_address,
                                               inst->viewer_port, client);
     if (!server) {
-        fprintf(stderr, "Failed to initialize viewer server\n");
+        LOG_E("instance_runner", "Failed to initialize viewer server on %s:%u", inst->viewer_bind_address, inst->viewer_port);
         backend_disconnect(client);
         backend_free(client);
         svc_config_free(config);
@@ -281,7 +297,7 @@ int instance_runner_main(int argc, char *argv[]) {
     {
         extern const WtsApiFunctionTable *FreeRDP_InitWtsApi(void);
         if (!WTSRegisterWtsApiFunctionTable(FreeRDP_InitWtsApi())) {
-            fprintf(stderr, "Failed to register FreeRDP WTS API\n");
+            LOG_E("instance_runner", "Failed to register FreeRDP WTS API");
             viewer_server_free(server);
             backend_disconnect(client);
             backend_free(client);
@@ -294,7 +310,7 @@ int instance_runner_main(int argc, char *argv[]) {
 
     HANDLE server_tid = CreateThread(NULL, 0, instance_server_thread, server, 0, NULL);
     if (!server_tid) {
-        fprintf(stderr, "Failed to create server thread\n");
+        LOG_E("instance_runner", "Failed to create viewer server thread");
         viewer_server_free(server);
         backend_disconnect(client);
         backend_free(client);
@@ -302,7 +318,7 @@ int instance_runner_main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Viewer server started on %s:%u\n", inst->viewer_bind_address, inst->viewer_port);
+    LOG_I("instance_runner", "Viewer server started on %s:%u", inst->viewer_bind_address, inst->viewer_port);
 
     /* Start heartbeat thread */
     HANDLE hHeartbeat = CreateThread(NULL, 0, heartbeat_thread,

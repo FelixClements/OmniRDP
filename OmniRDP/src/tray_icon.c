@@ -1031,7 +1031,7 @@ tray_icon_refresh_instances(TrayAppCtx *ctx)
 
                 if (field)
                 {
-                    valStart = field + 12; /* skip \"name\":\" */
+                    valStart = field + 11; /* skip \"name\":\" */
                 }
                 else
                 {
