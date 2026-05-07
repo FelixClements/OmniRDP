@@ -134,7 +134,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     InitCommonControlsEx(&icc);
 
     /* Initialize logging */
-    svc_log_init("C:\\ProgramData\\OmniRDP\\logs", SVC_LOG_INFO, 10, 5);
+    svc_log_init("C:\\ProgramData\\OmniRDP\\logs", SVC_LOG_DEBUG, 10, 5);
     LOG_I("tray", "OmniRDP Tray starting");
 
     /* Initialize tray context */

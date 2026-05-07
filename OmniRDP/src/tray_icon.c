@@ -986,7 +986,7 @@ tray_icon_refresh_instances(TrayAppCtx *ctx)
         }
         else
         {
-            arrStart += 16; /* skip past \"instances\":[ */
+            arrStart += 15; /* skip past \"instances\":[ */
         }
 
         const char *p = arrStart;
