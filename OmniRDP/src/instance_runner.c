@@ -219,6 +219,19 @@ int instance_runner_main(int argc, char *argv[]) {
     printf("  Viewer: %s:%u, Monitors: %u\n", inst->viewer_bind_address,
            inst->viewer_port, inst->display_monitor_count);
 
+    /* Initialize logging */
+    {
+        const char *log_dir = config->service.log_dir[0] != '\0'
+                              ? config->service.log_dir
+                              : "C:\\ProgramData\\OmniRDP\\logs";
+        char instance_log_dir[512];
+        snprintf(instance_log_dir, sizeof(instance_log_dir), "%s\\%s",
+                 log_dir, args.instance_name);
+        svc_log_init(instance_log_dir, SVC_LOG_INFO, 10, 5);
+        LOG_I("instance_runner", "Instance '%s' starting (config=%s)",
+              args.instance_name, args.config_path);
+    }
+
     /* Initialize backend */
     BackendClient *client = backend_init();
     if (!client) {

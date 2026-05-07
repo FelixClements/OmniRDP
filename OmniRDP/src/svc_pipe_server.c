@@ -107,13 +107,13 @@ build_pipe_security_attributes(SECURITY_ATTRIBUTES *sa,
     /*
      * Calculate the ACL buffer size:
      *   sizeof(ACL)                      – header
-     *   2 × (sizeof(ACCESS_ALLOWED_ACE)  – ace headers (minus the DWORD
+     *   3 × (sizeof(ACCESS_ALLOWED_ACE)  – ace headers (minus the DWORD
      *       - sizeof(DWORD))               trailing SidStart member)
-     *   2 × SECURITY_MAX_SID_SIZE        – worst-case SID storage
+     *   3 × SECURITY_MAX_SID_SIZE        – worst-case SID storage
      */
     DWORD aclSize = (DWORD)(sizeof(ACL)
-        + 2 * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD))
-        + 2 * SECURITY_MAX_SID_SIZE);
+        + 3 * (sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD))
+        + 3 * SECURITY_MAX_SID_SIZE);
 
     PACL acl = (PACL)LocalAlloc(LPTR, aclSize);
     if (!acl)
@@ -128,6 +128,17 @@ build_pipe_security_attributes(SECURITY_ATTRIBUTES *sa,
     {
         PSID sid = NULL;
         if (!AllocateAndInitializeSid(&ntAuth, 1, SECURITY_LOCAL_SYSTEM_RID,
+                                      0, 0, 0, 0, 0, 0, 0, &sid))
+            goto fail;
+        AddAccessAllowedAceEx(acl, ACL_REVISION, 0,
+                              GENERIC_READ | GENERIC_WRITE, sid);
+        FreeSid(sid);
+    }
+
+    /* ── NetworkService ──────────────────────────────────────── */
+    {
+        PSID sid = NULL;
+        if (!AllocateAndInitializeSid(&ntAuth, 1, SECURITY_NETWORK_SERVICE_RID,
                                       0, 0, 0, 0, 0, 0, 0, &sid))
             goto fail;
         AddAccessAllowedAceEx(acl, ACL_REVISION, 0,
