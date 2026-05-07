@@ -43,6 +43,6 @@ Filename: "{app}\OmniRDP-tray.exe"; Parameters: "--install"; Flags: runasorigina
 
 [UninstallRun]
 ; Uninstall tray
-Filename: "{app}\OmniRDP-tray.exe"; Parameters: "--uninstall"; Flags: runasoriginaluser
+Filename: "{app}\OmniRDP-tray.exe"; Parameters: "--uninstall"
 ; Uninstall service
-Filename: "{app}\OmniRDP-svc.exe"; Parameters: "--uninstall"; Flags: runasoriginaluser
+Filename: "{app}\OmniRDP-svc.exe"; Parameters: "--uninstall"
