@@ -1,5 +1,6 @@
 #include <assert.h>
 #include "viewer_internal.h"
+#include "test_utils.h"
 
 static void test_ownership_timeout_transitions(void)
 {
@@ -113,6 +114,7 @@ static void test_viewer_ids_start_at_one(void)
 
 int main(void)
 {
+    test_suppress_crt_dialogs();
     test_ownership_timeout_transitions();
     test_dead_owner_clearing();
     test_slow_viewer_detection_thresholds();

@@ -7,15 +7,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # ── AddressSanitizer (MSVC) ───────────────────────────────────────
 option(USE_ADDRESS_SANITIZER "Enable MSVC AddressSanitizer for memory checking" OFF)
 if(USE_ADDRESS_SANITIZER)
-    message(STATUS "AddressSanitizer enabled")
-    # MSVC /fsanitize=address for ASan
-    # Note: vcpkg dependencies will not be instrumented, but that's acceptable for CI
-    foreach(_target OmniRDP OmniRDP-svc OmniRDP-tray)
-        if(TARGET ${_target})
-            target_compile_options(${_target} PRIVATE /fsanitize=address /Zo)
-            target_link_options(${_target} PRIVATE /fsanitize=address)
-        endif()
-    endforeach()
+    message(STATUS "AddressSanitizer enabled for all targets")
+    # Apply globally so test targets inherit ASan instrumentation.
+    # /Zo enables enhanced debug info for better ASan stack traces.
+    add_compile_options(/fsanitize=address /Zo)
+    add_link_options(/fsanitize=address)
 endif()
 
 # ── Find FreeRDP 3.26.0 ───────────────────────────────────────

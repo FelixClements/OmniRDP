@@ -1,0 +1,95 @@
+; ============================================================
+; OmniRDP Service Configuration
+; Location: C:\ProgramData\OmniRDP\config.ini
+;
+; This file was auto-generated on first install.
+; Edit the [instance:Example] section below with your
+; backend RDP server details, then restart the service.
+;
+; Plaintext passwords are automatically encrypted with DPAPI
+; on first start. You can also use dpapi:<base64> values.
+; ============================================================
+
+[service]
+; Log level: debug, info, warn, error
+log_level = info
+
+; Log directory (per-service subdirectory is auto-appended)
+log_dir = C:\ProgramData\OmniRDP\logs
+
+; Log rotation
+log_max_size_mb = 10
+log_max_files = 5
+
+; Named pipe for tray app IPC
+pipe_name = OmniRDP_ServicePipe
+
+; Health monitoring
+heartbeat_timeout_sec = 10
+graceful_shutdown_sec = 10
+health_poll_interval_sec = 2
+instance_startup_delay_ms = 500
+
+[instances]
+; Comma-separated list of instance names.
+; Each name must have a matching [instance:<name>] section.
+; Leave empty to run idle with no instances.
+names = Example
+
+; ============================================================
+; Instance: Example
+; Edit these values with your backend RDP server details.
+; ============================================================
+[instance:Example]
+enabled = true
+
+; Backend RDP server to connect to
+backend.hostname = 192.168.1.10
+backend.port = 3389
+backend.username = localadmin
+backend.password = password
+backend.domain =
+backend.connect_timeout_ms = 30000
+
+; Reconnect policy
+reconnect.enabled = true
+reconnect.max_attempts = 10
+reconnect.initial_delay_ms = 1000
+reconnect.max_delay_ms = 60000
+reconnect.backoff_multiplier = 2.0
+
+; Viewer listener (clients connect here)
+viewer.bind_address = 192.168.1.207
+viewer.port = 3390
+viewer.max_viewers = 10
+viewer.cert_path = C:\server.crt
+viewer.key_path = C:\server.key
+viewer.slow_disconnect_enabled = true
+viewer.slow_lag_interval_ms = 5000
+viewer.slow_disconnect_after_ms = 30000
+viewer.late_join_timeout_ms = 15000
+viewer.late_join_refresh_deadline_ms = 5000
+viewer.late_join_replay_max_frames = 4
+viewer.throttle_max_updates_per_sec = 0
+
+; Display
+display.monitor_count = 1
+display.monitor_width = 1920
+display.monitor_height = 1080
+display.color_depth = 32
+
+; Codecs
+codec.nscodec = false
+codec.remote_fx = false
+codec.graphics_pipeline = false
+codec.h264 = false
+codec.avc444 = false
+codec.avc444v2 = false
+codec.frame_acknowledge = 4
+
+; Security
+security.tls_enabled = true
+security.nla_enabled = false
+security.tls_min_version = 1.2
+security.server_authentication = true
+security.ignore_certificate = false

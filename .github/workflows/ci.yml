@@ -49,6 +49,7 @@ jobs:
   memory-check:
     name: Memory Check (ASan)
     runs-on: windows-2022
+    timeout-minutes: 30
     if: github.event_name == 'push'
     defaults:
       run:
@@ -135,14 +136,73 @@ jobs:
       - name: Run tests under ASan
         shell: pwsh
         run: |
+          # Locate ASan runtime DLL
           $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vsWhere -latest -property installationPath
-          $asanDll = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse -Filter "clang_rt.asan_dynamic-x86_64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $asanDll = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse `
+            -Filter "clang_rt.asan_dynamic-x86_64.dll" `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+
           if ($asanDll) {
             $env:PATH = "$($asanDll.DirectoryName);$env:PATH"
             Write-Output "ASan DLL found at: $($asanDll.FullName)"
+          } else {
+            Write-Warning "ASan DLL not found"
           }
-          ctest --test-dir OmniRDP/build-asan --output-on-failure -C Debug || true
+
+          # ASan options
+          $env:ASAN_OPTIONS = "halt_on_error=1:detect_stack_use_after_return=1:check_initialization_order=1"
+
+          # Run tests individually with timeouts
+          $testDir = "OmniRDP/build-asan/tests"
+          $testBinDir = "$testDir/Debug"
+          $testTimeout = 120
+
+          $tests = @(
+            @{ Name = "test_viewer_state"    },
+            @{ Name = "test_pointer_shape"   },
+            @{ Name = "test_late_join_policy" }
+          )
+
+          $failed = @()
+          foreach ($test in $tests) {
+            $exe = Join-Path $testBinDir "$($test.Name).exe"
+            if (-not (Test-Path $exe)) {
+              Write-Warning "Skipping $($test.Name): binary not found"
+              continue
+            }
+
+            Write-Output "Running $($test.Name) (timeout: ${testTimeout}s)"
+            $proc = Start-Process -FilePath $exe `
+              -NoNewWindow -PassThru `
+              -RedirectStandardOutput "$testDir/$($test.Name).stdout" `
+              -RedirectStandardError "$testDir/$($test.Name).stderr"
+
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $proc.HasExited -and $sw.Elapsed.TotalSeconds -lt $testTimeout) {
+              Start-Sleep -Milliseconds 200
+            }
+
+            if (-not $proc.HasExited) {
+              Write-Output "TIMEOUT: $($test.Name) after ${testTimeout}s"
+              $proc.Kill($true)
+              $proc.WaitForExit(5000)
+              $failed += "$($test.Name) (TIMEOUT)"
+            } elseif ($proc.ExitCode -ne 0) {
+              Write-Output "FAIL: $($test.Name) (exit=$($proc.ExitCode))"
+              Get-Content "$testDir/$($test.Name).stdout" -ErrorAction SilentlyContinue | Select-Object -First 30
+              $failed += "$($test.Name) (exit=$($proc.ExitCode))"
+            } else {
+              Write-Output "PASS: $($test.Name)"
+            }
+          }
+
+          if ($failed.Count -gt 0) {
+            Write-Output "=== FAILURES ==="
+            $failed | ForEach-Object { Write-Output "  $_" }
+            exit 1
+          }
+          Write-Output "All tests passed."
 
   build-windows:
     name: Windows OmniRDP build attempt (${{ matrix.build_type }})
@@ -244,11 +304,41 @@ jobs:
           done
 
       - name: Upload Windows artifacts if build succeeds
-        if: success()
+        if: success() && matrix.build_type == 'Release'
         uses: actions/upload-artifact@v5
         with:
-          name: windows-${{ matrix.build_type }}-OmniRDP
+          name: windows-OmniRDP
           path: artifacts/windows-${{ matrix.build_type }}/
+          retention-days: 30
+          if-no-files-found: error
+
+  build-installer:
+    name: Build Inno Setup Installer
+    runs-on: windows-2022
+    needs: build-windows
+    if: success()
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download Release artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: windows-OmniRDP
+          path: artifacts/windows-Release
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y
+
+      - name: Build installer
+        shell: pwsh
+        run: iscc setup/OmniRDP.iss
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v5
+        with:
+          name: windows-OmniRDP-Setup
+          path: setup/OmniRDP-Setup.exe
           retention-days: 30
           if-no-files-found: error
 

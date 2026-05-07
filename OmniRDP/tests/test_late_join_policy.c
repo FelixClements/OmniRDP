@@ -3,6 +3,7 @@
 #include <freerdp/channels/rdpgfx.h>
 
 #include "viewer_internal.h"
+#include "test_utils.h"
 
 static void test_caps_selection_prefers_highest_version_without_canonical_caps(void)
 {
@@ -199,6 +200,7 @@ static void test_activation_waits_for_caps_and_caps_confirm_can_restart_join(voi
 
 int main(void)
 {
+    test_suppress_crt_dialogs();
     test_caps_selection_prefers_highest_version_without_canonical_caps();
     test_caps_selection_requires_exact_canonical_match();
     test_codec_replay_policy_marks_only_replay_safe_codecs_safe();

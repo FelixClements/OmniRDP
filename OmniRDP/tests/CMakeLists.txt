@@ -61,6 +61,7 @@ add_test(NAME test_viewer_state
         -DTEST_EXECUTABLE_NAME=test_viewer_state${CMAKE_EXECUTABLE_SUFFIX}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
+set_tests_properties(test_viewer_state PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_late_join_policy
     COMMAND ${CMAKE_COMMAND}
@@ -68,6 +69,7 @@ add_test(NAME test_late_join_policy
         -DTEST_EXECUTABLE_NAME=test_late_join_policy${CMAKE_EXECUTABLE_SUFFIX}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
+set_tests_properties(test_late_join_policy PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_pointer_shape
     COMMAND ${CMAKE_COMMAND}
@@ -75,3 +77,4 @@ add_test(NAME test_pointer_shape
         -DTEST_EXECUTABLE_NAME=test_pointer_shape${CMAKE_EXECUTABLE_SUFFIX}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
+set_tests_properties(test_pointer_shape PROPERTIES TIMEOUT 120)

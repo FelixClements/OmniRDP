@@ -4,6 +4,7 @@
 #include <freerdp/pointer.h>
 
 #include "pointer_shape.h"
+#include "test_utils.h"
 
 static void test_deep_copy_success_for_color_shape(void)
 {
@@ -168,6 +169,7 @@ static void test_cleanup_is_idempotent(void)
 
 int main(void)
 {
+    test_suppress_crt_dialogs();
     test_deep_copy_success_for_color_shape();
     test_deep_copy_success_for_new_shape();
     test_cache_selection_by_index();
