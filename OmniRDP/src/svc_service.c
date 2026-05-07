@@ -420,15 +420,67 @@ int svc_service_install(const char *serviceName, const char *configPath) {
         NULL);                           /* password */
 
     if (!schService) {
-        fprintf(stderr, "CreateService failed: %lu\n", GetLastError());
-        CloseServiceHandle(schSCManager);
-        return -1;
+        DWORD err = GetLastError();
+
+        if (err == ERROR_SERVICE_MARKED_FOR_DELETE) {
+            /* Service is pending deletion — wait for it to complete */
+            fprintf(stderr, "Service '%s' is pending deletion; waiting...\n", serviceName);
+            CloseServiceHandle(schSCManager);
+            for (int i = 0; i < 30; i++) {
+                Sleep(1000);
+                schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
+                if (!schSCManager) break;
+                schService = CreateServiceA(
+                    schSCManager, serviceName, serviceName,
+                    SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG,
+                    SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+                    binaryPath, NULL, NULL, NULL, "NT AUTHORITY\\NetworkService", NULL);
+                if (schService) break;
+                err = GetLastError();
+                CloseServiceHandle(schSCManager);
+                if (err != ERROR_SERVICE_MARKED_FOR_DELETE) break;
+            }
+        }
+        else if (err == ERROR_SERVICE_EXISTS) {
+            /* Service already exists — uninstall and retry */
+            fprintf(stderr, "Service '%s' already exists; recreating...\n", serviceName);
+            CloseServiceHandle(schSCManager);
+            svc_service_uninstall(serviceName);
+            schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
+            if (schSCManager) {
+                schService = CreateServiceA(
+                    schSCManager, serviceName, serviceName,
+                    SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG,
+                    SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+                    binaryPath, NULL, NULL, NULL, "NT AUTHORITY\\NetworkService", NULL);
+            }
+        }
+
+        if (!schService) {
+            fprintf(stderr, "CreateService failed: %lu\n", GetLastError());
+            if (schSCManager) CloseServiceHandle(schSCManager);
+            return -1;
+        }
     }
 
     /* Set a human-readable description */
     SERVICE_DESCRIPTIONA desc;
     desc.lpDescription = "OmniRDP RDP Multiplexer Service";
     ChangeServiceConfig2A(schService, SERVICE_CONFIG_DESCRIPTION, &desc);
+
+    /* Start the service */
+    if (!StartServiceA(schService, 0, NULL)) {
+        DWORD err = GetLastError();
+        if (err == ERROR_SERVICE_ALREADY_RUNNING) {
+            printf("Service '%s' is already running.\n", serviceName);
+        } else {
+            fprintf(stderr, "Warning: Failed to start service '%s' (error %lu). "
+                    "You may need to start it manually: sc start \"%s\"\n",
+                    serviceName, err, serviceName);
+        }
+    } else {
+        printf("Service '%s' started successfully.\n", serviceName);
+    }
 
     /* Generate template config if it doesn't exist */
     if (configPath && configPath[0] != '\0') {
@@ -457,32 +509,56 @@ int svc_service_uninstall(const char *serviceName) {
         return -1;
     }
 
-    SC_HANDLE schSCManager = OpenSCManagerA(
-        NULL, NULL, SC_MANAGER_CONNECT);
+    SC_HANDLE schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
     if (!schSCManager) {
         fprintf(stderr, "OpenSCManager failed: %lu\n", GetLastError());
         return -1;
     }
 
     SC_HANDLE schService = OpenServiceA(
-        schSCManager, serviceName, SERVICE_STOP | DELETE);
+        schSCManager, serviceName, SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
     if (!schService) {
-        fprintf(stderr, "OpenService failed: %lu\n", GetLastError());
+        DWORD err = GetLastError();
+        if (err == ERROR_SERVICE_DOES_NOT_EXIST) {
+            fprintf(stderr, "Service '%s' does not exist — nothing to uninstall.\n", serviceName);
+            CloseServiceHandle(schSCManager);
+            return 0;
+        }
+        fprintf(stderr, "OpenService failed: %lu\n", err);
         CloseServiceHandle(schSCManager);
         return -1;
     }
 
     /* Try to stop the service if it is running */
     SERVICE_STATUS status;
-    if (ControlService(schService, SERVICE_CONTROL_STOP, &status)) {
-        /* Poll for up to 30 seconds waiting for SERVICE_STOPPED */
-        for (int i = 0; i < 30; i++) {
-            if (!QueryServiceStatus(schService, &status))
-                break;
-            if (status.dwCurrentState == SERVICE_STOPPED)
-                break;
-            Sleep(1000);
+    BOOL stopped = FALSE;
+
+    if (QueryServiceStatus(schService, &status)) {
+        if (status.dwCurrentState == SERVICE_STOPPED) {
+            stopped = TRUE;
+        } else if (status.dwCurrentState != SERVICE_STOP_PENDING) {
+            ControlService(schService, SERVICE_CONTROL_STOP, &status);
         }
+
+        /* Poll for SERVICE_STOPPED */
+        if (!stopped) {
+            for (int i = 0; i < 30; i++) {
+                if (!QueryServiceStatus(schService, &status))
+                    break;
+                if (status.dwCurrentState == SERVICE_STOPPED) {
+                    stopped = TRUE;
+                    break;
+                }
+                Sleep(1000);
+            }
+        }
+    }
+
+    if (!stopped) {
+        fprintf(stderr, "Service '%s' did not stop within 30 seconds. Cannot safely delete.\n", serviceName);
+        CloseServiceHandle(schService);
+        CloseServiceHandle(schSCManager);
+        return -1;
     }
 
     /* Delete the service */
@@ -496,6 +572,19 @@ int svc_service_uninstall(const char *serviceName) {
     CloseServiceHandle(schService);
     CloseServiceHandle(schSCManager);
 
+    /* Wait for deletion to take effect */
+    for (int i = 0; i < 15; i++) {
+        Sleep(500);
+        schService = OpenServiceA(schSCManager, serviceName, SERVICE_QUERY_STATUS);
+        if (!schService) {
+            if (GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST)
+                break;
+        } else {
+            CloseServiceHandle(schService);
+        }
+    }
+
+    printf("Service '%s' uninstalled successfully.\n", serviceName);
     return 0;
 }
 
