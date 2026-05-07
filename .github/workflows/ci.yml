@@ -235,8 +235,14 @@ jobs:
         if: success()
         run: |
           mkdir -p artifacts/windows-${{ matrix.build_type }}/bin
-          find OmniRDP/build-windows -name '*.exe' -type f -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
-          find freerdp-3.26.0/build -name '*.dll' -type f -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+          # Copy only OmniRDP executables (not test executables)
+          for exe in OmniRDP.exe OmniRDP-svc.exe OmniRDP-tray.exe; do
+            find OmniRDP/build-windows -name "$exe" -type f -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+          done
+          # Copy only the required FreeRDP DLLs (no wfreerdp, winpr-tools, CompilerIdC)
+          for dll in freerdp3.dll freerdp-client3.dll freerdp-server3.dll winpr3.dll libcrypto-3-x64.dll libssl-3-x64.dll libusb-1.0.dll zlib1.dll; do
+            find freerdp-3.26.0/build -name "$dll" -type f -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+          done
 
       - name: Upload Windows artifacts if build succeeds
         if: success()
