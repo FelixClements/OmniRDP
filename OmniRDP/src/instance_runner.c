@@ -247,6 +247,7 @@ int instance_runner_main(int argc, char *argv[]) {
         svc_log_init(instance_log_dir, SVC_LOG_DEBUG, 10, 5);
         LOG_I("instance_runner", "Instance '%s' starting (config=%s)",
               args.instance_name, args.config_path);
+
     }
 
     /* Initialize backend */
