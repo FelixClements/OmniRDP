@@ -18,18 +18,12 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install clang-format
-        shell: pwsh
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvm-18.1.8/LLVM-18.1.8-win64.exe" -OutFile "$env:TEMP\clang-format-installer.exe"
-          Start-Process -FilePath "$env:TEMP\clang-format-installer.exe" -ArgumentList "/S" -Wait
-          $env:PATH = "C:\Program Files\LLVM;$env:PATH"
-          Write-Output "clang-format location: $(where.exe clang-format)"
+        run: choco install llvm --version=18.1.8 -y
 
       - name: Check formatting
         shell: pwsh
         run: |
-          $env:PATH = "C:\Program Files\LLVM;$env:PATH"
+          $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
           Get-ChildItem -Path "OmniRDP/src", "OmniRDP/include" -Recurse -Include "*.c", "*.h" | ForEach-Object {
             & clang-format --dry-run --Werror $_.FullName 2>&1 | ForEach-Object { Write-Output "$($_.FullName): $_" }
             if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -39,7 +33,7 @@ jobs:
         if: failure()
         shell: pwsh
         run: |
-          $env:PATH = "C:\Program Files\LLVM;$env:PATH"
+          $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
           Get-ChildItem -Path "OmniRDP/src", "OmniRDP/include" -Recurse -Include "*.c", "*.h" | ForEach-Object {
             & clang-format -i $_.FullName
           }
