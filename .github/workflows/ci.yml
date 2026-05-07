@@ -68,7 +68,7 @@ jobs:
         run: .\bootstrap-vcpkg.bat -disableMetrics
 
       - name: Cache vcpkg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: vcpkg/installed
           key: windows-vcpkg-v2-${{ hashFiles('.github/workflows/ci.yml') }}
@@ -129,7 +129,7 @@ jobs:
 
       - name: Upload Windows artifacts if build succeeds
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: windows-${{ matrix.build_type }}-OmniRDP
           path: artifacts/windows-${{ matrix.build_type }}/
