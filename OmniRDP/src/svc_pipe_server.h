@@ -29,10 +29,8 @@ extern "C" {
 typedef struct {
     char pipeName[256];           /* Full pipe path, e.g. "\\.\pipe\OmniRDP_ServicePipe" */
     InstanceManager *mgr;         /* Pointer to instance manager (not owned) */
-    HANDLE hStopEvent;            /* Signal to stop the server */
     CRITICAL_SECTION lock;        /* Protects client list */
 
-    /* Overlapped I/O for the listener */
     HANDLE hListenerThread;       /* Thread that accepts connections */
     volatile BOOL running;        /* Server running flag */
 

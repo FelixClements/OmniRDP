@@ -27,9 +27,6 @@
 /** Named pipe buffer size for both in/out. */
 #define PIPE_BUFFER_SIZE        (64U * 1024U)
 
-/** Timeout (ms) for push-frame writes — best-effort, don't hang. */
-#define PUSH_WRITE_TIMEOUT_MS   100U
-
 /** Maximum log lines to return in a get_logs response. */
 #define MAX_LOG_LINES           1000U
 
@@ -208,7 +205,7 @@ create_pipe_instance(const char *pipeName)
 
     HANDLE hPipe = CreateNamedPipeA(
         pipeName,
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+        PIPE_ACCESS_DUPLEX,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
         PIPE_MAX_INSTANCES,
         PIPE_BUFFER_SIZE,       /* output buffer */
@@ -462,9 +459,9 @@ client_handler(LPVOID arg)
 /**
  * @brief Thread function that accepts incoming named-pipe connections.
  *
- * Creates a pipe instance, calls ConnectNamedPipe with overlapped I/O,
- * and waits for either a connection or the stop event.  On connection
- * a client-handler thread is spawned.
+ * Creates a pipe instance and calls ConnectNamedPipe in blocking mode.
+ * On connection a client-handler thread is spawned.  The blocking call
+ * is aborted by pipe_server_stop via CancelSynchronousIo.
  */
 static DWORD WINAPI
 listener_thread(LPVOID arg)
@@ -482,59 +479,23 @@ listener_thread(LPVOID arg)
             continue;
         }
 
-        /* ── Prepare the OVERLAPPED structure ───────────────── */
-        OVERLAPPED ov;
-        memset(&ov, 0, sizeof(ov));
-        ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
-        if (!ov.hEvent) {
-            LOG_E("pipe_server", "CreateEvent for overlapped failed: %lu",
-                  GetLastError());
-            CloseHandle(hPipe);
-            continue;
-        }
-
-        /* ── Accept a connection ────────────────────────────── */
-        BOOL connected = ConnectNamedPipe(hPipe, &ov);
+        /* ── Accept a connection (blocking) ──────────────────── */
+        BOOL connected = ConnectNamedPipe(hPipe, NULL);
         if (!connected) {
             DWORD err = GetLastError();
-
-            if (err == ERROR_IO_PENDING) {
-                /* Connection is pending — wait for client or stop */
-                HANDLE waitHandles[2] = { ov.hEvent, server->hStopEvent };
-                DWORD wr = WaitForMultipleObjects(2, waitHandles,
-                                                  FALSE, INFINITE);
-
-                if (wr == WAIT_OBJECT_0) {
-                    /* Connection established — verify */
-                    DWORD dummy = 0;
-                    if (!GetOverlappedResult(hPipe, &ov, &dummy, FALSE)) {
-                        LOG_W("pipe_server",
-                              "GetOverlappedResult after connect failed: %lu",
-                              GetLastError());
-                        CloseHandle(ov.hEvent);
-                        CloseHandle(hPipe);
-                        continue;
-                    }
-                    /* Fall through to spawn handler */
-                } else {
-                    /* Stop event was signaled */
-                    CancelIoEx(hPipe, &ov);
-                    CloseHandle(ov.hEvent);
-                    CloseHandle(hPipe);
-                    break;
-                }
-            } else if (err == ERROR_PIPE_CONNECTED) {
-                /* Client connected between CreateNamedPipe and
-                 * ConnectNamedPipe (race) — handle it. */
+            if (err == ERROR_PIPE_CONNECTED) {
+                /* Race: client connected between CreateNamedPipe and
+                 * ConnectNamedPipe — treat as connected. */
+            } else if (err == ERROR_OPERATION_ABORTED) {
+                /* Shutting down via CancelSynchronousIo */
+                CloseHandle(hPipe);
+                break;
             } else {
-                LOG_W("pipe_server", "ConnectNamedPipe failed: %lu", err);
-                CloseHandle(ov.hEvent);
+                LOG_W("pipe_server", "ConnectNamedPipe failed (error %lu)", err);
                 CloseHandle(hPipe);
                 continue;
             }
         }
-
-        CloseHandle(ov.hEvent);
 
         /* ── Client connected — spawn handler thread ────────── */
         ClientConnection *client = (ClientConnection *)
@@ -991,11 +952,9 @@ cmd_get_logs(PipeServer *server, const char *payload,
 /* ════════════════════════════════════════════════════════════════ */
 
 /**
- * @brief Send a length-prefixed frame to a single client with a
- *        short timeout.
+ * @brief Send a length-prefixed frame to a single client.
  *
- * Uses overlapped I/O so the call does not block indefinitely.
- * If the write times out or fails the client is considered dead.
+ * Synchronous write (the pipe handle is NOT overlapped).
  *
  * @param hPipe   Client pipe handle.
  * @param json    JSON payload to send.
@@ -1007,62 +966,15 @@ push_write_frame(HANDLE hPipe, const char *json, DWORD jsonLen)
 {
     DWORD lenLe = jsonLen;
     DWORD written = 0;
-    BOOL ok;
-
-    /* ── Helper lambda to do an overlapped write with timeout ──── */
-    /* (Implemented as a local block to avoid C++-only constructs.) */
 
     /* ── Send the 4-byte header ────────────────────────────────── */
-    OVERLAPPED ovHdr;
-    memset(&ovHdr, 0, sizeof(ovHdr));
-    ovHdr.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
-    if (!ovHdr.hEvent)
+    if (!WriteFile(hPipe, &lenLe, PIPE_HEADER_SIZE, &written, NULL))
         return FALSE;
-
-    ok = WriteFile(hPipe, &lenLe, PIPE_HEADER_SIZE, &written, &ovHdr);
-    if (!ok && GetLastError() == ERROR_IO_PENDING) {
-        DWORD wr = WaitForSingleObject(ovHdr.hEvent, PUSH_WRITE_TIMEOUT_MS);
-        if (wr != WAIT_OBJECT_0) {
-            CancelIoEx(hPipe, &ovHdr);
-            CloseHandle(ovHdr.hEvent);
-            return FALSE;
-        }
-        if (!GetOverlappedResult(hPipe, &ovHdr, &written, FALSE)) {
-            CloseHandle(ovHdr.hEvent);
-            return FALSE;
-        }
-    } else if (!ok) {
-        CloseHandle(ovHdr.hEvent);
-        return FALSE;
-    }
-    CloseHandle(ovHdr.hEvent);
 
     /* ── Send the payload (if any) ─────────────────────────────── */
     if (jsonLen > 0) {
-        OVERLAPPED ovPayload;
-        memset(&ovPayload, 0, sizeof(ovPayload));
-        ovPayload.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
-        if (!ovPayload.hEvent)
+        if (!WriteFile(hPipe, json, jsonLen, &written, NULL))
             return FALSE;
-
-        ok = WriteFile(hPipe, json, jsonLen, &written, &ovPayload);
-        if (!ok && GetLastError() == ERROR_IO_PENDING) {
-            DWORD wr = WaitForSingleObject(ovPayload.hEvent,
-                                           PUSH_WRITE_TIMEOUT_MS);
-            if (wr != WAIT_OBJECT_0) {
-                CancelIoEx(hPipe, &ovPayload);
-                CloseHandle(ovPayload.hEvent);
-                return FALSE;
-            }
-            if (!GetOverlappedResult(hPipe, &ovPayload, &written, FALSE)) {
-                CloseHandle(ovPayload.hEvent);
-                return FALSE;
-            }
-        } else if (!ok) {
-            CloseHandle(ovPayload.hEvent);
-            return FALSE;
-        }
-        CloseHandle(ovPayload.hEvent);
     }
 
     return TRUE;
@@ -1141,14 +1053,6 @@ pipe_server_init(PipeServer *server, const char *pipeName,
               "\\\\.\\pipe\\%s", pipeName);
     server->pipeName[sizeof(server->pipeName) - 1] = '\0';
 
-    /* ── Create the stop event (manual-reset) ──────────────────── */
-    server->hStopEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
-    if (!server->hStopEvent) {
-        LOG_E("pipe_server", "CreateEvent(hStopEvent) failed: %lu",
-              GetLastError());
-        return -1;
-    }
-
     /* ── Initialise the client-list critical section ───────────── */
     InitializeCriticalSection(&server->lock);
 
@@ -1156,8 +1060,6 @@ pipe_server_init(PipeServer *server, const char *pipeName,
     HANDLE hPipe = create_pipe_instance(server->pipeName);
     if (hPipe == INVALID_HANDLE_VALUE) {
         LOG_E("pipe_server", "Initial pipe creation failed — check ACLs");
-        CloseHandle(server->hStopEvent);
-        server->hStopEvent = NULL;
         DeleteCriticalSection(&server->lock);
         return -1;
     }
@@ -1173,8 +1075,6 @@ pipe_server_init(PipeServer *server, const char *pipeName,
         LOG_E("pipe_server", "CreateThread(listener) failed: %lu",
               GetLastError());
         server->running = FALSE;
-        CloseHandle(server->hStopEvent);
-        server->hStopEvent = NULL;
         DeleteCriticalSection(&server->lock);
         return -1;
     }
@@ -1193,7 +1093,11 @@ pipe_server_stop(PipeServer *server)
 
     /* ── Signal shutdown ──────────────────────────────────────── */
     server->running = FALSE;
-    SetEvent(server->hStopEvent);
+
+    /* Cancel any blocking ConnectNamedPipe in the listener thread */
+    if (server->hListenerThread) {
+        CancelSynchronousIo(server->hListenerThread);
+    }
 
     /* ── Wait for the listener thread to exit ──────────────────── */
     if (server->hListenerThread) {
@@ -1257,11 +1161,6 @@ pipe_server_stop(PipeServer *server)
 
     /* ── Clean up synchronisation objects ──────────────────────── */
     DeleteCriticalSection(&server->lock);
-
-    if (server->hStopEvent) {
-        CloseHandle(server->hStopEvent);
-        server->hStopEvent = NULL;
-    }
 
     LOG_I("pipe_server", "Pipe server stopped");
 }
