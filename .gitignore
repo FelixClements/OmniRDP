@@ -3,7 +3,7 @@
 archive/
 OmniRDP/build/
 /*.md
-
+.vscode/*
 # Object files
 *.o
 *.ko

@@ -124,8 +124,8 @@ jobs:
         if: success()
         run: |
           mkdir -p artifacts/windows-${{ matrix.build_type }}/bin
-          find OmniRDP/build-windows -name 'OmniRDP.exe' -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
-          find freerdp-3.26.0/build -name '*.dll' -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+          find OmniRDP/build-windows -name '*.exe' -type f -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+          find freerdp-3.26.0/build -name '*.dll' -type f -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
 
       - name: Upload Windows artifacts if build succeeds
         if: success()
