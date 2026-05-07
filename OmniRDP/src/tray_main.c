@@ -18,6 +18,7 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <commctrl.h>
 
 #include "tray_icon.h"
@@ -215,6 +216,64 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 char configPath[MAX_PATH];
                 snprintf(configPath, sizeof(configPath),
                          "C:\\ProgramData\\OmniRDP\\config.ini");
+                
+                /* Check if config file exists */
+                DWORD attr = GetFileAttributesA(configPath);
+                if (attr == INVALID_FILE_ATTRIBUTES) {
+                    /* Config file doesn't exist — create directory and template */
+                    SHCreateDirectoryExA(NULL, "C:\\ProgramData\\OmniRDP", NULL);
+                    
+                    FILE *fp = fopen(configPath, "w");
+                    if (fp) {
+                        fprintf(fp,
+                            "; OmniRDP Configuration\n"
+                            "; Edit this file with your backend RDP server details.\n"
+                            "\n"
+                            "[service]\n"
+                            "log_level = info\n"
+                            "log_dir = C:\\ProgramData\\OmniRDP\\logs\n"
+                            "log_max_size_mb = 10\n"
+                            "log_max_files = 5\n"
+                            "pipe_name = OmniRDP_ServicePipe\n"
+                            "heartbeat_timeout_sec = 10\n"
+                            "graceful_shutdown_sec = 10\n"
+                            "health_poll_interval_sec = 2\n"
+                            "instance_startup_delay_ms = 500\n"
+                            "\n"
+                            "[instances]\n"
+                            "names = MyServer\n"
+                            "\n"
+                            "[instance:MyServer]\n"
+                            "enabled = true\n"
+                            "backend.hostname = 192.168.1.100\n"
+                            "backend.port = 3389\n"
+                            "backend.username = Administrator\n"
+                            "backend.password = changeme\n"
+                            "backend.domain =\n"
+                            "backend.connect_timeout_ms = 30000\n"
+                            "reconnect.enabled = true\n"
+                            "reconnect.max_attempts = 10\n"
+                            "reconnect.initial_delay_ms = 1000\n"
+                            "reconnect.max_delay_ms = 60000\n"
+                            "reconnect.backoff_multiplier = 2.0\n"
+                            "viewer.bind_address = 127.0.0.1\n"
+                            "viewer.port = 3390\n"
+                            "viewer.max_viewers = 10\n"
+                            "display.monitor_count = 1\n"
+                            "display.monitor_width = 1920\n"
+                            "display.monitor_height = 1080\n"
+                            "display.color_depth = 32\n"
+                            "codec.nscodec = true\n"
+                            "codec.remote_fx = true\n"
+                            "codec.graphics_pipeline = false\n"
+                            "security.tls_enabled = true\n"
+                            "security.nla_enabled = true\n"
+                        );
+                        fclose(fp);
+                    }
+                }
+                
+                /* Now open the config file */
                 SHELLEXECUTEINFOA sei = {0};
                 sei.cbSize = sizeof(sei);
                 sei.lpVerb = "open";
