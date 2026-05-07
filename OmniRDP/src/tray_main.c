@@ -194,6 +194,41 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         }
     }
 
+    /* If service is running but has no instances, offer to open config */
+    if (g_ctx.serviceCount > 0) {
+        BOOL anyInstances = FALSE;
+        for (unsigned int i = 0; i < g_ctx.serviceCount; i++) {
+            if (g_ctx.services[i].instanceCount > 0) {
+                anyInstances = TRUE;
+                break;
+            }
+        }
+        if (!anyInstances) {
+            int result = MessageBoxA(
+                NULL,
+                "OmniRDP service is running but has no configured instances.\n\n"
+                "Would you like to open the config file to add one?",
+                "OmniRDP",
+                MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND
+            );
+            if (result == IDYES) {
+                char configPath[MAX_PATH];
+                snprintf(configPath, sizeof(configPath),
+                         "C:\\ProgramData\\OmniRDP\\config.ini");
+                SHELLEXECUTEINFOA sei = {0};
+                sei.cbSize = sizeof(sei);
+                sei.lpVerb = "open";
+                sei.lpFile = configPath;
+                sei.nShow = SW_SHOWNORMAL;
+                if (!ShellExecuteExA(&sei)) {
+                    sei.lpFile = "notepad.exe";
+                    sei.lpParameters = configPath;
+                    ShellExecuteExA(&sei);
+                }
+            }
+        }
+    }
+
     /* Message loop */
     MSG msg;
     while (GetMessageA(&msg, NULL, 0, 0)) {

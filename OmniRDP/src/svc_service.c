@@ -17,6 +17,7 @@
 
 #include <windows.h>
 #include <aclapi.h>
+#include <shlobj.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -167,6 +168,132 @@ static int set_config_file_acl(const char *filePath) {
     return (dwRes == ERROR_SUCCESS) ? 0 : -1;
 }
 
+/* ── svc_config_write_template ───────────────────────────────────── */
+
+int svc_config_write_template(const char *configPath) {
+    /* Create directory structure */
+    char dirPath[MAX_PATH];
+    strncpy(dirPath, configPath, sizeof(dirPath) - 1);
+    dirPath[sizeof(dirPath) - 1] = '\0';
+    char *lastSlash = strrchr(dirPath, '\\');
+    if (lastSlash) {
+        *lastSlash = '\0';
+        /* Create directory recursively */
+        SHCreateDirectoryExA(NULL, dirPath, NULL);
+    }
+
+    FILE *fp = fopen(configPath, "w");
+    if (!fp) {
+        return -1;
+    }
+
+    fprintf(fp,
+        "; ============================================================\n"
+        "; OmniRDP Service Configuration\n"
+        "; Location: %s\n"
+        ";\n"
+        "; This file was auto-generated on first install.\n"
+        "; Edit the [instance:Example] section below with your\n"
+        "; backend RDP server details, then restart the service.\n"
+        ";\n"
+        "; Plaintext passwords are automatically encrypted with DPAPI\n"
+        "; on first start. You can also use dpapi:<base64> values.\n"
+        "; ============================================================\n"
+        "\n"
+        "[service]\n"
+        "; Log level: debug, info, warn, error\n"
+        "log_level = info\n"
+        "\n"
+        "; Log directory (per-service subdirectory is auto-appended)\n"
+        "log_dir = C:\\ProgramData\\OmniRDP\\logs\n"
+        "\n"
+        "; Log rotation\n"
+        "log_max_size_mb = 10\n"
+        "log_max_files = 5\n"
+        "\n"
+        "; Named pipe for tray app IPC\n"
+        "pipe_name = OmniRDP_ServicePipe\n"
+        "\n"
+        "; Health monitoring\n"
+        "heartbeat_timeout_sec = 10\n"
+        "graceful_shutdown_sec = 10\n"
+        "health_poll_interval_sec = 2\n"
+        "instance_startup_delay_ms = 500\n"
+        "\n"
+        "[instances]\n"
+        "; Comma-separated list of instance names.\n"
+        "; Each name must have a matching [instance:<name>] section.\n"
+        "; Leave empty to run idle with no instances.\n"
+        "names = Example\n"
+        "\n"
+        "; ============================================================\n"
+        "; Instance: Example\n"
+        "; Edit these values with your backend RDP server details.\n"
+        "; ============================================================\n"
+        "[instance:Example]\n"
+        "enabled = true\n"
+        "\n"
+        "; Backend RDP server to connect to\n"
+        "backend.hostname = 192.168.1.100\n"
+        "backend.port = 3389\n"
+        "backend.username = Administrator\n"
+        "backend.password = changeme\n"
+        "backend.domain =\n"
+        "backend.connect_timeout_ms = 30000\n"
+        "\n"
+        "; Reconnect policy\n"
+        "reconnect.enabled = true\n"
+        "reconnect.max_attempts = 10\n"
+        "reconnect.initial_delay_ms = 1000\n"
+        "reconnect.max_delay_ms = 60000\n"
+        "reconnect.backoff_multiplier = 2.0\n"
+        "\n"
+        "; Viewer listener (clients connect here)\n"
+        "viewer.bind_address = 127.0.0.1\n"
+        "viewer.port = 3390\n"
+        "viewer.max_viewers = 10\n"
+        "viewer.cert_path =\n"
+        "viewer.key_path =\n"
+        "viewer.slow_disconnect_enabled = true\n"
+        "viewer.slow_lag_interval_ms = 5000\n"
+        "viewer.slow_disconnect_after_ms = 30000\n"
+        "viewer.late_join_timeout_ms = 15000\n"
+        "viewer.late_join_refresh_deadline_ms = 5000\n"
+        "viewer.late_join_replay_max_frames = 4\n"
+        "viewer.throttle_max_updates_per_sec = 0\n"
+        "\n"
+        "; Display\n"
+        "display.monitor_count = 1\n"
+        "display.monitor_width = 1920\n"
+        "display.monitor_height = 1080\n"
+        "display.color_depth = 32\n"
+        "\n"
+        "; Codecs\n"
+        "codec.nscodec = true\n"
+        "codec.remote_fx = true\n"
+        "codec.graphics_pipeline = false\n"
+        "codec.h264 = false\n"
+        "codec.avc444 = false\n"
+        "codec.avc444v2 = false\n"
+        "codec.frame_acknowledge = 4\n"
+        "\n"
+        "; Security\n"
+        "security.tls_enabled = true\n"
+        "security.nla_enabled = true\n"
+        "security.tls_min_version = 1.2\n"
+        "security.server_authentication = true\n"
+        "security.ignore_certificate = false\n",
+        configPath
+    );
+
+    fclose(fp);
+
+    /* Set ACLs on the config file */
+    set_config_file_acl(configPath);
+
+    return 0;
+}
+
 /* ── Service Control Handler ───────────────────────────────────── */
 
 /**
@@ -303,6 +430,19 @@ int svc_service_install(const char *serviceName, const char *configPath) {
     desc.lpDescription = "OmniRDP RDP Multiplexer Service";
     ChangeServiceConfig2A(schService, SERVICE_CONFIG_DESCRIPTION, &desc);
 
+    /* Generate template config if it doesn't exist */
+    if (configPath && configPath[0] != '\0') {
+        DWORD attr = GetFileAttributesA(configPath);
+        if (attr == INVALID_FILE_ATTRIBUTES) {
+            LOG_I("svc_service", "Config file not found, generating template at '%s'", configPath);
+            if (svc_config_write_template(configPath) == 0) {
+                LOG_I("svc_service", "Template config.ini created. Edit it with your backend details.");
+            } else {
+                LOG_W("svc_service", "Failed to create template config.ini");
+            }
+        }
+    }
+
     CloseServiceHandle(schService);
     CloseServiceHandle(schSCManager);
 
@@ -411,7 +551,15 @@ int svc_service_start(const char *serviceName, const char *configPath) {
     ctx.configPath[sizeof(ctx.configPath) - 1] = '\0';
 
     ctx.config = svc_config_load(configPath);
-    /* If config fails we continue with defaults for logging */
+    if (!ctx.config) {
+        LOG_W("svc_service", "Config file '%s' not found or unreadable. "
+              "Running with defaults (no instances). "
+              "Edit config.ini and reload, or use the tray app to add instances.", configPath);
+        ctx.config = svc_config_create_default();
+        if (!ctx.config) {
+            LOG_E("svc_service", "Failed to create default config");
+        }
+    }
 
     /* Set ACL on config file */
     if (set_config_file_acl(configPath) != 0) {
@@ -602,6 +750,15 @@ int svc_service_run_console(const char *serviceName,
     ctx.configPath[sizeof(ctx.configPath) - 1] = '\0';
 
     ctx.config = svc_config_load(configPath);
+    if (!ctx.config) {
+        LOG_W("svc_service", "Config file '%s' not found or unreadable. "
+              "Running with defaults (no instances). "
+              "Edit config.ini and reload, or use the tray app to add instances.", configPath);
+        ctx.config = svc_config_create_default();
+        if (!ctx.config) {
+            LOG_E("svc_service", "Failed to create default config");
+        }
+    }
 
     /* Set ACL on config file */
     if (set_config_file_acl(configPath) != 0) {

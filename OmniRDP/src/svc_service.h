@@ -101,6 +101,17 @@ int svc_service_start(const char *serviceName, const char *configPath);
  */
 int svc_service_run_console(const char *serviceName, const char *configPath);
 
+/**
+ * @brief Write a template config.ini to the specified path
+ *
+ * Creates the directory structure if needed, writes a well-commented
+ * template config file, and sets ACLs.
+ *
+ * @param configPath Path where the template should be written
+ * @return 0 on success, -1 on error
+ */
+int svc_config_write_template(const char *configPath);
+
 #ifdef __cplusplus
 }
 #endif

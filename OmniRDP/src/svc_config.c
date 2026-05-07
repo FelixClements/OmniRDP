@@ -246,6 +246,17 @@ static int parse_one_instance(const IniFile *ini, const char *name,
 
 /* ── Public API ──────────────────────────────────────────────── */
 
+SvcConfig *svc_config_create_default(void) {
+    SvcConfig *config = (SvcConfig *)calloc(1, sizeof(SvcConfig));
+    if (!config) return NULL;
+    svc_config_default_service(&config->service);
+    config->instance_count = 0;
+    config->instances = NULL;
+    config->instance_names = NULL;
+    config->ini = NULL;
+    return config;
+}
+
 SvcConfig *svc_config_load(const char *filename) {
     if (!filename)
         return NULL;

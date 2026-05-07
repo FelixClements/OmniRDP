@@ -108,6 +108,16 @@ typedef struct {
 SvcConfig *svc_config_load(const char *filename);
 
 /**
+ * @brief Create a default config with zero instances
+ *
+ * Used when the config file is missing or unreadable.
+ * The service runs idle (no instances) until the user adds one.
+ *
+ * @return Valid SvcConfig with service defaults and zero instances, or NULL on error
+ */
+SvcConfig *svc_config_create_default(void);
+
+/**
  * @brief Find an instance config by name
  * @param config Loaded config
  * @param name Instance name
