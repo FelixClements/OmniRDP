@@ -248,23 +248,16 @@ int instance_runner_main(int argc, char *argv[]) {
         LOG_I("instance_runner", "Instance '%s' starting (config=%s)",
               args.instance_name, args.config_path);
 
-        /* Configure FreeRDP WLog via env vars (what to log + level).
-         * WLOG_LEVEL and WLOG_PREFIX work on Windows; WLOG_FILEAPPENDER does not.
-         * Instead, redirect stderr to viewer.log to capture WLog output. */
+        /* Configure FreeRDP WLog to write directly to a file using the
+         * FILE appender. The CONSOLE appender (default) sends INFO/DEBUG
+         * to stdout which is lost when running as a service child process.
+         * The FILE appender writes all levels to a file directly. */
         _putenv_s("WLOG_LEVEL", "INFO");
-        _putenv_s("WLOG_PREFIX", "*");
-
-        /* Redirect stderr to viewer.log so WLog output is captured */
-        {
-            char viewer_log_path[512];
-            snprintf(viewer_log_path, sizeof(viewer_log_path), "%s\\viewer.log", instance_log_dir);
-            if (freopen(viewer_log_path, "a", stderr)) {
-                setbuf(stderr, NULL);  /* unbuffered for real-time logging */
-                LOG_I("instance_runner", "FreeRDP WLog -> %s", viewer_log_path);
-            } else {
-                LOG_W("instance_runner", "Failed to redirect stderr to %s (err=%lu)", viewer_log_path, GetLastError());
-            }
-        }
+        _putenv_s("WLOG_PREFIX", "[%hr:%mi:%se:%ml] [%pid:%tid] [%lv][%mn] - ");
+        _putenv_s("WLOG_APPENDER", "FILE");
+        _putenv_s("WLOG_FILEAPPENDER_OUTPUT_FILE_PATH", instance_log_dir);
+        _putenv_s("WLOG_FILEAPPENDER_OUTPUT_FILE_NAME", "viewer.log");
+        LOG_I("instance_runner", "FreeRDP WLog FILE appender -> %s\\viewer.log", instance_log_dir);
     }
 
     /* Initialize backend */
