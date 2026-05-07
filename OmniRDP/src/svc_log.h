@@ -19,10 +19,10 @@ extern "C" {
 /* ── Log levels ───────────────────────────────────────────────── */
 
 typedef enum {
-    SVC_LOG_DEBUG = 0,
-    SVC_LOG_INFO  = 1,
-    SVC_LOG_WARN  = 2,
-    SVC_LOG_ERROR = 3
+  SVC_LOG_DEBUG = 0,
+  SVC_LOG_INFO = 1,
+  SVC_LOG_WARN = 2,
+  SVC_LOG_ERROR = 3
 } SvcLogLevel;
 
 /* ── Public API ───────────────────────────────────────────────── */
@@ -55,26 +55,21 @@ int svc_log_init(const char *log_dir, SvcLogLevel log_level,
  * @param fmt     Printf-style format string
  * @param ...     Arguments for the format string
  */
-void svc_log_write(SvcLogLevel level, const char *source,
-                   const char *fmt, ...);
+void svc_log_write(SvcLogLevel level, const char *source, const char *fmt, ...);
 
 /* ── Convenience macros ───────────────────────────────────────── */
 
 /** Write a DEBUG-level message. */
-#define LOG_D(source, ...) \
-    svc_log_write(SVC_LOG_DEBUG, source, __VA_ARGS__)
+#define LOG_D(source, ...) svc_log_write(SVC_LOG_DEBUG, source, __VA_ARGS__)
 
 /** Write an INFO-level message. */
-#define LOG_I(source, ...) \
-    svc_log_write(SVC_LOG_INFO, source, __VA_ARGS__)
+#define LOG_I(source, ...) svc_log_write(SVC_LOG_INFO, source, __VA_ARGS__)
 
 /** Write a WARN-level message. */
-#define LOG_W(source, ...) \
-    svc_log_write(SVC_LOG_WARN, source, __VA_ARGS__)
+#define LOG_W(source, ...) svc_log_write(SVC_LOG_WARN, source, __VA_ARGS__)
 
 /** Write an ERROR-level message. */
-#define LOG_E(source, ...) \
-    svc_log_write(SVC_LOG_ERROR, source, __VA_ARGS__)
+#define LOG_E(source, ...) svc_log_write(SVC_LOG_ERROR, source, __VA_ARGS__)
 
 /**
  * @brief Shut down the logging subsystem.

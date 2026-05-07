@@ -14,16 +14,16 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <windows.h>
 #include <tchar.h>
+#include <windows.h>
 
-#include "svc_service.h"
 #include "svc_log.h"
+#include "svc_service.h"
 
 /* ── Default configuration ──────────────────────────────────────── */
 
-#define DEFAULT_SERVICE_NAME  "OmniRDP"
-#define DEFAULT_CONFIG_PATH   "C:\\ProgramData\\OmniRDP\\config.ini"
+#define DEFAULT_SERVICE_NAME "OmniRDP"
+#define DEFAULT_CONFIG_PATH "C:\\ProgramData\\OmniRDP\\config.ini"
 
 /* ── Service table entry (for SCM) ──────────────────────────────── */
 
@@ -37,7 +37,7 @@ static char g_configPath[MAX_PATH] = DEFAULT_CONFIG_PATH;
  * svc_service_start() which handles the full service lifecycle.
  */
 static VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv) {
-    svc_service_start(g_serviceName, g_configPath);
+  svc_service_start(g_serviceName, g_configPath);
 }
 
 /**
@@ -46,128 +46,137 @@ static VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv) {
  * Only one service entry since OmniRDP-svc.exe is SERVICE_WIN32_OWN_PROCESS.
  */
 static SERVICE_TABLE_ENTRY serviceTable[] = {
-    {(LPSTR)g_serviceName, (LPSERVICE_MAIN_FUNCTION)ServiceMain},
-    {NULL, NULL}
-};
+    {(LPSTR)g_serviceName, (LPSERVICE_MAIN_FUNCTION)ServiceMain}, {NULL, NULL}};
 
 /* ── Usage ──────────────────────────────────────────────────────── */
 
 static void print_usage(const char *program) {
-    printf("OmniRDP Service Manager\n");
-    printf("\n");
-    printf("Usage:\n");
-    printf("  %s                              Run as Windows Service (SCM)\n", program);
-    printf("  %s --run                        Run in console mode (debugging)\n", program);
-    printf("  %s --install                    Install service (default name: %s)\n", program, DEFAULT_SERVICE_NAME);
-    printf("  %s --uninstall                  Uninstall service\n", program);
-    printf("  %s --install --service-name N   Install with custom service name\n", program);
-    printf("  %s --install --config PATH      Install with custom config path\n", program);
-    printf("\n");
-    printf("Options:\n");
-    printf("  --service-name NAME   Service name in SCM (default: %s)\n", DEFAULT_SERVICE_NAME);
-    printf("  --config PATH         Path to config.ini (default: %s)\n", DEFAULT_CONFIG_PATH);
+  printf("OmniRDP Service Manager\n");
+  printf("\n");
+  printf("Usage:\n");
+  printf("  %s                              Run as Windows Service (SCM)\n",
+         program);
+  printf("  %s --run                        Run in console mode (debugging)\n",
+         program);
+  printf(
+      "  %s --install                    Install service (default name: %s)\n",
+      program, DEFAULT_SERVICE_NAME);
+  printf("  %s --uninstall                  Uninstall service\n", program);
+  printf("  %s --install --service-name N   Install with custom service name\n",
+         program);
+  printf("  %s --install --config PATH      Install with custom config path\n",
+         program);
+  printf("\n");
+  printf("Options:\n");
+  printf("  --service-name NAME   Service name in SCM (default: %s)\n",
+         DEFAULT_SERVICE_NAME);
+  printf("  --config PATH         Path to config.ini (default: %s)\n",
+         DEFAULT_CONFIG_PATH);
 }
 
 /* ── Main ────────────────────────────────────────────────────────── */
 
 int main(int argc, char *argv[]) {
-    BOOL install = FALSE;
-    BOOL uninstall = FALSE;
-    BOOL runConsole = FALSE;
-    BOOL hasServiceName = FALSE;
-    BOOL hasConfigPath = FALSE;
-    char serviceName[256] = DEFAULT_SERVICE_NAME;
-    char configPath[MAX_PATH] = DEFAULT_CONFIG_PATH;
+  BOOL install = FALSE;
+  BOOL uninstall = FALSE;
+  BOOL runConsole = FALSE;
+  BOOL hasServiceName = FALSE;
+  BOOL hasConfigPath = FALSE;
+  char serviceName[256] = DEFAULT_SERVICE_NAME;
+  char configPath[MAX_PATH] = DEFAULT_CONFIG_PATH;
 
-    /* Parse command-line arguments */
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--install") == 0) {
-            install = TRUE;
-        } else if (strcmp(argv[i], "--uninstall") == 0) {
-            uninstall = TRUE;
-        } else if (strcmp(argv[i], "--run") == 0) {
-            runConsole = TRUE;
-        } else if (strcmp(argv[i], "--service-name") == 0 && i + 1 < argc) {
-            strncpy(serviceName, argv[++i], sizeof(serviceName) - 1);
-            serviceName[sizeof(serviceName) - 1] = '\0';
-            hasServiceName = TRUE;
-        } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
-            strncpy(configPath, argv[++i], sizeof(configPath) - 1);
-            configPath[sizeof(configPath) - 1] = '\0';
-            hasConfigPath = TRUE;
-        } else if (strcmp(argv[i], "--service") == 0) {
-            /*
-             * Marker flag: indicates this was launched by the SCM.
-             * No action needed — the service will start via ServiceMain.
-             * This argument is injected by the SCM binary path registered
-             * during svc_service_install.
-             */
-        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            print_usage(argv[0]);
-            return 0;
-        } else {
-            fprintf(stderr, "Unknown argument: %s\n", argv[i]);
-            print_usage(argv[0]);
-            return 1;
-        }
+  /* Parse command-line arguments */
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--install") == 0) {
+      install = TRUE;
+    } else if (strcmp(argv[i], "--uninstall") == 0) {
+      uninstall = TRUE;
+    } else if (strcmp(argv[i], "--run") == 0) {
+      runConsole = TRUE;
+    } else if (strcmp(argv[i], "--service-name") == 0 && i + 1 < argc) {
+      strncpy(serviceName, argv[++i], sizeof(serviceName) - 1);
+      serviceName[sizeof(serviceName) - 1] = '\0';
+      hasServiceName = TRUE;
+    } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+      strncpy(configPath, argv[++i], sizeof(configPath) - 1);
+      configPath[sizeof(configPath) - 1] = '\0';
+      hasConfigPath = TRUE;
+    } else if (strcmp(argv[i], "--service") == 0) {
+      /*
+       * Marker flag: indicates this was launched by the SCM.
+       * No action needed — the service will start via ServiceMain.
+       * This argument is injected by the SCM binary path registered
+       * during svc_service_install.
+       */
+    } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+      print_usage(argv[0]);
+      return 0;
+    } else {
+      fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+      print_usage(argv[0]);
+      return 1;
     }
+  }
 
-    /* ── Install mode ──────────────────────────────────────────── */
-    if (install) {
-        printf("Installing service '%s'...\n", serviceName);
-        if (hasConfigPath) {
-            printf("  Config path: %s\n", configPath);
-        }
-        int ret = svc_service_install(serviceName, configPath);
-        if (ret == 0) {
-            printf("Service '%s' installed successfully.\n", serviceName);
-        } else {
-            fprintf(stderr, "Failed to install service '%s'.\n", serviceName);
-        }
-        return ret;
+  /* ── Install mode ──────────────────────────────────────────── */
+  if (install) {
+    printf("Installing service '%s'...\n", serviceName);
+    if (hasConfigPath) {
+      printf("  Config path: %s\n", configPath);
     }
-
-    /* ── Uninstall mode ─────────────────────────────────────────── */
-    if (uninstall) {
-        printf("Uninstalling service '%s'...\n", serviceName);
-        int ret = svc_service_uninstall(serviceName);
-        if (ret == 0) {
-            printf("Service '%s' uninstalled successfully.\n", serviceName);
-        } else {
-            fprintf(stderr, "Failed to uninstall service '%s'.\n", serviceName);
-        }
-        return ret;
+    int ret = svc_service_install(serviceName, configPath);
+    if (ret == 0) {
+      printf("Service '%s' installed successfully.\n", serviceName);
+    } else {
+      fprintf(stderr, "Failed to install service '%s'.\n", serviceName);
     }
+    return ret;
+  }
 
-    /* ── Console mode (debugging) ──────────────────────────────── */
-    if (runConsole) {
-        printf("Running '%s' in console mode (Ctrl+C to stop)...\n", serviceName);
-        printf("  Config: %s\n", configPath);
-        int ret = svc_service_run_console(serviceName, configPath);
-        printf("Service exited with code %d.\n", ret);
-        return ret;
+  /* ── Uninstall mode ─────────────────────────────────────────── */
+  if (uninstall) {
+    printf("Uninstalling service '%s'...\n", serviceName);
+    int ret = svc_service_uninstall(serviceName);
+    if (ret == 0) {
+      printf("Service '%s' uninstalled successfully.\n", serviceName);
+    } else {
+      fprintf(stderr, "Failed to uninstall service '%s'.\n", serviceName);
     }
+    return ret;
+  }
 
-    /* ── Service mode (SCM) ────────────────────────────────────── */
-    /* Store globals for ServiceMain callback */
-    strncpy(g_serviceName, serviceName, sizeof(g_serviceName) - 1);
-    g_serviceName[sizeof(g_serviceName) - 1] = '\0';
-    strncpy(g_configPath, configPath, sizeof(g_configPath) - 1);
-    g_configPath[sizeof(g_configPath) - 1] = '\0';
+  /* ── Console mode (debugging) ──────────────────────────────── */
+  if (runConsole) {
+    printf("Running '%s' in console mode (Ctrl+C to stop)...\n", serviceName);
+    printf("  Config: %s\n", configPath);
+    int ret = svc_service_run_console(serviceName, configPath);
+    printf("Service exited with code %d.\n", ret);
+    return ret;
+  }
 
-    /* Update the service table with the actual service name.
-     * StartServiceCtrlDispatcher requires a non-const pointer. */
-    serviceTable[0].lpServiceName = (LPSTR)g_serviceName;
+  /* ── Service mode (SCM) ────────────────────────────────────── */
+  /* Store globals for ServiceMain callback */
+  strncpy(g_serviceName, serviceName, sizeof(g_serviceName) - 1);
+  g_serviceName[sizeof(g_serviceName) - 1] = '\0';
+  strncpy(g_configPath, configPath, sizeof(g_configPath) - 1);
+  g_configPath[sizeof(g_configPath) - 1] = '\0';
 
-    printf("Starting service '%s' via SCM...\n", serviceName);
+  /* Update the service table with the actual service name.
+   * StartServiceCtrlDispatcher requires a non-const pointer. */
+  serviceTable[0].lpServiceName = (LPSTR)g_serviceName;
 
-    if (!StartServiceCtrlDispatcher(serviceTable)) {
-        DWORD err = GetLastError();
-        fprintf(stderr, "StartServiceCtrlDispatcher failed (error %lu).\n", err);
-        fprintf(stderr, "Hint: Are you running from a command prompt instead of the SCM?\n");
-        fprintf(stderr, "      Use --run for console mode, or --install to register the service.\n");
-        return 1;
-    }
+  printf("Starting service '%s' via SCM...\n", serviceName);
 
-    return 0;
+  if (!StartServiceCtrlDispatcher(serviceTable)) {
+    DWORD err = GetLastError();
+    fprintf(stderr, "StartServiceCtrlDispatcher failed (error %lu).\n", err);
+    fprintf(
+        stderr,
+        "Hint: Are you running from a command prompt instead of the SCM?\n");
+    fprintf(stderr, "      Use --run for console mode, or --install to "
+                    "register the service.\n");
+    return 1;
+  }
+
+  return 0;
 }

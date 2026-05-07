@@ -12,8 +12,8 @@
 #ifndef SVC_INSTANCE_MGR_H
 #define SVC_INSTANCE_MGR_H
 
-#include "svc_config.h"
 #include "pipe_protocol.h"
+#include "svc_config.h"
 #include <windows.h>
 
 #ifdef __cplusplus
@@ -23,49 +23,51 @@ extern "C" {
 /* ── Instance state machine ────────────────────────────────────── */
 
 typedef enum {
-    INST_STOPPED = 0,
-    INST_STARTING,
-    INST_RUNNING,
-    INST_RECONNECTING
+  INST_STOPPED = 0,
+  INST_STARTING,
+  INST_RUNNING,
+  INST_RECONNECTING
 } InstanceState;
 
 /* ── Per-instance tracking ─────────────────────────────────────── */
 
 typedef struct {
-    char name[128];               /* Instance name from config */
-    InstanceState state;           /* Current state */
-    InstanceConfig config;         /* Copy of instance config */
+  char name[128];        /* Instance name from config */
+  InstanceState state;   /* Current state */
+  InstanceConfig config; /* Copy of instance config */
 
-    /* Child process */
-    HANDLE hProcess;              /* Process handle (NULL if not running) */
-    HANDLE hJob;                  /* Job object handle */
-    DWORD  pid;                   /* Process ID (0 if not running) */
+  /* Child process */
+  HANDLE hProcess; /* Process handle (NULL if not running) */
+  HANDLE hJob;     /* Job object handle */
+  DWORD pid;       /* Process ID (0 if not running) */
 
-    /* Heartbeat */
-    HANDLE hHeartbeatPipe;        /* Named pipe for heartbeat (\\.\\pipe\OmniRDP_Instance_<name>) */
-    ULONGLONG lastHeartbeatMs;    /* Timestamp of last heartbeat */
+  /* Heartbeat */
+  HANDLE hHeartbeatPipe;     /* Named pipe for heartbeat
+                                (\\.\\pipe\OmniRDP_Instance_<name>) */
+  ULONGLONG lastHeartbeatMs; /* Timestamp of last heartbeat */
 
-    /* Reconnect backoff */
-    unsigned int reconnectAttempts;
-    ULONGLONG nextReconnectMs;    /* Timestamp when next reconnect attempt is allowed */
+  /* Reconnect backoff */
+  unsigned int reconnectAttempts;
+  ULONGLONG
+      nextReconnectMs; /* Timestamp when next reconnect attempt is allowed */
 
-    /* Stats (updated by heartbeat or IPC) */
-    DWORD viewerCount;
+  /* Stats (updated by heartbeat or IPC) */
+  DWORD viewerCount;
 
-    /* Shutdown flag */
-    BOOL stopRequested;           /* Set to TRUE to request graceful stop */
+  /* Shutdown flag */
+  BOOL stopRequested; /* Set to TRUE to request graceful stop */
 } ManagedInstance;
 
 /* ── Instance manager ──────────────────────────────────────────── */
 
 typedef struct {
-    ManagedInstance *instances;   /* Dynamic array of managed instances */
-    unsigned int instanceCount;
-    SvcConfig *config;           /* Current config (may be owned by manager after reload) */
-    const char *configPath;      /* Path to config.ini */
-    const char *exePath;         /* Path to OmniRDP.exe */
-    CRITICAL_SECTION lock;        /* Thread safety for state changes */
-    BOOL shuttingDown;            /* Set to TRUE during service shutdown */
+  ManagedInstance *instances; /* Dynamic array of managed instances */
+  unsigned int instanceCount;
+  SvcConfig *config; /* Current config (may be owned by manager after reload) */
+  const char *configPath; /* Path to config.ini */
+  const char *exePath;    /* Path to OmniRDP.exe */
+  CRITICAL_SECTION lock;  /* Thread safety for state changes */
+  BOOL shuttingDown;      /* Set to TRUE during service shutdown */
 } InstanceManager;
 
 /**

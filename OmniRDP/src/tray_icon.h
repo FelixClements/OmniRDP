@@ -13,9 +13,9 @@
 #ifndef TRAY_ICON_H
 #define TRAY_ICON_H
 
-#include <windows.h>
 #include "pipe_protocol.h"
 #include "tray_pipe_client.h"
+#include <windows.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,39 +25,40 @@ extern "C" {
  * @brief Tray icon state (maps to icon color)
  */
 typedef enum {
-    TRAY_ICON_GREEN = 0,   /* All instances running */
-    TRAY_ICON_YELLOW = 1,  /* Some instances starting/reconnecting */
-    TRAY_ICON_RED = 2,     /* Some instances stopped unexpectedly */
-    TRAY_ICON_GRAY = 3     /* No services found / cannot connect */
+  TRAY_ICON_GREEN = 0,  /* All instances running */
+  TRAY_ICON_YELLOW = 1, /* Some instances starting/reconnecting */
+  TRAY_ICON_RED = 2,    /* Some instances stopped unexpectedly */
+  TRAY_ICON_GRAY = 3    /* No services found / cannot connect */
 } TrayIconState;
 
 /**
  * @brief Information about a discovered service and its instances
  */
 typedef struct {
-    char serviceName[256];          /* Service name in SCM (e.g., "OmniRDP-Prod") */
-    char pipeName[256];             /* Derived pipe name (e.g., "OmniRDP_Prod_Pipe") */
-    PipeClient client;              /* Connected pipe client (or disconnected) */
-    unsigned int instanceCount;      /* Number of instances from list_instances response */
-    PipeInstanceInfo instances[32];  /* Instance info from service */
-    BOOL connected;                 /* TRUE if pipe client is connected */
+  char serviceName[256]; /* Service name in SCM (e.g., "OmniRDP-Prod") */
+  char pipeName[256];    /* Derived pipe name (e.g., "OmniRDP_Prod_Pipe") */
+  PipeClient client;     /* Connected pipe client (or disconnected) */
+  unsigned int
+      instanceCount; /* Number of instances from list_instances response */
+  PipeInstanceInfo instances[32]; /* Instance info from service */
+  BOOL connected;                 /* TRUE if pipe client is connected */
 } TrayServiceInfo;
 
 /**
  * @brief Tray application context (singleton)
  */
 typedef struct {
-    HWND hwnd;                       /* Hidden message window handle */
-    UINT taskbarCreatedMsg;          /* Registered message for taskbar recreation */
-    HICON hIcons[4];                 /* Icons: green, yellow, red, gray */
-    TrayIconState currentState;      /* Current icon state */
-    TrayServiceInfo services[8];     /* Discovered services (max 8) */
-    unsigned int serviceCount;       /* Number of discovered services */
-    BOOL running;                    /* TRUE while tray app is active */
-    HANDLE hPollThread;              /* Background polling thread */
-    HANDLE hPushThread;              /* Push message listener thread */
-    HINSTANCE hInstance;             /* Application instance handle */
-    CRITICAL_SECTION lock;           /* Thread safety for service info */
+  HWND hwnd;                   /* Hidden message window handle */
+  UINT taskbarCreatedMsg;      /* Registered message for taskbar recreation */
+  HICON hIcons[4];             /* Icons: green, yellow, red, gray */
+  TrayIconState currentState;  /* Current icon state */
+  TrayServiceInfo services[8]; /* Discovered services (max 8) */
+  unsigned int serviceCount;   /* Number of discovered services */
+  BOOL running;                /* TRUE while tray app is active */
+  HANDLE hPollThread;          /* Background polling thread */
+  HANDLE hPushThread;          /* Push message listener thread */
+  HINSTANCE hInstance;         /* Application instance handle */
+  CRITICAL_SECTION lock;       /* Thread safety for service info */
 } TrayAppCtx;
 
 /**

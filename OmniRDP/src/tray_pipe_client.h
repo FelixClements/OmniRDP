@@ -12,8 +12,8 @@
 #ifndef TRAY_PIPE_CLIENT_H
 #define TRAY_PIPE_CLIENT_H
 
-#include <windows.h>
 #include "pipe_protocol.h"
+#include <windows.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,10 +26,10 @@ extern "C" {
  * Supports both request-response commands and receiving push messages.
  */
 typedef struct {
-    HANDLE hPipe;                  /* Connected pipe handle, or INVALID_HANDLE_VALUE */
-    char pipeName[256];            /* Full pipe path */
-    BOOL connected;                /* TRUE if currently connected */
-    CRITICAL_SECTION lock;         /* Thread safety for send/receive */
+  HANDLE hPipe;          /* Connected pipe handle, or INVALID_HANDLE_VALUE */
+  char pipeName[256];    /* Full pipe path */
+  BOOL connected;        /* TRUE if currently connected */
+  CRITICAL_SECTION lock; /* Thread safety for send/receive */
 } PipeClient;
 
 /**

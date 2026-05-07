@@ -12,8 +12,8 @@
 #ifndef SVC_DPAPI_H
 #define SVC_DPAPI_H
 
-#include <windows.h>
 #include <stddef.h>
+#include <windows.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,8 +49,8 @@ int svc_dpapi_is_encrypted(const char *password);
  *
  * Note: The caller must SecureZeroMemory the plaintext_out buffer when done.
  */
-int svc_dpapi_decrypt(const char *encrypted_password,
-                      char *plaintext_out, size_t plaintext_out_size);
+int svc_dpapi_decrypt(const char *encrypted_password, char *plaintext_out,
+                      size_t plaintext_out_size);
 
 /**
  * @brief Encrypt a plaintext password using DPAPI
@@ -63,8 +63,8 @@ int svc_dpapi_decrypt(const char *encrypted_password,
  * @param encrypted_out_size Size of encrypted_out buffer
  * @return 0 on success, -1 on error
  */
-int svc_dpapi_encrypt(const char *plaintext,
-                      char *encrypted_out, size_t encrypted_out_size);
+int svc_dpapi_encrypt(const char *plaintext, char *encrypted_out,
+                      size_t encrypted_out_size);
 
 /**
  * @brief Encrypt a plaintext password in-place in the config file
@@ -82,8 +82,7 @@ int svc_dpapi_encrypt(const char *plaintext,
  * passwords with DPAPI-encrypted blobs.
  */
 int svc_dpapi_encrypt_in_file(const char *config_path,
-                               const char *instance_name,
-                               const char *key);
+                              const char *instance_name, const char *key);
 
 #ifdef __cplusplus
 }

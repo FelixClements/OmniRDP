@@ -38,12 +38,14 @@ void print_usage(const char *program) {
   printf("  %s --instance <name> --secrets-handle <handle> [--config <path>]\n",
          program);
   printf("\nStandalone mode:\n");
-  printf("  Example: %s 192.168.1.209 3389 localadmin localadmin . 2\n", program);
+  printf("  Example: %s 192.168.1.209 3389 localadmin localadmin . 2\n",
+         program);
   printf("  monitors: number of 1920x1080 monitors (1-16, default: 1)\n");
   printf("\nInstance mode (spawned by OmniRDP-svc):\n");
   printf("  --instance     Instance name from config.ini\n");
   printf("  --secrets-handle  Windows HANDLE for password pipe\n");
-  printf("  --config       Path to config.ini (default: C:\\ProgramData\\OmniRDP\\config.ini)\n");
+  printf("  --config       Path to config.ini (default: "
+         "C:\\ProgramData\\OmniRDP\\config.ini)\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -55,7 +57,8 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
-  /* Instance mode: --instance <name> --secrets-handle <handle> [--config <path>] */
+  /* Instance mode: --instance <name> --secrets-handle <handle> [--config
+   * <path>] */
   if (argc >= 2 && strcmp(argv[1], "--instance") == 0) {
     int ret = instance_runner_main(argc, argv);
 #ifdef _WIN32
@@ -143,7 +146,8 @@ int main(int argc, char *argv[]) {
   printf("Connected successfully!\n");
   printf("Starting viewer server on port 13389...\n");
 
-  ViewerServer *server = viewer_server_init("0.0.0.0", 13389, client, NULL, NULL);
+  ViewerServer *server =
+      viewer_server_init("0.0.0.0", 13389, client, NULL, NULL);
   if (!server) {
     fprintf(stderr, "Failed to initialize viewer server\n");
     backend_disconnect(client);

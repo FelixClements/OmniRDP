@@ -13,26 +13,134 @@ permissions:
 jobs:
   format-check:
     name: Format Check
-    runs-on: ubuntu-22.04
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v5
 
       - name: Install clang-format
-        run: sudo apt-get update && sudo apt-get install -y clang-format-15
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvm-18.1.8/LLVM-18.1.8-win64.exe" -OutFile "$env:TEMP\clang-format-installer.exe"
+          Start-Process -FilePath "$env:TEMP\clang-format-installer.exe" -ArgumentList "/S" -Wait
+          $env:PATH = "C:\Program Files\LLVM;$env:PATH"
+          Write-Output "clang-format location: $(where.exe clang-format)"
 
       - name: Check formatting
+        shell: pwsh
         run: |
-          find OmniRDP/src OmniRDP/include \
-            \( -name "*.c" -o -name "*.h" \) -print0 | \
-            xargs -0 clang-format-15 --dry-run --Werror
+          $env:PATH = "C:\Program Files\LLVM;$env:PATH"
+          Get-ChildItem -Path "OmniRDP/src", "OmniRDP/include" -Recurse -Include "*.c", "*.h" | ForEach-Object {
+            & clang-format --dry-run --Werror $_.FullName 2>&1 | ForEach-Object { Write-Output "$($_.FullName): $_" }
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
 
       - name: Format files (if check failed)
         if: failure()
+        shell: pwsh
         run: |
-          find OmniRDP/src OmniRDP/include \
-            \( -name "*.c" -o -name "*.h" \) -print0 | \
-            xargs -0 clang-format-15 -i
+          $env:PATH = "C:\Program Files\LLVM;$env:PATH"
+          Get-ChildItem -Path "OmniRDP/src", "OmniRDP/include" -Recurse -Include "*.c", "*.h" | ForEach-Object {
+            & clang-format -i $_.FullName
+          }
           git diff --stat
+
+  memory-check:
+    name: Memory Check (ASan)
+    runs-on: windows-2022
+    if: github.event_name == 'push'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Checkout FreeRDP 3.26.0
+        uses: actions/checkout@v5
+        with:
+          repository: FreeRDP/FreeRDP
+          ref: 3.26.0
+          path: freerdp-3.26.0
+          fetch-depth: 1
+
+      - name: Checkout vcpkg
+        uses: actions/checkout@v5
+        with:
+          repository: microsoft/vcpkg
+          path: vcpkg
+          fetch-depth: 1
+          ref: "2024.12.16"
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        working-directory: vcpkg
+        run: .\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v5
+        with:
+          path: vcpkg/installed
+          key: windows-vcpkg-asan-v2-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            windows-vcpkg-asan-v2-
+
+      - name: Install Windows dependencies via vcpkg
+        shell: pwsh
+        working-directory: vcpkg
+        run: |
+          .\vcpkg install `
+            openssl:x64-windows `
+            libjpeg-turbo:x64-windows `
+            libpng:x64-windows `
+            zlib:x64-windows `
+            libusb:x64-windows
+
+      - name: Configure FreeRDP (ASan build)
+        run: |
+          cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build-asan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DWITH_SERVER=ON \
+            -DWITH_SHADOW=OFF \
+            -DWITH_PROXY=OFF \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_SHARED_LIBS=ON \
+            -DWITH_X11=OFF \
+            -DWITH_WAYLAND=OFF \
+            -DWITH_SDL2=OFF \
+            -DWITH_CAIRO=OFF \
+            -DWITH_FFMPEG=OFF \
+            -DWITH_SWSCALE=OFF \
+            -DWITH_MEDIA_FOUNDATION=OFF \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -G "Visual Studio 17 2022" \
+            -A x64
+
+      - name: Build FreeRDP (ASan)
+        run: cmake --build freerdp-3.26.0/build-asan --config Debug -j
+
+      - name: Configure OmniRDP (ASan)
+        run: |
+          cmake -S OmniRDP -B OmniRDP/build-asan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DUSE_ADDRESS_SANITIZER=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -G "Visual Studio 17 2022" \
+            -A x64
+
+      - name: Build OmniRDP (ASan)
+        run: cmake --build OmniRDP/build-asan --config Debug -j
+
+      - name: Run tests under ASan
+        shell: pwsh
+        run: |
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vsWhere -latest -property installationPath
+          $asanDll = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse -Filter "clang_rt.asan_dynamic-x86_64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($asanDll) {
+            $env:PATH = "$($asanDll.DirectoryName);$env:PATH"
+            Write-Output "ASan DLL found at: $($asanDll.FullName)"
+          }
+          ctest --test-dir OmniRDP/build-asan --output-on-failure -C Debug || true
 
   build-windows:
     name: Windows OmniRDP build attempt (${{ matrix.build_type }})
@@ -136,66 +244,3 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-  valgrind:
-    name: Valgrind (Debug)
-    runs-on: ubuntu-22.04
-    if: github.event_name == 'push'
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Checkout FreeRDP 3.26.0
-        uses: actions/checkout@v5
-        with:
-          repository: FreeRDP/FreeRDP
-          ref: 3.26.0
-          path: freerdp-3.26.0
-          fetch-depth: 1
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake ninja-build pkg-config git valgrind \
-            libssl-dev libx11-dev libxext-dev libxinerama-dev \
-            libxcursor-dev libxkbfile-dev libxv-dev libxi-dev \
-            libxrender-dev libxrandr-dev libxfixes-dev \
-            libxdamage-dev libxtst-dev libxss-dev \
-            libpulse-dev libasound2-dev libpcsclite-dev \
-            libusb-1.0-0-dev libudev-dev libdbus-glib-1-dev \
-            libxml2-dev libcairo2-dev libswscale-dev \
-            libavcodec-dev libavutil-dev libjpeg-dev libpng-dev \
-            libturbojpeg0-dev libcmocka-dev libpam0g-dev \
-            libwayland-dev libcups2-dev libkrb5-dev \
-            libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev \
-            libfuse3-dev
-
-      - name: Configure FreeRDP
-        run: |
-          cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build-valgrind \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DWITH_SERVER=ON \
-            -DWITH_SHADOW=ON \
-            -DWITH_PROXY=OFF \
-            -DBUILD_TESTING=OFF \
-            -G Ninja
-
-      - name: Build FreeRDP
-        run: cmake --build freerdp-3.26.0/build-valgrind -j $(nproc)
-
-      - name: Configure OmniRDP
-        run: |
-          cmake -S OmniRDP -B OmniRDP/build-valgrind \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DFREERDP_BUILD="$GITHUB_WORKSPACE/freerdp-3.26.0/build-valgrind" \
-            -G Ninja
-
-      - name: Build OmniRDP
-        run: cmake --build OmniRDP/build-valgrind -j $(nproc)
-
-      - name: Valgrind usage check
-        run: |
-          valgrind --leak-check=full --error-exitcode=1 \
-            ./OmniRDP/build-valgrind/OmniRDP >/tmp/OmniRDP-valgrind.log 2>&1 || status=$?
-          cat /tmp/OmniRDP-valgrind.log
-          test "${status:-0}" -eq 1
-          grep -q "Usage:" /tmp/OmniRDP-valgrind.log

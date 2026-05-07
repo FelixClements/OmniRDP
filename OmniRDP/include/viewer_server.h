@@ -265,8 +265,7 @@ typedef struct {
 } ViewerServer;
 
 ViewerServer *viewer_server_init(const char *bind_address, UINT16 port,
-                                 BackendClient *backend,
-                                 const char *cert_path,
+                                 BackendClient *backend, const char *cert_path,
                                  const char *key_path);
 
 BOOL viewer_server_start(ViewerServer *server);

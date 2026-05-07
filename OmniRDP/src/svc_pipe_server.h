@@ -13,8 +13,8 @@
 #ifndef SVC_PIPE_SERVER_H
 #define SVC_PIPE_SERVER_H
 
-#include <windows.h>
 #include "svc_instance_mgr.h"
+#include <windows.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,15 +27,15 @@ extern "C" {
  * Runs in the service process (Session 0).
  */
 typedef struct {
-    char pipeName[256];           /* Full pipe path, e.g. "\\.\pipe\OmniRDP_ServicePipe" */
-    InstanceManager *mgr;         /* Pointer to instance manager (not owned) */
-    CRITICAL_SECTION lock;        /* Protects client list */
+  char pipeName[256]; /* Full pipe path, e.g. "\\.\pipe\OmniRDP_ServicePipe" */
+  InstanceManager *mgr;  /* Pointer to instance manager (not owned) */
+  CRITICAL_SECTION lock; /* Protects client list */
 
-    HANDLE hListenerThread;       /* Thread that accepts connections */
-    volatile BOOL running;        /* Server running flag */
+  HANDLE hListenerThread; /* Thread that accepts connections */
+  volatile BOOL running;  /* Server running flag */
 
-    /* Internal: linked list of connected clients (ClientConnection*) */
-    void *clients;
+  /* Internal: linked list of connected clients (ClientConnection*) */
+  void *clients;
 } PipeServer;
 
 /**
@@ -75,7 +75,8 @@ void pipe_server_push_stats(PipeServer *server);
  * @brief Push an event notification to all connected clients
  *
  * @param server Pipe server context
- * @param eventType Event type string (e.g., "crash", "reconnect", "config_error")
+ * @param eventType Event type string (e.g., "crash", "reconnect",
+ * "config_error")
  * @param instanceName Instance name the event relates to
  */
 void pipe_server_push_event(PipeServer *server, const char *eventType,

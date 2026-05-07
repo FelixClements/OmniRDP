@@ -37,8 +37,8 @@
 #ifndef PIPE_PROTOCOL_H
 #define PIPE_PROTOCOL_H
 
-#include <windows.h>
 #include <stdint.h>
+#include <windows.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,21 +49,21 @@ extern "C" {
 /* ════════════════════════════════════════════════════════════════ */
 
 /** Size of the length prefix in bytes (4-byte little-endian DWORD). */
-#define PIPE_HEADER_SIZE         4U
+#define PIPE_HEADER_SIZE 4U
 
 /**
  * Maximum allowed payload size: 1 MB.
  * This prevents runaway allocations while allowing large responses
  * (e.g. log tails, instance lists with many entries).
  */
-#define PIPE_MAX_PAYLOAD_SIZE    (1024U * 1024U)
+#define PIPE_MAX_PAYLOAD_SIZE (1024U * 1024U)
 
 /**
  * Default maximum JSON size embedded in the helper structs.
  * Larger payloads should use the framing functions directly with
  * dynamically allocated buffers.
  */
-#define PIPE_STRUCT_JSON_MAX     8192U
+#define PIPE_STRUCT_JSON_MAX 8192U
 
 /* ════════════════════════════════════════════════════════════════ */
 /*  Command Enums                                                  */
@@ -77,26 +77,26 @@ extern "C" {
  * JSON response containing success/failure status and optional data.
  */
 typedef enum {
-    /** Get all managed instances and their current status. */
-    PIPE_CMD_LIST_INSTANCES = 0,
+  /** Get all managed instances and their current status. */
+  PIPE_CMD_LIST_INSTANCES = 0,
 
-    /** Start a stopped instance.  Requires instance_name. */
-    PIPE_CMD_START_INSTANCE,
+  /** Start a stopped instance.  Requires instance_name. */
+  PIPE_CMD_START_INSTANCE,
 
-    /** Gracefully stop a running instance.  Requires instance_name. */
-    PIPE_CMD_STOP_INSTANCE,
+  /** Gracefully stop a running instance.  Requires instance_name. */
+  PIPE_CMD_STOP_INSTANCE,
 
-    /** Stop then restart an instance.  Requires instance_name. */
-    PIPE_CMD_RESTART_INSTANCE,
+  /** Stop then restart an instance.  Requires instance_name. */
+  PIPE_CMD_RESTART_INSTANCE,
 
-    /** Hot-reload the configuration file without restarting the service. */
-    PIPE_CMD_RELOAD_CONFIG,
+  /** Hot-reload the configuration file without restarting the service. */
+  PIPE_CMD_RELOAD_CONFIG,
 
-    /** Retrieve recent log lines (optional: instance_name to filter). */
-    PIPE_CMD_GET_LOGS,
+  /** Retrieve recent log lines (optional: instance_name to filter). */
+  PIPE_CMD_GET_LOGS,
 
-    /** Number of valid commands (used as a sentinel / array size). */
-    PIPE_CMD_COUNT
+  /** Number of valid commands (used as a sentinel / array size). */
+  PIPE_CMD_COUNT
 } PipeCommand;
 
 /**
@@ -106,14 +106,14 @@ typedef enum {
  * from command responses by inspecting the JSON "type" field.
  */
 typedef enum {
-    /** Periodic per-instance statistics (viewer count, uptime, etc.). */
-    PIPE_PUSH_STATS = 0,
+  /** Periodic per-instance statistics (viewer count, uptime, etc.). */
+  PIPE_PUSH_STATS = 0,
 
-    /** Event notification — instance crashed, reconnected, config error. */
-    PIPE_PUSH_EVENT,
+  /** Event notification — instance crashed, reconnected, config error. */
+  PIPE_PUSH_EVENT,
 
-    /** Number of valid push types (sentinel). */
-    PIPE_PUSH_COUNT
+  /** Number of valid push types (sentinel). */
+  PIPE_PUSH_COUNT
 } PipePushType;
 
 /* ════════════════════════════════════════════════════════════════ */
@@ -122,17 +122,17 @@ typedef enum {
 
 /** @brief Current lifecycle state of a managed RDP instance. */
 typedef enum {
-    /** Instance is not running (initial state after stop or on startup). */
-    INSTANCE_STOPPED = 0,
+  /** Instance is not running (initial state after stop or on startup). */
+  INSTANCE_STOPPED = 0,
 
-    /** Instance is being launched / started (transitional). */
-    INSTANCE_STARTING,
+  /** Instance is being launched / started (transitional). */
+  INSTANCE_STARTING,
 
-    /** Instance is active, connected to the backend, and accepting viewers. */
-    INSTANCE_RUNNING,
+  /** Instance is active, connected to the backend, and accepting viewers. */
+  INSTANCE_RUNNING,
 
-    /** Instance lost its backend connection and is attempting to reconnect. */
-    INSTANCE_RECONNECTING
+  /** Instance lost its backend connection and is attempting to reconnect. */
+  INSTANCE_RECONNECTING
 } PipeInstanceState;
 
 /* ════════════════════════════════════════════════════════════════ */
@@ -149,40 +149,40 @@ typedef enum {
  * JSON strings.
  */
 typedef struct {
-    /** The command to execute (see PipeCommand enum). */
-    PipeCommand command;
+  /** The command to execute (see PipeCommand enum). */
+  PipeCommand command;
 
-    /**
-     * Target instance name, or empty string if the command does not
-     * apply to a specific instance (e.g. PIPE_CMD_LIST_INSTANCES).
-     */
-    char instance_name[128];
+  /**
+   * Target instance name, or empty string if the command does not
+   * apply to a specific instance (e.g. PIPE_CMD_LIST_INSTANCES).
+   */
+  char instance_name[128];
 
-    /**
-     * Additional JSON payload to merge into the request message.
-     * Can be empty for simple commands.  For large payloads, bypass
-     * this struct and pass the JSON directly to pipe_frame_send().
-     */
-    char json_payload[PIPE_STRUCT_JSON_MAX];
+  /**
+   * Additional JSON payload to merge into the request message.
+   * Can be empty for simple commands.  For large payloads, bypass
+   * this struct and pass the JSON directly to pipe_frame_send().
+   */
+  char json_payload[PIPE_STRUCT_JSON_MAX];
 } PipeRequest;
 
 /**
  * @brief Logical representation of a response from service to tray.
  */
 typedef struct {
-    /** Non-zero (TRUE) if the command succeeded, zero (FALSE) on failure. */
-    int success;
+  /** Non-zero (TRUE) if the command succeeded, zero (FALSE) on failure. */
+  int success;
 
-    /** Human-readable error message, empty string when success is TRUE. */
-    char error_message[512];
+  /** Human-readable error message, empty string when success is TRUE. */
+  char error_message[512];
 
-    /**
-     * Response data as JSON.  The structure depends on the command:
-     *   - PIPE_CMD_LIST_INSTANCES : array of PipeInstanceInfo objects
-     *   - PIPE_CMD_GET_LOGS      : array of log line strings
-     *   - other commands          : typically empty or a simple status object
-     */
-    char json_payload[PIPE_STRUCT_JSON_MAX];
+  /**
+   * Response data as JSON.  The structure depends on the command:
+   *   - PIPE_CMD_LIST_INSTANCES : array of PipeInstanceInfo objects
+   *   - PIPE_CMD_GET_LOGS      : array of log line strings
+   *   - other commands          : typically empty or a simple status object
+   */
+  char json_payload[PIPE_STRUCT_JSON_MAX];
 } PipeResponse;
 
 /**
@@ -191,20 +191,20 @@ typedef struct {
  * Used primarily in the JSON response for PIPE_CMD_LIST_INSTANCES.
  */
 typedef struct {
-    /** Instance name (matches [instance:<name>] in config). */
-    char name[128];
+  /** Instance name (matches [instance:<name>] in config). */
+  char name[128];
 
-    /** Current lifecycle state (see PipeInstanceState enum). */
-    PipeInstanceState state;
+  /** Current lifecycle state (see PipeInstanceState enum). */
+  PipeInstanceState state;
 
-    /** Number of viewers currently connected to this instance. */
-    DWORD viewer_count;
+  /** Number of viewers currently connected to this instance. */
+  DWORD viewer_count;
 
-    /** Backend RDP server hostname or IP address. */
-    char backend_hostname[256];
+  /** Backend RDP server hostname or IP address. */
+  char backend_hostname[256];
 
-    /** Backend RDP server TCP port (typically 3389). */
-    uint16_t backend_port;
+  /** Backend RDP server TCP port (typically 3389). */
+  uint16_t backend_port;
 } PipeInstanceInfo;
 
 /* ════════════════════════════════════════════════════════════════ */
@@ -227,8 +227,7 @@ typedef struct {
  * @return TRUE on success.  FALSE on failure — call GetLastError()
  *         for extended error information.
  */
-BOOL
-pipe_frame_send(HANDLE hPipe, const char *json_payload, DWORD payload_len);
+BOOL pipe_frame_send(HANDLE hPipe, const char *json_payload, DWORD payload_len);
 
 /**
  * @brief Receive a length-prefixed frame from a named pipe.
@@ -253,8 +252,7 @@ pipe_frame_send(HANDLE hPipe, const char *json_payload, DWORD payload_len);
  * @note On success, the caller owns the buffer returned in
  *       *payload_out and must free it via HeapFree().
  */
-BOOL
-pipe_frame_recv(HANDLE hPipe, char **payload_out, DWORD *payload_len_out);
+BOOL pipe_frame_recv(HANDLE hPipe, char **payload_out, DWORD *payload_len_out);
 
 /* ════════════════════════════════════════════════════════════════ */
 /*  JSON Helper Note                                               */

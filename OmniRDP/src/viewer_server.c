@@ -3941,8 +3941,6 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
   peer->Activate = peer_activate;
   peer->ReachedState = peer_reached_state;
 
-
-
   if (!freerdp_peer_context_new(peer))
     return FALSE;
 
@@ -4072,7 +4070,8 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
         freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerRsaKey, key,
                                          1);
       } else {
-        LOG_W("viewer_server", "Failed to load cert from '%s'/'%s'", cert_file, key_file);
+        LOG_W("viewer_server", "Failed to load cert from '%s'/'%s'", cert_file,
+              key_file);
       }
     }
   }
@@ -4095,8 +4094,7 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
 }
 
 ViewerServer *viewer_server_init(const char *bind_address, UINT16 port,
-                                 BackendClient *backend,
-                                 const char *cert_path,
+                                 BackendClient *backend, const char *cert_path,
                                  const char *key_path) {
   ViewerServer *server = calloc(1, sizeof(ViewerServer));
   if (!server)
@@ -4134,7 +4132,8 @@ BOOL viewer_server_start(ViewerServer *server) {
                               server->port))
     return FALSE;
 
-  LOG_I("viewer_server", "Viewer server listening on %s:%u", server->bind_address, server->port);
+  LOG_I("viewer_server", "Viewer server listening on %s:%u",
+        server->bind_address, server->port);
 
   server->running = TRUE;
   while (server->running) {

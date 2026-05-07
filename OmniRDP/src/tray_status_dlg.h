@@ -1,8 +1,8 @@
 #ifndef TRAY_STATUS_DLG_H
 #define TRAY_STATUS_DLG_H
 
-#include <windows.h>
 #include "tray_icon.h"
+#include <windows.h>
 
 #ifdef __cplusplus
 extern "C" {
