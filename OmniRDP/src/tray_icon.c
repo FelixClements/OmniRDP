@@ -1086,7 +1086,7 @@ tray_icon_refresh_instances(TrayAppCtx *ctx)
 
                 if (field)
                 {
-                    valStart = field + 22; /* skip \"backend_hostname\":\" */
+                    valStart = field + 23; /* skip \"backend_hostname\":\" (23 chars) */
                 }
                 else
                 {
