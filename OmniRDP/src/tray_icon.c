@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 /* ── Log tag ──────────────────────────────────────────────────────── */
 #define LOG_TAG "tray_icon"
@@ -1074,6 +1075,57 @@ tray_icon_refresh_instances(TrayAppCtx *ctx)
                         unsigned long vc = 0;
                         sscanf(val, "%lu", &vc);
                         info->viewer_count = (DWORD)vc;
+                    }
+                }
+            }
+
+            /* ── Parse "backend_hostname" ───────────────────────── */
+            {
+                const char *field = strstr(p, "\\\"backend_hostname\\\":\\\"");
+                const char *valStart = NULL;
+
+                if (field)
+                {
+                    valStart = field + 22; /* skip \"backend_hostname\":\" */
+                }
+                else
+                {
+                    field = strstr(p, "\"backend_hostname\":\"");
+                    if (field)
+                        valStart = field + 20; /* skip "backend_hostname":" */
+                }
+
+                if (valStart)
+                {
+                    const char *valEnd = strstr(valStart, "\\\"");
+                    if (!valEnd)
+                        valEnd = strchr(valStart, '"');
+                    if (valEnd && valEnd > valStart)
+                    {
+                        size_t len = (size_t)(valEnd - valStart);
+                        if (len > sizeof(info->backend_hostname) - 1)
+                            len = sizeof(info->backend_hostname) - 1;
+                        memcpy(info->backend_hostname, valStart, len);
+                        info->backend_hostname[len] = '\0';
+                    }
+                }
+            }
+
+            /* ── Parse "backend_port" ───────────────────────────── */
+            {
+                const char *field = strstr(p, "\\\"backend_port\\\":");
+                if (!field)
+                    field = strstr(p, "\"backend_port\":");
+                if (field)
+                {
+                    const char *val = field;
+                    while (*val && *val != ':') val++;
+                    if (*val == ':')
+                    {
+                        val++;
+                        unsigned long portVal = 0;
+                        sscanf(val, "%lu", &portVal);
+                        info->backend_port = (uint16_t)portVal;
                     }
                 }
             }
