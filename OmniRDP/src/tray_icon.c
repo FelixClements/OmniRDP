@@ -919,9 +919,14 @@ tray_icon_refresh_instances(TrayAppCtx *ctx)
 
     EnterCriticalSection(&ctx->lock);
 
+    LOG_D("tray_icon", "refresh_instances: starting (serviceCount=%u)", ctx->serviceCount);
+
     for (unsigned int i = 0; i < ctx->serviceCount; i++)
     {
         TrayServiceInfo *svc = &ctx->services[i];
+
+        LOG_D("tray_icon", "refresh_instances: service[%u] '%s' connected=%d",
+              i, svc->serviceName, svc->connected);
 
         if (!svc->connected)
             continue;
@@ -935,6 +940,7 @@ tray_icon_refresh_instances(TrayAppCtx *ctx)
         memset(&resp, 0, sizeof(resp));
 
         /* ── Send the request ─────────────────────────────────── */
+        LOG_D("tray_icon", "refresh_instances: sending LIST_INSTANCES to '%s'", svc->serviceName);
         if (pipe_client_send_request(&svc->client, &req, &resp, 5000) != 0)
         {
             LOG_W(LOG_TAG, "pipe_client_send_request(LIST_INSTANCES) "
@@ -950,6 +956,9 @@ tray_icon_refresh_instances(TrayAppCtx *ctx)
                   svc->serviceName, resp.error_message);
             continue;
         }
+
+        LOG_D("tray_icon", "refresh_instances: received response from '%s', success=%d, instanceCount=%u",
+              svc->serviceName, resp.success, svc->instanceCount);
 
         /* ── Parse instance info from json_payload ────────────── */
         /*

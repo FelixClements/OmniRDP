@@ -386,13 +386,19 @@ client_handler(LPVOID arg)
     PipeServer *server = client->server;
     HANDLE hPipe = client->hPipe;
 
-    LOG_I("pipe_server", "Client handler started (pipe=%p)", (void *)hPipe);
+    LOG_I("pipe_server", "Client handler thread started (pipe=%p, threadId=%lu)", (void *)hPipe, GetCurrentThreadId());
+
+    BOOL recvResult = FALSE;
 
     while (server->running) {
+        LOG_D("pipe_server", "Client handler: waiting for request from pipe %p", (void *)hPipe);
         char *payload = NULL;
         DWORD payloadLen = 0;
+        recvResult = pipe_frame_recv(hPipe, &payload, &payloadLen);
+        LOG_D("pipe_server", "Client handler: pipe_frame_recv returned %d, payloadLen=%lu, lastError=%lu",
+              recvResult, payloadLen, GetLastError());
 
-        if (!pipe_frame_recv(hPipe, &payload, &payloadLen)) {
+        if (!recvResult) {
             DWORD err = GetLastError();
             if (err != ERROR_BROKEN_PIPE && err != ERROR_PIPE_NOT_CONNECTED) {
                 LOG_D("pipe_server", "pipe_frame_recv error %lu on pipe %p",
@@ -405,6 +411,9 @@ client_handler(LPVOID arg)
         int cmd = extract_command(payload);
         char response[PIPE_STRUCT_JSON_MAX];
         response[0] = '\0';
+
+        LOG_I("pipe_server", "Client handler: received command %d, payload='%s'",
+              cmd, payload);
 
         switch (cmd) {
             case PIPE_CMD_LIST_INSTANCES:
@@ -446,9 +455,14 @@ client_handler(LPVOID arg)
         HeapFree(GetProcessHeap(), 0, payload);
 
         /* Send the response — synchronously (dedicated thread) */
-        DWORD respLen = (DWORD)strlen(response);
-        if (respLen > 0) {
-            if (!pipe_frame_send(hPipe, response, respLen)) {
+        DWORD responseLen = (DWORD)strlen(response);
+        if (responseLen > 0) {
+            LOG_D("pipe_server", "Client handler: sending response (%lu bytes): %s",
+                  responseLen, response);
+            BOOL sendResult = pipe_frame_send(hPipe, response, responseLen);
+            LOG_D("pipe_server", "Client handler: pipe_frame_send returned %d, lastError=%lu",
+                  sendResult, GetLastError());
+            if (!sendResult) {
                 LOG_D("pipe_server", "pipe_frame_send error %lu on pipe %p",
                       GetLastError(), (void *)hPipe);
                 break;
@@ -456,6 +470,7 @@ client_handler(LPVOID arg)
         }
     }
 
+    LOG_I("pipe_server", "Client handler: exiting loop (recvResult=%d, lastError=%lu)", recvResult, GetLastError());
     LOG_I("pipe_server", "Client disconnected (pipe=%p)", (void *)hPipe);
 
     /* Remove from server list and clean up */

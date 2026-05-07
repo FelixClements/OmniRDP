@@ -177,14 +177,19 @@ pipe_client_send_request(PipeClient *client, const PipeRequest *request,
         jsonReq[needed - 1] = '\0';
     }
 
-    LOG_D(LOG_TAG, "send_request: sending %s", jsonReq);
+    LOG_D("pipe_client", "send_request: sending %lu bytes: %s", (DWORD)strlen(jsonReq), jsonReq);
 
     /* ── Send the frame ─────────────────────────────────────────── */
-    if (!pipe_frame_send(client->hPipe, jsonReq, (DWORD)strlen(jsonReq)))
     {
-        DWORD err = GetLastError();
-        LOG_E(LOG_TAG, "send_request: pipe_frame_send failed (error %lu)", err);
-        goto cleanup;
+        DWORD jsonLen = (DWORD)strlen(jsonReq);
+        BOOL sendResult = pipe_frame_send(client->hPipe, jsonReq, jsonLen);
+        LOG_D("pipe_client", "send_request: pipe_frame_send returned %d, lastError=%lu", sendResult, GetLastError());
+        if (!sendResult)
+        {
+            DWORD err = GetLastError();
+            LOG_E("pipe_client", "send_request: pipe_frame_send failed (error %lu)", err);
+            goto cleanup;
+        }
     }
 
     /* ── Receive the response frame (with push-message filtering) ── */
@@ -201,13 +206,18 @@ pipe_client_send_request(PipeClient *client, const PipeRequest *request,
     {
         DWORD startTime = GetTickCount();
         BOOL  gotResp   = FALSE;
+        int   attempt   = 0;
 
         while (!gotResp)
         {
+            attempt++;
+
+            LOG_D("pipe_client", "send_request: waiting for response (attempt %d)", attempt);
+
             /* ── Check for timeout ──────────────────────────────── */
             if (GetTickCount() - startTime >= timeoutMs)
             {
-                LOG_E(LOG_TAG, "send_request: timeout (%lu ms) waiting for response",
+                LOG_E("pipe_client", "send_request: timeout (%lu ms) waiting for response",
                       timeoutMs);
                 goto cleanup;
             }
@@ -217,7 +227,7 @@ pipe_client_send_request(PipeClient *client, const PipeRequest *request,
             if (!PeekNamedPipe(client->hPipe, NULL, 0, NULL, &avail, NULL))
             {
                 DWORD err = GetLastError();
-                LOG_E(LOG_TAG, "send_request: PeekNamedPipe failed (error %lu)", err);
+                LOG_E("pipe_client", "send_request: PeekNamedPipe failed (error %lu)", err);
                 goto cleanup;
             }
 
@@ -228,20 +238,25 @@ pipe_client_send_request(PipeClient *client, const PipeRequest *request,
             }
 
             /* ── Read a frame ───────────────────────────────────── */
-            if (!pipe_frame_recv(client->hPipe, &reply, &replyLen))
             {
-                DWORD err = GetLastError();
-                LOG_E(LOG_TAG, "send_request: pipe_frame_recv failed (error %lu)", err);
-                goto cleanup;
+                BOOL recvResult = pipe_frame_recv(client->hPipe, &reply, &replyLen);
+                LOG_D("pipe_client", "send_request: pipe_frame_recv returned %d, payloadLen=%lu, lastError=%lu",
+                      recvResult, replyLen, GetLastError());
+                if (recvResult && replyLen > 0) {
+                    LOG_D("pipe_client", "send_request: received payload: %s", reply);
+                }
+                if (!recvResult)
+                {
+                    DWORD err = GetLastError();
+                    LOG_E("pipe_client", "send_request: pipe_frame_recv failed (error %lu)", err);
+                    goto cleanup;
+                }
             }
-
-            LOG_D(LOG_TAG, "send_request: received frame (%lu bytes)", replyLen);
 
             /* ── Filter out unsolicited push messages ───────────── */
             if (strstr(reply, "\"type\":\"push\"") != NULL)
             {
-                LOG_D(LOG_TAG, "send_request: discarding push message, "
-                      "waiting for response");
+                LOG_D("pipe_client", "send_request: received push message, discarding");
                 HeapFree(GetProcessHeap(), 0, reply);
                 reply   = NULL;
                 replyLen = 0;

@@ -9,6 +9,7 @@
  */
 
 #include "pipe_protocol.h"
+#include "svc_log.h"
 #include <windows.h>
 
 /* ──────────────────────────────────────────────────────────────────
@@ -115,12 +116,16 @@ pipe_frame_recv(HANDLE hPipe, char **payload_out, DWORD *payload_len_out)
     /* ── Read 4-byte length prefix (little-endian DWORD) ───────── */
     if (!read_all(hPipe, &payload_len, PIPE_HEADER_SIZE))
     {
+        LOG_D("pipe_protocol", "frame_recv: error reading header, lastError=%lu", GetLastError());
         return FALSE;
     }
+
+    LOG_D("pipe_protocol", "frame_recv: read length prefix, payloadLen=%lu", payload_len);
 
     /* ── Validate payload length ───────────────────────────────── */
     if (payload_len > PIPE_MAX_PAYLOAD_SIZE)
     {
+        LOG_D("pipe_protocol", "frame_recv: error, payloadLen=%lu exceeds max %lu", payload_len, (unsigned long)PIPE_MAX_PAYLOAD_SIZE);
         SetLastError(ERROR_BAD_LENGTH);
         return FALSE;
     }
@@ -131,6 +136,7 @@ pipe_frame_recv(HANDLE hPipe, char **payload_out, DWORD *payload_len_out)
         buf = (char *)HeapAlloc(GetProcessHeap(), 0, payload_len + 1);
         if (buf == NULL)
         {
+            LOG_D("pipe_protocol", "frame_recv: error, out of memory (payloadLen=%lu)", payload_len);
             SetLastError(ERROR_OUTOFMEMORY);
             return FALSE;
         }
@@ -138,9 +144,12 @@ pipe_frame_recv(HANDLE hPipe, char **payload_out, DWORD *payload_len_out)
         /* ── Read payload bytes ────────────────────────────────── */
         if (!read_all(hPipe, buf, payload_len))
         {
+            LOG_D("pipe_protocol", "frame_recv: error reading payload, lastError=%lu", GetLastError());
             HeapFree(GetProcessHeap(), 0, buf);
             return FALSE;
         }
+
+        LOG_D("pipe_protocol", "frame_recv: read payload, bytesRead=%lu", payload_len);
 
         /* ── Null-terminate ────────────────────────────────────── */
         buf[payload_len] = '\0';
@@ -153,6 +162,7 @@ pipe_frame_recv(HANDLE hPipe, char **payload_out, DWORD *payload_len_out)
         buf = (char *)HeapAlloc(GetProcessHeap(), 0, 1);
         if (buf == NULL)
         {
+            LOG_D("pipe_protocol", "frame_recv: error, out of memory for empty payload");
             SetLastError(ERROR_OUTOFMEMORY);
             return FALSE;
         }
