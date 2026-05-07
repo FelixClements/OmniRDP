@@ -33,7 +33,7 @@ Source: "..\artifacts\windows-Release\bin\libssl-3-x64.dll"; DestDir: "{app}"; F
 Source: "..\artifacts\windows-Release\bin\libusb-1.0.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\artifacts\windows-Release\bin\zlib1.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; Configuration template
-Source: "setup\config.ini.template"; DestDir: "{commonappdata}\OmniRDP"; DestName: "config.ini"; Flags: onlyifdoesntexist
+Source: "..\setup\config.ini.template"; DestDir: "{commonappdata}\OmniRDP"; DestName: "config.ini"; Flags: onlyifdoesntexist
 
 [Run]
 ; Install service
