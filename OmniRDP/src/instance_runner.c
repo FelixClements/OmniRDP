@@ -302,7 +302,9 @@ int instance_runner_main(int argc, char *argv[]) {
 
     /* Initialize viewer server */
     ViewerServer *server = viewer_server_init(inst->viewer_bind_address,
-                                              inst->viewer_port, client);
+                                              inst->viewer_port, client,
+                                              inst->viewer_cert_path,
+                                              inst->viewer_key_path);
     if (!server) {
         LOG_E("instance_runner", "Failed to initialize viewer server on %s:%u", inst->viewer_bind_address, inst->viewer_port);
         backend_disconnect(client);

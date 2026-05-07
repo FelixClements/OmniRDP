@@ -260,10 +260,14 @@ typedef struct {
   MonitorLayout monitor_layout; /* shared monitor layout */
   BackendClient *backend;
   ViewerGfxPublisherState gfx;
+  char *cert_path; /* TLS certificate path (config or NULL for default) */
+  char *key_path;  /* TLS key path (config or NULL for default) */
 } ViewerServer;
 
 ViewerServer *viewer_server_init(const char *bind_address, UINT16 port,
-                                 BackendClient *backend);
+                                 BackendClient *backend,
+                                 const char *cert_path,
+                                 const char *key_path);
 
 BOOL viewer_server_start(ViewerServer *server);
 

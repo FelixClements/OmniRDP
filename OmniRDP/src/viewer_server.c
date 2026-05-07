@@ -1,6 +1,7 @@
 #include "viewer_server.h"
 #include "backend.h"
 #include "platform_compat.h"
+#include "svc_log.h"
 #include "viewer_internal.h"
 
 #include <freerdp/channels/drdynvc.h>
@@ -3395,6 +3396,8 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
   HANDLE gfx_event = NULL;
   DWORD wait_timeout_ms = INFINITE;
 
+  LOG_I("viewer_server", "Viewer peer accepted (peer=%p)", (void *)peer);
+
   while (!viewer->stop_requested) {
     UINT64 now = platform_get_timestamp_ms();
     BOOL lag_signal_active = FALSE;
@@ -3601,6 +3604,7 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
     LeaveCriticalSection(&g_viewer_server->lock);
   }
 
+  LOG_I("viewer_server", "Viewer peer disconnected (peer=%p)", (void *)peer);
   peer->Disconnect(peer);
   return 0;
 }
@@ -4051,14 +4055,22 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
     }
 
     {
-      rdpCertificate *cert =
-          freerdp_certificate_new_from_file(platform_cert_path());
-      rdpPrivateKey *key = freerdp_key_new_from_file(platform_key_path());
+      const char *cert_file = (server->cert_path && server->cert_path[0])
+                                  ? server->cert_path
+                                  : platform_cert_path();
+      const char *key_file = (server->key_path && server->key_path[0])
+                                 ? server->key_path
+                                 : platform_key_path();
+      rdpCertificate *cert = freerdp_certificate_new_from_file(cert_file);
+      rdpPrivateKey *key = freerdp_key_new_from_file(key_file);
       if (cert && key) {
+        LOG_I("viewer_server", "TLS certificate loaded from '%s'", cert_file);
         freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerCertificate,
                                          cert, 1);
         freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerRsaKey, key,
                                          1);
+      } else {
+        LOG_W("viewer_server", "Failed to load cert from '%s'/'%s'", cert_file, key_file);
       }
     }
   }
@@ -4081,7 +4093,9 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
 }
 
 ViewerServer *viewer_server_init(const char *bind_address, UINT16 port,
-                                 BackendClient *backend) {
+                                 BackendClient *backend,
+                                 const char *cert_path,
+                                 const char *key_path) {
   ViewerServer *server = calloc(1, sizeof(ViewerServer));
   if (!server)
     return NULL;
@@ -4098,6 +4112,8 @@ ViewerServer *viewer_server_init(const char *bind_address, UINT16 port,
   server->bind_address =
       bind_address ? strdup(bind_address) : strdup("0.0.0.0");
   server->backend = backend;
+  server->cert_path = cert_path ? _strdup(cert_path) : NULL;
+  server->key_path = key_path ? _strdup(key_path) : NULL;
   if (backend)
     server->monitor_layout = backend->monitor_layout;
   server->slow_viewer_disconnect_enabled = TRUE;
@@ -4116,6 +4132,8 @@ BOOL viewer_server_start(ViewerServer *server) {
                               server->port))
     return FALSE;
 
+  LOG_I("viewer_server", "Viewer server listening on %s:%u", server->bind_address, server->port);
+
   server->running = TRUE;
   while (server->running) {
     if (!server->listener->CheckFileDescriptor(server->listener)) {
@@ -4133,6 +4151,8 @@ void viewer_server_stop(ViewerServer *server) {
 
   if (!server)
     return;
+
+  LOG_I("viewer_server", "Viewer server stopped");
 
   EnterCriticalSection(&server->lock);
   server->running = FALSE;

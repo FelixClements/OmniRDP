@@ -143,7 +143,7 @@ int main(int argc, char *argv[]) {
   printf("Connected successfully!\n");
   printf("Starting viewer server on port 13389...\n");
 
-  ViewerServer *server = viewer_server_init("0.0.0.0", 13389, client);
+  ViewerServer *server = viewer_server_init("0.0.0.0", 13389, client, NULL, NULL);
   if (!server) {
     fprintf(stderr, "Failed to initialize viewer server\n");
     backend_disconnect(client);
