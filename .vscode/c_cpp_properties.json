@@ -1,0 +1,23 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "compilerPath": "cl.exe",
+            "cStandard": "c11",
+            "intelliSenseMode": "windows-msvc-x64",
+            "includePath": [
+                "${workspaceFolder}/OmniRDP/include",
+                "${workspaceFolder}/OmniRDP/src",
+                "${workspaceFolder}/freerdp-3.26.0/include",
+                "${workspaceFolder}/freerdp-3.26.0/winpr/include",
+                "${workspaceFolder}/freerdp-3.26.0/build/include",
+                "${workspaceFolder}/freerdp-3.26.0/build/winpr/include"
+            ],
+            "defines": [
+                "_WIN32",
+                "_CRT_SECURE_NO_WARNINGS"
+            ]
+        }
+    ],
+    "version": 4
+}
