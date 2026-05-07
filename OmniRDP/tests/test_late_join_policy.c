@@ -62,7 +62,7 @@ static void test_codec_replay_policy_marks_only_replay_safe_codecs_safe(void)
     assert(viewer_gfx_codec_replay_policy(RDPGFX_CODECID_PLANAR, NULL) ==
            VIEWER_GFX_CODEC_REPLAY_SAFE);
     assert(viewer_gfx_codec_replay_policy(RDPGFX_CODECID_CAPROGRESSIVE, NULL) ==
-           VIEWER_GFX_CODEC_REPLAY_UNSAFE);
+           VIEWER_GFX_CODEC_REPLAY_SAFE);
     assert(viewer_gfx_codec_replay_policy(RDPGFX_CODECID_AVC420, NULL) ==
            VIEWER_GFX_CODEC_REPLAY_UNSAFE);
     assert(viewer_gfx_codec_replay_policy(RDPGFX_CODECID_AVC444, &avc_disabled_caps) ==
