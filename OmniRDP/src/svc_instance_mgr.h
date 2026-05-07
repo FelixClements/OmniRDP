@@ -48,7 +48,8 @@ typedef struct {
 
   /* Reconnect backoff */
   unsigned int reconnectAttempts;
-  ULONGLONG nextReconnectMs; /* Timestamp when next reconnect attempt is allowed */
+  ULONGLONG
+  nextReconnectMs; /* Timestamp when next reconnect attempt is allowed */
 
   /* Stats (updated by heartbeat or IPC) */
   DWORD viewerCount;

@@ -4,7 +4,7 @@
     : true AllowShortBlocksOnASingleLine : false AllowShortCaseLabelsOnASingleLine
     : false AllowShortFunctionsOnASingleLine : None AllowShortIfStatementsOnASingleLine
     : false AllowShortLoopsOnASingleLine : false AlwaysBreakAfterDefinitionReturnType
-    : None AlwaysBreakAfterReturnType : None AlwaysBreakBeforeMultilineStrings
+    : All AlwaysBreakAfterReturnType : None AlwaysBreakBeforeMultilineStrings
     : false AlwaysBreakTemplateDeclarations : false BinPackArguments : true BinPackParameters
     : true BraceWrapping : AfterClass : true AfterControlStatement : true AfterEnum
     : true AfterFunction : true AfterNamespace : true AfterObjCDeclaration : true AfterStruct
