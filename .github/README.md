@@ -51,7 +51,7 @@ This guide walks you through the complete setup — from getting the binaries to
 
 ### 1. Where to Download
 
-**Pre-built releases** — if available, download the latest release zip from the [Releases](https://github.com/OmniRDP/OmniRDP/releases) page. Otherwise, follow the [Build](#build) instructions above to compile from source.
+**Pre-built releases** — if available, download the latest release zip from the [Releases](https://github.com/FelixClements/OmniRDP/releases) page. Otherwise, follow the [Build](#build) instructions above to compile from source.
 
 The build output contains these files you need:
 
