@@ -394,10 +394,14 @@ void backend_store_pointer_position(BackendClient *client, UINT16 x, UINT16 y) {
     return;
 
   EnterCriticalSection(&client->pointer_lock);
+  UINT64 gen_before = client->pointer_position_generation;
   client->pointer_x = x;
   client->pointer_y = y;
   client->pointer_position_generation++;
+  UINT64 gen_after = client->pointer_position_generation;
   LeaveCriticalSection(&client->pointer_lock);
+  WLog_INFO(TAG, "backend_store_pointer_position: x=%u y=%u gen=%llu->%llu",
+            x, y, (unsigned long long)gen_before, (unsigned long long)gen_after);
 }
 
 static void backend_store_pointer_system(BackendClient *client, BOOL visible,
@@ -758,11 +762,11 @@ on_pointer_position(rdpContext *context,
   if (!client || !pointer_position)
     return FALSE;
 
+  WLog_INFO(TAG, "on_pointer_position FROM SERVER: x=%" PRIu32 " y=%" PRIu32,
+            pointer_position->xPos, pointer_position->yPos);
   backend_store_pointer_position(
       client, WINPR_ASSERTING_INT_CAST(UINT16, pointer_position->xPos),
       WINPR_ASSERTING_INT_CAST(UINT16, pointer_position->yPos));
-  WLog_INFO(TAG, "PointerPosition x=%" PRIu32 " y=%" PRIu32,
-            pointer_position->xPos, pointer_position->yPos);
   return TRUE;
 }
 

@@ -2679,6 +2679,10 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   backend_get_pointer_snapshot(backend, &pointer_x, &pointer_y,
                                &pointer_visible, &pointer_type, &active_shape,
                                &position_generation, &shape_generation);
+  WLog_INFO(TAG, "viewer_forward_pointer: x=%u y=%u visible=%d gen=%llu->%llu",
+            pointer_x, pointer_y, pointer_visible,
+            (unsigned long long)viewer->last_pointer_position_generation,
+            (unsigned long long)position_generation);
   if (active_shape &&
       !viewer_pointer_shape_entry_copy(&shape_copy, active_shape))
     return FALSE;
@@ -2689,6 +2693,9 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
                                viewer->last_pointer_position_generation);
   send_shape = shape_changed;
   send_position = position_changed && pointer_visible;
+  /* disabled: (void)viewer_forward_pointer; logging kept for debug */
+  WLog_INFO(TAG, "  shape=%d pos=%d send_shape=%d send_position=%d",
+            shape_changed, position_changed, send_shape, send_position);
 
   if (!send_shape && !send_position) {
     viewer_pointer_shape_entry_reset(&shape_copy);
@@ -2742,7 +2749,10 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   if (!sent)
     return FALSE;
 
-  viewer->last_pointer_position_generation = position_generation;
+  WLog_INFO(TAG, "  sending: send_pos=%d sent=%d final_gen=%llu",
+            send_position, sent, (unsigned long long)position_generation);
+  if (send_position)
+    viewer->last_pointer_position_generation = position_generation;
   viewer->last_pointer_shape_generation = shape_generation;
   return TRUE;
 }
@@ -3365,9 +3375,13 @@ static BOOL on_mouse_event(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y) {
   if (!viewer || !can_viewer_send_input(viewer))
     return TRUE;
 
+  BOOL is_move = (flags & 0x0800) != 0; /* PTR_FLAGS_MOVE */
+  WLog_INFO(TAG, "VIEWER mouse: flags=0x%04X x=%u y=%u%s", flags, x, y,
+            is_move ? "" : " [non-move]");
   freerdp_input_send_mouse_event(g_viewer_server->backend->context->input,
                                  flags, x, y);
-  backend_store_pointer_position(g_viewer_server->backend, x, y);
+  if (is_move)
+    backend_store_pointer_position(g_viewer_server->backend, x, y);
   return TRUE;
 }
 
@@ -3377,9 +3391,13 @@ static BOOL on_extended_mouse_event(rdpInput *input, UINT16 flags, UINT16 x,
   if (!viewer || !can_viewer_send_input(viewer))
     return TRUE;
 
+  BOOL is_move = (flags & 0x0800) != 0; /* PTR_FLAGS_MOVE */
+  WLog_INFO(TAG, "VIEWER extended_mouse: flags=0x%04X x=%u y=%u%s", flags, x, y,
+            is_move ? "" : " [non-move]");
   freerdp_input_send_extended_mouse_event(
       g_viewer_server->backend->context->input, flags, x, y);
-  backend_store_pointer_position(g_viewer_server->backend, x, y);
+  if (is_move)
+    backend_store_pointer_position(g_viewer_server->backend, x, y);
   return TRUE;
 }
 
@@ -3585,7 +3603,10 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
     if (!viewer_pump_classic(viewer))
       break;
 
-    (void)viewer_forward_pointer(viewer, FALSE);
+    /* viewer_forward_pointer disabled: cursor position forwarding to viewers
+     * without input lock is not reliable and causes complexity. Viewer cursor
+     * position comes from the RDP server via on_pointer_position callbacks. */
+    /* (void)viewer_forward_pointer(viewer, FALSE); */
 
     if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer) &&
         peer->DrainOutputBuffer) {

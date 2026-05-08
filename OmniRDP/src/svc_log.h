@@ -13,6 +13,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <stdio.h>
 #include <windows.h>
 
 #ifdef __cplusplus
@@ -80,6 +81,17 @@ void svc_log_write(SvcLogLevel level, const char *source, const char *fmt, ...);
  * Flushes and closes the log file.  Safe to call multiple times.
  */
 void svc_log_shutdown(void);
+
+/**
+ * @brief Rotate a log file using the standard .1..N rename chain.
+ *
+ * @param filepath    Full path to the log file (e.g., ".../viewer.log")
+ * @param logfile_ptr Pointer to FILE* — will be closed and reassigned
+ * @param max_files   Number of archive files to retain (0 = skip rotation)
+ * @return 0 on success, -1 on error
+ */
+int svc_log_rotate_file(const char *filepath, FILE **logfile_ptr,
+                        unsigned int max_files);
 
 #ifdef __cplusplus
 }

@@ -212,6 +212,64 @@ static void svc_log_check_rotate(void) {
     svc_log_rotate_internal();
 }
 
+/**
+ * @brief Rotate a log file using the standard .1..N rename chain.
+ *
+ * Closes *logfile_ptr, shifts viewer.log.(N-1) -> viewer.log.N chain,
+ * renames current -> viewer.log.1, and reopens as a fresh file.
+ *
+ * @param filepath    Full path to the log file (e.g., ".../viewer.log")
+ * @param logfile_ptr Pointer to FILE* — will be closed and reassigned
+ * @param max_files   Number of archive files to retain (0 = skip rotation)
+ * @return 0 on success, -1 on error
+ */
+int svc_log_rotate_file(const char *filepath, FILE **logfile_ptr,
+                        unsigned int max_files) {
+    if (!filepath || !logfile_ptr || max_files == 0)
+        return -1;
+
+    char oldpath[MAX_PATH];
+    char newpath[MAX_PATH];
+
+    /* Extract directory from filepath */
+    char dir[MAX_PATH];
+    strncpy(dir, filepath, sizeof(dir) - 1);
+    dir[sizeof(dir) - 1] = '\0';
+    char *backslash = strrchr(dir, '\\');
+    if (backslash) {
+        *backslash = '\0';
+    } else {
+        return -1;
+    }
+
+    const char *filename = backslash ? backslash + 1 : filepath;
+
+    /* 1. Close the current file */
+    if (*logfile_ptr) {
+        fclose(*logfile_ptr);
+        *logfile_ptr = NULL;
+    }
+
+    /* 2. Delete the highest-numbered archive */
+    _snprintf(oldpath, sizeof(oldpath), "%s\\%s.%u", dir, filename, max_files);
+    DeleteFileA(oldpath);
+
+    /* 3. Shift the chain: (N-1) -> N, ..., 1 -> 2 */
+    for (unsigned int i = max_files - 1; i >= 1; i--) {
+        _snprintf(oldpath, sizeof(oldpath), "%s\\%s.%u", dir, filename, i);
+        _snprintf(newpath, sizeof(newpath), "%s\\%s.%u", dir, filename, i + 1);
+        MoveFileExA(oldpath, newpath, MOVEFILE_REPLACE_EXISTING);
+    }
+
+    /* 4. Rename current log -> .1 */
+    _snprintf(newpath, sizeof(newpath), "%s\\%s.1", dir, filename);
+    MoveFileExA(filepath, newpath, MOVEFILE_REPLACE_EXISTING);
+
+    /* 5. Open a fresh file */
+    *logfile_ptr = fopen(filepath, "a");
+    return (*logfile_ptr != NULL) ? 0 : -1;
+}
+
 /* ── Timestamp ────────────────────────────────────────────────── */
 
 /**

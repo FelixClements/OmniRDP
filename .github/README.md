@@ -39,6 +39,151 @@ New in v2: Windows service manager (`OmniRDP-svc.exe`) with system tray app (`Om
 - **Per-service logs** — isolated log directories per service
 - **Tray discovery** — tray app auto-discovers all `OmniRDP-*` services via SCM enumeration
 
+
+
+---
+
+## Installation and First Connection Guide
+
+This guide walks you through the complete setup — from getting the binaries to connecting your first RDP viewer.
+
+---
+
+### 1. Where to Download
+
+**Pre-built releases** — if available, download the latest release zip from the [Releases](https://github.com/OmniRDP/OmniRDP/releases) page. Otherwise, follow the [Build](#build) instructions above to compile from source.
+
+The build output contains these files you need:
+
+| File | Purpose |
+|------|---------|
+| `OmniRDP.exe` | Core multiplexer (standalone or child process) |
+| `OmniRDP-svc.exe` | Windows service manager |
+| `OmniRDP-tray.exe` | System tray app for monitoring/control |
+| `freerdp3.dll` | FreeRDP client library |
+| `freerdp-client3.dll` | FreeRDP client helpers |
+| `freerdp-server3.dll` | FreeRDP server library |
+| `winpr3.dll` | FreeRDP Windows portability layer |
+| `libcrypto-3-x64.dll` | OpenSSL crypto library |
+| `libssl-3-x64.dll` | OpenSSL TLS library |
+| `libusb-1.0.dll` | USB redirection support |
+| `zlib1.dll` | Compression library |
+
+---
+
+### 2. How to Install
+
+1. **Download the installer** — get `OmniRDP-Setup.exe` from the GitHub Actions build artifacts (or from [GitHub Releases](https://github.com/OmniRDP/OmniRDP/releases) once published).
+
+2. **Run `OmniRDP-Setup.exe`** — this is an Inno Setup installer that handles everything automatically:
+   - Installs all executables and DLLs to `C:\Program Files\OmniRDP`
+   - Copies `setup/config.ini.template` to `C:\ProgramData\OmniRDP\config.ini` (only if it doesn't already exist)
+   - Registers the Windows service (`OmniRDP-svc.exe --install`)
+   - Registers the tray app for auto-start on login (`OmniRDP-tray.exe --install`)
+   - No manual file copying or `--install` commands needed — the installer does it all
+
+On first run, if no config file exists yet, the service auto-generates a default config at `C:\ProgramData\OmniRDP\config.ini`. You'll edit this file in step 4.
+
+> **Note on DLLs:** The installer places all DLLs in `C:\Program Files\OmniRDP` alongside the executables, so they are always found. See the [Usage note](#connecting-viewers) for details.
+
+---
+
+### 3. Generate SSL Certificates
+
+Viewer connections use TLS. You need a certificate and private key pair. Two options:
+
+**Option A — Use the built-in test certificates** (quick start, not for production):
+
+The build generates test certs at `OmniRDP/build/Release/server.crt` and `OmniRDP/build/Release/server.key`. Copy them alongside your executables.
+
+**Option B — Create self-signed certificates with OpenSSL**:
+
+```powershell
+openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes -subj "/CN=YourServerName"
+```
+
+**Option C — Use the FreeRDP `makecert` tool**:
+
+Located at `freerdp-3.26.0/winpr/tools/makecert/`. Build and run it to generate certificates matching FreeRDP's expected format.
+
+Copy the resulting `server.crt` and `server.key` to a secure location (e.g., `C:\ProgramData\OmniRDP\`). You'll reference these paths in the config below.
+
+---
+
+### 4. Configure `config.ini`
+
+Open `C:\ProgramData\OmniRDP\config.ini` in a text editor. It contains a `[service]` section and one or more `[instance:<name>]` sections. At minimum, edit the `[instance:Example]` section:
+
+```ini
+[instance:Example]
+enabled = true
+
+; --- Backend connection (your Windows target) ---
+backend.hostname = 192.168.1.100    ; <-- Change to your RDP server IP/hostname
+backend.port = 3389                  ; Default RDP port
+backend.username = myuser            ; <-- Your Windows username
+backend.password = mypassword        ; <-- Your Windows password
+
+; --- Viewer listener (where RDP clients connect) ---
+viewer.bind_address = 0.0.0.0        ; 0.0.0.0 = all interfaces, 127.0.0.1 = local only
+viewer.port = 3390                   ; Port viewers connect to
+viewer.cert_path = C:\ProgramData\OmniRDP\server.crt   ; <-- Path to your certificate
+viewer.key_path  = C:\ProgramData\OmniRDP\server.key   ; <-- Path to your private key
+```
+
+**Key settings explained:**
+
+| Setting | What to put |
+|---------|-------------|
+| `backend.hostname` | IP or hostname of the Windows machine you want to multiplex |
+| `backend.port` | Usually `3389` (the standard RDP port) |
+| `backend.username` / `backend.password` | Credentials for that Windows machine |
+| `viewer.bind_address` | `0.0.0.0` to accept connections from any network, `127.0.0.1` for local-only |
+| `viewer.port` | Any free port (e.g., `3390`, `3391`, etc.) |
+| `viewer.cert_path` / `viewer.key_path` | Absolute paths to your TLS certificate and key files |
+
+Save the file. For a full list of available settings, see the [Configuration Reference](#configuration-reference) section below.
+
+---
+
+### 5. Start It All
+
+**Via Windows Service** (recommended — runs in Session 0, auto-starts on boot):
+
+The service starts automatically after installation. If you need to start it manually:
+
+```powershell
+net start OmniRDP_svc
+```
+
+Or open **Services.msc**, find `OmniRDP Service`, and click **Start**.
+
+**Via Standalone Mode** (for testing or manual use):
+
+```powershell
+OmniRDP.exe --config C:\ProgramData\OmniRDP\config.ini
+```
+
+The service (or standalone process) reads the config, spawns an instance for each enabled `[instance:<name>]` section, and begins listening on the configured viewer ports.
+
+**Connect an RDP client** — use any standard RDP client to connect to `viewer.bind_address:viewer.port`:
+
+```powershell
+# Windows built-in Remote Desktop Connection
+mstsc.exe /v:192.168.1.10:3390
+
+# Or from another machine on the network
+mstsc.exe /v:<server-ip>:3390
+```
+
+Replace `192.168.1.10` with your server's actual IP address and `3390` with your configured viewer port.
+
+Each viewer that connects will see the same remote desktop. Only one viewer controls input at a time (see [Input Arbitration](#input-arbitration) for details).
+
+**To uninstall**, use **Add/Remove Programs** (or **Apps & Features**) in Windows Settings — select `OmniRDP` and click **Uninstall**. This removes all files, the Windows service, and the tray auto-start entry.
+
+---
+
 ## Architecture
 
 ```

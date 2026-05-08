@@ -35,6 +35,45 @@
 static volatile int g_running = 1;
 static ViewerServer *g_server = NULL;
 
+#include <winpr/wlog.h>
+
+/* Viewer log file state — owned by our callback, rotated by us */
+static FILE *g_viewer_logfile = NULL;
+static char g_viewer_log_path[MAX_PATH] = {0};
+static unsigned int g_viewer_max_size_mb = 10;
+static unsigned int g_viewer_max_files = 5;
+
+/**
+ * @brief WLog callback — handles every FreeRDP log message.
+ *
+ * Owns the viewer.log FILE handle. Writes messages, checks rotation
+ * on every call (same pattern as svc_log_check_rotate).
+ */
+static BOOL viewer_wlog_callback(const wLogMessage *msg) {
+    if (!g_viewer_logfile)
+        return FALSE;
+
+    /* Check rotation before writing */
+    long pos = ftell(g_viewer_logfile);
+    if (pos >= 0) {
+        unsigned long long max_bytes =
+            (unsigned long long)g_viewer_max_size_mb * 1024ULL * 1024ULL;
+        if ((unsigned long long)pos >= max_bytes)
+            svc_log_rotate_file(g_viewer_log_path, &g_viewer_logfile,
+                               g_viewer_max_files);
+    }
+
+    if (!g_viewer_logfile)
+        return FALSE;
+
+    /* Write: prefix is already formatted by WLog layout engine */
+    fprintf(g_viewer_logfile, "%s%s\n",
+            msg->PrefixString ? msg->PrefixString : "",
+            msg->TextString ? msg->TextString : "");
+    fflush(g_viewer_logfile);
+    return TRUE;
+}
+
 /**
  * @brief Heartbeat thread — sends periodic messages to the service
  *
@@ -257,21 +296,41 @@ int instance_runner_main(int argc, char *argv[]) {
     char instance_log_dir[512];
     snprintf(instance_log_dir, sizeof(instance_log_dir), "%s\\%s", log_dir,
              args.instance_name);
-    svc_log_init(instance_log_dir, SVC_LOG_DEBUG, 10, 5);
+    svc_log_init(instance_log_dir, SVC_LOG_DEBUG,
+                 config->service.log_max_size_mb,
+                 config->service.log_max_files);
     LOG_I("instance_runner", "Instance '%s' starting (config=%s)",
           args.instance_name, args.config_path);
 
-    /* Configure FreeRDP WLog to write directly to a file using the
-     * FILE appender. The CONSOLE appender (default) sends INFO/DEBUG
-     * to stdout which is lost when running as a service child process.
-     * The FILE appender writes all levels to a file directly. */
-    _putenv_s("WLOG_LEVEL", "INFO");
+    /* Configure FreeRDP WLog to use CallbackAppender.
+     * OmniRDP owns the viewer.log FILE handle directly so we can
+     * rotate it when the size limit is reached.
+     * WLOG_PREFIX env var must be set before WLog_GetRoot() is called. */
     _putenv_s("WLOG_PREFIX", "[%hr:%mi:%se:%ml] [%pid:%tid] [%lv][%mn] - ");
-    _putenv_s("WLOG_APPENDER", "FILE");
-    _putenv_s("WLOG_FILEAPPENDER_OUTPUT_FILE_PATH", instance_log_dir);
-    _putenv_s("WLOG_FILEAPPENDER_OUTPUT_FILE_NAME", "viewer.log");
-    LOG_I("instance_runner", "FreeRDP WLog FILE appender -> %s\\viewer.log",
-          instance_log_dir);
+
+    /* Configure WLog with desired level (INFO) before root init */
+    _putenv_s("WLOG_LEVEL", "INFO");
+
+    /* Force WLog root initialization */
+    wLog *root = WLog_GetRoot();
+
+    /* Swap to CALLBACK appender (replaces default CONSOLE) */
+    WLog_SetLogAppenderType(root, WLOG_APPENDER_CALLBACK);
+    wLogAppender *appender = WLog_GetLogAppender(root);
+
+    /* Register our callback to receive all log messages */
+    wLogCallbacks cbs = {0};
+    cbs.message = viewer_wlog_callback;
+    WLog_ConfigureAppender(appender, "callbacks", &cbs);
+
+    /* Open viewer.log ourselves and store rotation params */
+    snprintf(g_viewer_log_path, sizeof(g_viewer_log_path), "%s\\viewer.log",
+            instance_log_dir);
+    g_viewer_logfile = fopen(g_viewer_log_path, "a");
+    g_viewer_max_size_mb = config->service.log_max_size_mb;
+    g_viewer_max_files = config->service.log_max_files;
+    LOG_I("instance_runner", "Viewer log (CallbackAppender) -> %s",
+          g_viewer_log_path);
   }
 
   /* Initialize backend */
@@ -387,6 +446,11 @@ int instance_runner_main(int argc, char *argv[]) {
   backend_disconnect(client);
   backend_free(client);
   svc_config_free(config);
+
+  if (g_viewer_logfile) {
+    fclose(g_viewer_logfile);
+    g_viewer_logfile = NULL;
+  }
 
   printf("Instance '%s' done.\n", args.instance_name);
 #ifdef _WIN32
