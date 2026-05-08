@@ -400,8 +400,10 @@ void backend_store_pointer_position(BackendClient *client, UINT16 x, UINT16 y) {
   client->pointer_position_generation++;
   UINT64 gen_after = client->pointer_position_generation;
   LeaveCriticalSection(&client->pointer_lock);
-  WLog_INFO(TAG, "backend_store_pointer_position: x=%u y=%u gen=%llu->%llu",
-            x, y, (unsigned long long)gen_before, (unsigned long long)gen_after);
+  WLog_INFO(TAG,
+            "backend_store_pointer_position: x=%u y=%u gen=%llu->%llu",
+            x, y, (unsigned long long)gen_before,
+            (unsigned long long)gen_after);
 }
 
 static void backend_store_pointer_system(BackendClient *client, BOOL visible,
