@@ -78,6 +78,8 @@ static UINT64 backend_perf_now_us(void);
 static BOOL backend_should_log_bitmap_perf(UINT64 batch_count,
                                            UINT64 callback_us,
                                            UINT64 publish_us);
+static void backend_normalize_domain_username(const char **domain,
+                                              const char **username);
 static BOOL backend_forward_bitmap_update(BackendClient *client,
                                           const BITMAP_UPDATE *bitmap);
 static BOOL on_begin_paint(rdpContext *context);
@@ -138,6 +140,32 @@ static BOOL backend_should_log_bitmap_perf(UINT64 batch_count,
                                            UINT64 publish_us) {
   return (batch_count <= 5) || ((batch_count % 100) == 0) ||
          (callback_us >= 5000ULL) || (publish_us >= 5000ULL);
+}
+
+static void backend_normalize_domain_username(const char **domain,
+                                              const char **username) {
+  static char domain_buf[256];
+  static char user_buf[256];
+  const char *u = username ? *username : NULL;
+  const char *d = domain ? *domain : NULL;
+  const char *slash;
+
+  if (!u || u[0] == '\0' || (d && d[0] != '\0') || strchr(u, '@'))
+    return;
+  slash = strchr(u, '\\');
+  if (!slash || slash == u || slash[1] == '\0')
+    return;
+
+  size_t dom_len = (size_t)(slash - u);
+  if (dom_len >= sizeof(domain_buf))
+    dom_len = sizeof(domain_buf) - 1;
+  strncpy(domain_buf, u, dom_len);
+  domain_buf[dom_len] = '\0';
+  strncpy(user_buf, slash + 1, sizeof(user_buf) - 1);
+  user_buf[sizeof(user_buf) - 1] = '\0';
+  if (domain)
+    *domain = domain_buf;
+  *username = user_buf;
 }
 
 #ifdef _WIN32
@@ -1638,13 +1666,20 @@ BackendClient *backend_init(void) {
 
 BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
                        const char *username, const char *password,
-                       const char *domain) {
+                       const char *domain,
+                       const BackendSecurityConfig *security) {
   if (!client || !client->context)
     return FALSE;
 
   rdpSettings *settings = client->context->settings;
   if (!settings)
     return FALSE;
+
+  BackendSecurityConfig default_security = {TRUE, TRUE, TRUE, TRUE, FALSE};
+  const BackendSecurityConfig *sec = security ? security : &default_security;
+  const char *effective_username = username;
+  const char *effective_domain = domain;
+  backend_normalize_domain_username(&effective_domain, &effective_username);
 
   if (hostname) {
     free(client->hostname);
@@ -1659,8 +1694,8 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
 
   if (username) {
     free(client->username);
-    client->username = strdup(username);
-    freerdp_settings_set_string(settings, FreeRDP_Username, username);
+    client->username = strdup(effective_username);
+    freerdp_settings_set_string(settings, FreeRDP_Username, effective_username);
   }
 
   if (password) {
@@ -1671,9 +1706,18 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
 
   if (domain) {
     free(client->domain);
-    client->domain = strdup(domain);
-    freerdp_settings_set_string(settings, FreeRDP_Domain, domain);
+    client->domain = strdup(effective_domain);
+    freerdp_settings_set_string(settings, FreeRDP_Domain, effective_domain);
   }
+
+  freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, sec->nla_enabled);
+  freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, sec->tls_enabled);
+  freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, sec->rdp_enabled);
+  freerdp_settings_set_bool(settings, FreeRDP_AadSecurity, FALSE);
+  freerdp_settings_set_bool(settings, FreeRDP_RdstlsSecurity, FALSE);
+  freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate,
+                            sec->ignore_certificate);
+  /* TODO: hook certificate validation policy here; keep auth policy config for later. */
 
   return TRUE;
 }

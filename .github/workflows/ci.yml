@@ -57,13 +57,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Checkout FreeRDP 3.26.0
-        uses: actions/checkout@v5
-        with:
-          repository: FreeRDP/FreeRDP
-          ref: 3.26.0
-          path: freerdp-3.26.0
-          fetch-depth: 1
+      - name: Use vendored FreeRDP source
+        run: echo "Building freerdp-3.26.0 from this repository"
 
       - name: Checkout vcpkg
         uses: actions/checkout@v5
@@ -101,6 +96,12 @@ jobs:
         run: |
           cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build-asan \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DWITH_INTERNAL_MD4=ON \
+            -DWITH_INTERNAL_MD5=ON \
+            -DWITH_INTERNAL_RC4=ON \
+            -DWITH_NATIVE_SSPI=ON \
+            -DWITH_AAD=OFF \
+            -DWITH_KRB5=OFF \
             -DWITH_SERVER=ON \
             -DWITH_SHADOW=OFF \
             -DWITH_PROXY=OFF \
@@ -215,13 +216,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Checkout FreeRDP 3.26.0
-        uses: actions/checkout@v5
-        with:
-          repository: FreeRDP/FreeRDP
-          ref: 3.26.0
-          path: freerdp-3.26.0
-          fetch-depth: 1
+      - name: Use vendored FreeRDP source
+        run: echo "Building freerdp-3.26.0 from this repository"
 
       - name: Checkout vcpkg
         uses: actions/checkout@v5
@@ -259,6 +255,12 @@ jobs:
         run: |
           cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DWITH_INTERNAL_MD4=ON \
+            -DWITH_INTERNAL_MD5=ON \
+            -DWITH_INTERNAL_RC4=ON \
+            -DWITH_NATIVE_SSPI=ON \
+            -DWITH_AAD=OFF \
+            -DWITH_KRB5=OFF \
             -DWITH_SERVER=ON \
             -DWITH_SHADOW=OFF \
             -DWITH_PROXY=OFF \
@@ -308,7 +310,7 @@ jobs:
         with:
           name: windows-OmniRDP
           path: artifacts/windows-${{ matrix.build_type }}/
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: error
 
   build-installer:
@@ -338,6 +340,6 @@ jobs:
         with:
           name: windows-OmniRDP-Setup
           path: setup/Output/OmniRDP-Setup.exe
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: error
 

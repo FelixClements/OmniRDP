@@ -993,6 +993,16 @@ int inst_mgr_reload_config(InstanceManager *mgr, const char *configPath) {
           oldInst->config.security_nla_enabled != nc->security_nla_enabled ||
           strcmp(oldInst->config.security_tls_min_version,
                  nc->security_tls_min_version) != 0 ||
+          oldInst->config.backend_security_nla_enabled !=
+              nc->backend_security_nla_enabled ||
+          oldInst->config.backend_security_tls_enabled !=
+              nc->backend_security_tls_enabled ||
+          oldInst->config.backend_security_rdp_enabled !=
+              nc->backend_security_rdp_enabled ||
+          oldInst->config.backend_security_server_authentication !=
+              nc->backend_security_server_authentication ||
+          oldInst->config.backend_security_ignore_certificate !=
+              nc->backend_security_ignore_certificate ||
           oldInst->config.security_server_authentication !=
               nc->security_server_authentication ||
           oldInst->config.security_ignore_certificate !=
@@ -1151,6 +1161,16 @@ int inst_mgr_reload_config(InstanceManager *mgr, const char *configPath) {
             oldInst->config.security_nla_enabled != nc->security_nla_enabled ||
             strcmp(oldInst->config.security_tls_min_version,
                    nc->security_tls_min_version) != 0 ||
+            oldInst->config.backend_security_nla_enabled !=
+                nc->backend_security_nla_enabled ||
+            oldInst->config.backend_security_tls_enabled !=
+                nc->backend_security_tls_enabled ||
+            oldInst->config.backend_security_rdp_enabled !=
+                nc->backend_security_rdp_enabled ||
+            oldInst->config.backend_security_server_authentication !=
+                nc->backend_security_server_authentication ||
+            oldInst->config.backend_security_ignore_certificate !=
+                nc->backend_security_ignore_certificate ||
             oldInst->config.security_server_authentication !=
                 nc->security_server_authentication ||
             oldInst->config.security_ignore_certificate !=

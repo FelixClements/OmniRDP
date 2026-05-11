@@ -65,6 +65,11 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->codec_avc444 = 0;
   cfg->codec_avc444v2 = 0;
   cfg->codec_frame_acknowledge = 4;
+  cfg->backend_security_nla_enabled = 1;
+  cfg->backend_security_tls_enabled = 1;
+  cfg->backend_security_rdp_enabled = 1;
+  cfg->backend_security_server_authentication = 1;
+  cfg->backend_security_ignore_certificate = 0;
   cfg->security_tls_enabled = 1;
   cfg->security_nla_enabled = 1;
   strncpy(cfg->security_tls_min_version, "1.2",
@@ -197,6 +202,33 @@ static int parse_one_instance(const IniFile *ini, const char *name,
       ini, section, "codec.frame_acknowledge", inst->codec_frame_acknowledge);
 
   /* Security */
+  {
+    const char *v = ini_get(ini, section, "backend.security.nla_enabled", NULL);
+    if (v)
+      inst->backend_security_nla_enabled = ini_get_bool(
+          ini, section, "backend.security.nla_enabled",
+          inst->backend_security_nla_enabled);
+    v = ini_get(ini, section, "backend.security.tls_enabled", NULL);
+    if (v)
+      inst->backend_security_tls_enabled = ini_get_bool(
+          ini, section, "backend.security.tls_enabled",
+          inst->backend_security_tls_enabled);
+    v = ini_get(ini, section, "backend.security.rdp_enabled", NULL);
+    if (v)
+      inst->backend_security_rdp_enabled = ini_get_bool(
+          ini, section, "backend.security.rdp_enabled",
+          inst->backend_security_rdp_enabled);
+    v = ini_get(ini, section, "backend.security.server_authentication", NULL);
+    if (v)
+      inst->backend_security_server_authentication = ini_get_bool(
+          ini, section, "backend.security.server_authentication",
+          inst->backend_security_server_authentication);
+    v = ini_get(ini, section, "backend.security.ignore_certificate", NULL);
+    if (v)
+      inst->backend_security_ignore_certificate = ini_get_bool(
+          ini, section, "backend.security.ignore_certificate",
+          inst->backend_security_ignore_certificate);
+  }
   inst->security_tls_enabled = ini_get_bool(
       ini, section, "security.tls_enabled", inst->security_tls_enabled);
   inst->security_nla_enabled = ini_get_bool(
@@ -211,6 +243,19 @@ static int parse_one_instance(const IniFile *ini, const char *name,
   inst->security_ignore_certificate =
       ini_get_bool(ini, section, "security.ignore_certificate",
                    inst->security_ignore_certificate);
+
+  if (!ini_get(ini, section, "backend.security.nla_enabled", NULL))
+    inst->backend_security_nla_enabled = inst->security_nla_enabled;
+  if (!ini_get(ini, section, "backend.security.tls_enabled", NULL))
+    inst->backend_security_tls_enabled = inst->security_tls_enabled;
+  if (!ini_get(ini, section, "backend.security.server_authentication", NULL))
+    inst->backend_security_server_authentication =
+        inst->security_server_authentication;
+  if (!ini_get(ini, section, "backend.security.ignore_certificate", NULL))
+    inst->backend_security_ignore_certificate =
+        inst->security_ignore_certificate;
+  if (!ini_get(ini, section, "backend.security.rdp_enabled", NULL))
+    inst->backend_security_rdp_enabled = 1;
 
   /* Validate required fields */
   if (inst->backend_hostname[0] == '\0') {

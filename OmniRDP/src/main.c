@@ -129,7 +129,9 @@ int main(int argc, char *argv[]) {
 
   backend_set_monitor_count(client, monitor_count);
 
-  if (!backend_configure(client, hostname, port, username, password, domain)) {
+  BackendSecurityConfig security = {TRUE, TRUE, TRUE, TRUE, FALSE};
+  if (!backend_configure(client, hostname, port, username, password, domain,
+                         &security)) {
     fprintf(stderr, "Failed to configure backend\n");
     backend_free(client);
     return 1;

@@ -34,6 +34,7 @@ Source: "..\artifacts\windows-Release\bin\libusb-1.0.dll"; DestDir: "{app}"; Fla
 Source: "..\artifacts\windows-Release\bin\zlib1.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; Configuration template
 Source: "..\setup\config.ini.template"; DestDir: "{commonappdata}\OmniRDP"; DestName: "config.ini"; Flags: onlyifdoesntexist
+Source: "..\setup\license\*"; DestDir: "{app}\license"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Run]
 ; Install service

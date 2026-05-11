@@ -43,13 +43,20 @@ names = Example
 [instance:Example]
 enabled = true
 
-; Backend RDP server to connect to
+; Backend VM connection (OmniRDP -> real backend VM)
 backend.hostname = 192.168.1.10
 backend.port = 3389
 backend.username = localadmin
 backend.password = password
 backend.domain =
 backend.connect_timeout_ms = 30000
+
+; Backend security (OmniRDP -> backend VM)
+backend.security.nla_enabled = true
+backend.security.tls_enabled = true
+backend.security.rdp_enabled = true
+backend.security.server_authentication = true
+backend.security.ignore_certificate = false
 
 ; Reconnect policy
 reconnect.enabled = true
@@ -58,7 +65,7 @@ reconnect.initial_delay_ms = 1000
 reconnect.max_delay_ms = 60000
 reconnect.backoff_multiplier = 2.0
 
-; Viewer listener (clients connect here)
+; Viewer listener/security (clients connect here)
 viewer.bind_address = 192.168.1.207
 viewer.port = 3390
 viewer.max_viewers = 10
@@ -87,7 +94,8 @@ codec.avc444 = false
 codec.avc444v2 = false
 codec.frame_acknowledge = 4
 
-; Security
+; Legacy compatibility security keys. Prefer backend.security.* for backend VM connection settings.
+; Retained for older configs and may populate backend security if backend.security.* is absent.
 security.tls_enabled = true
 security.nla_enabled = false
 security.tls_min_version = 1.2

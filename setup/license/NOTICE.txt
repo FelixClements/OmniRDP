@@ -1,0 +1,15 @@
+OmniRDP
+
+OmniRDP is distributed under the GNU Affero General Public License version 3.
+See AGPLv3.txt for the full license text.
+
+This product includes FreeRDP software (https://www.freerdp.com/) and WinPR
+components from the FreeRDP project, licensed under the Apache License,
+Version 2.0. See Apache-2.0.txt for the full license text applying to those
+components.
+
+The FreeRDP source used for this build is included in this repository under
+freerdp-3.26.0/ and may contain OmniRDP project modifications. Modified files
+carry prominent modification notices.
+
+Source code is available at: https://github.com/OmniRDP/OmniRDP

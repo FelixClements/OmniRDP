@@ -346,9 +346,15 @@ int instance_runner_main(int argc, char *argv[]) {
 
   backend_set_monitor_count(client, inst->display_monitor_count);
 
+  BackendSecurityConfig security = {
+      inst->backend_security_nla_enabled,
+      inst->backend_security_tls_enabled,
+      inst->backend_security_rdp_enabled,
+      inst->backend_security_server_authentication,
+      inst->backend_security_ignore_certificate};
   if (!backend_configure(client, inst->backend_hostname, inst->backend_port,
                          inst->backend_username, password,
-                         inst->backend_domain)) {
+                         inst->backend_domain, &security)) {
     LOG_E("instance_runner", "Failed to configure backend for '%s'",
           args.instance_name);
     SecureZeroMemory(password, sizeof(password));

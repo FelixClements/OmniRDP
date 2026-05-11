@@ -120,6 +120,14 @@ typedef struct BackendClient {
   void *gdi_CapsConfirm;
 } BackendClient;
 
+typedef struct BackendSecurityConfig {
+  BOOL nla_enabled;
+  BOOL tls_enabled;
+  BOOL rdp_enabled;
+  BOOL server_authentication;
+  BOOL ignore_certificate;
+} BackendSecurityConfig;
+
 typedef enum BackendFullRefreshOutcome {
   BACKEND_FULL_REFRESH_OUTCOME_NONE = 0,
   BACKEND_FULL_REFRESH_OUTCOME_COMPLETED = 1,
@@ -158,7 +166,8 @@ BackendClient *backend_init(void);
  */
 BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
                        const char *username, const char *password,
-                       const char *domain);
+                       const char *domain,
+                       const BackendSecurityConfig *security);
 
 /**
  * @brief Connect to Windows Server
