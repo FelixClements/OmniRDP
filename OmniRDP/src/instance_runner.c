@@ -380,9 +380,40 @@ int instance_runner_main(int argc, char *argv[]) {
         inst->backend_hostname, inst->backend_port);
 
   /* Initialize viewer server */
-  ViewerServer *server =
-      viewer_server_init(inst->viewer_bind_address, inst->viewer_port, client,
-                         inst->viewer_cert_path, inst->viewer_key_path);
+  ViewerAuthMode viewer_auth_mode = VIEWER_AUTH_MODE_NONE;
+  if (_stricmp(inst->viewer_auth_mode, "backend_credentials") == 0)
+    viewer_auth_mode = VIEWER_AUTH_MODE_BACKEND_CREDENTIALS;
+  else if (_stricmp(inst->viewer_auth_mode, "none") != 0) {
+    LOG_E("instance_runner",
+          "Invalid viewer.auth.mode '%s' for instance '%s'. Valid values are "
+          "'none' and 'backend_credentials'. Refusing to start with "
+          "ambiguous viewer authentication.",
+          inst->viewer_auth_mode, args.instance_name);
+    backend_disconnect(client);
+    backend_free(client);
+    svc_config_free(config);
+    return 1;
+  }
+
+  if ((viewer_auth_mode == VIEWER_AUTH_MODE_BACKEND_CREDENTIALS) &&
+      !inst->viewer_security_nla_enabled) {
+    LOG_E("instance_runner",
+          "Invalid viewer auth configuration for instance '%s': "
+          "viewer.auth.mode=backend_credentials requires "
+          "viewer.security.nla_enabled=true.",
+          args.instance_name);
+    backend_disconnect(client);
+    backend_free(client);
+    svc_config_free(config);
+    return 1;
+  }
+
+  ViewerSecurityConfig viewer_security = {
+      inst->viewer_security_nla_enabled, inst->viewer_security_tls_enabled,
+      inst->viewer_security_rdp_enabled, viewer_auth_mode};
+  ViewerServer *server = viewer_server_init_ex(
+      inst->viewer_bind_address, inst->viewer_port, client,
+      inst->viewer_cert_path, inst->viewer_key_path, &viewer_security);
   if (!server) {
     LOG_E("instance_runner", "Failed to initialize viewer server on %s:%u",
           inst->viewer_bind_address, inst->viewer_port);

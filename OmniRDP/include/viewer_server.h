@@ -72,6 +72,18 @@ typedef enum {
   VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK
 } ViewerGfxNegotiationOutcome;
 
+typedef enum {
+  VIEWER_AUTH_MODE_NONE = 0,
+  VIEWER_AUTH_MODE_BACKEND_CREDENTIALS
+} ViewerAuthMode;
+
+typedef struct {
+  BOOL nla_enabled;
+  BOOL tls_enabled;
+  BOOL rdp_enabled;
+  ViewerAuthMode auth_mode;
+} ViewerSecurityConfig;
+
 typedef struct ViewerGfxEvent {
   volatile LONG refcount;
   ViewerGfxEventType type;
@@ -262,11 +274,17 @@ typedef struct {
   ViewerGfxPublisherState gfx;
   char *cert_path; /* TLS certificate path (config or NULL for default) */
   char *key_path;  /* TLS key path (config or NULL for default) */
+  ViewerSecurityConfig security;
 } ViewerServer;
 
 ViewerServer *viewer_server_init(const char *bind_address, UINT16 port,
                                  BackendClient *backend, const char *cert_path,
                                  const char *key_path);
+
+ViewerServer *viewer_server_init_ex(const char *bind_address, UINT16 port,
+                                    BackendClient *backend,
+                                    const char *cert_path, const char *key_path,
+                                    const ViewerSecurityConfig *security);
 
 BOOL viewer_server_start(ViewerServer *server);
 

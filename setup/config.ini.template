@@ -71,6 +71,17 @@ viewer.port = 3390
 viewer.max_viewers = 10
 viewer.cert_path = C:\server.crt
 viewer.key_path = C:\server.key
+; Viewer-side security is independent from backend.security.*.
+; NLA is disabled by default for connectability. If viewer.auth.mode is
+; backend_credentials, viewer.security.nla_enabled must be true or startup fails.
+viewer.security.nla_enabled = false
+viewer.security.tls_enabled = true
+viewer.security.rdp_enabled = true
+; none = accept viewer sessions without checking MSTSC credentials.
+; backend_credentials = require MSTSC credentials to match backend.username/password
+; and requires viewer.security.nla_enabled = true.
+; For local backend accounts, MSTSC domain may be empty, ., localhost, or this computer name.
+viewer.auth.mode = none
 viewer.slow_disconnect_enabled = true
 viewer.slow_lag_interval_ms = 5000
 viewer.slow_disconnect_after_ms = 30000

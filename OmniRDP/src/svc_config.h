@@ -66,6 +66,10 @@ typedef struct {
   unsigned int viewer_late_join_refresh_deadline_ms; /* default: 5000 */
   unsigned int viewer_late_join_replay_max_frames;   /* default: 4 */
   unsigned int viewer_throttle_max_updates_per_sec; /* default: 0 (unlimited) */
+  int viewer_security_nla_enabled;                  /* default: 0 */
+  int viewer_security_tls_enabled;                  /* default: 1 */
+  int viewer_security_rdp_enabled;                  /* default: 1 */
+  char viewer_auth_mode[32];                        /* default: "none" */
 
   /* Display */
   unsigned int display_monitor_count;  /* default: 1 */

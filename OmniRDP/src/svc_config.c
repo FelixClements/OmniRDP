@@ -54,6 +54,11 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->viewer_late_join_refresh_deadline_ms = 5000;
   cfg->viewer_late_join_replay_max_frames = 4;
   cfg->viewer_throttle_max_updates_per_sec = 0;
+  cfg->viewer_security_nla_enabled = 0;
+  cfg->viewer_security_tls_enabled = 1;
+  cfg->viewer_security_rdp_enabled = 1;
+  strncpy(cfg->viewer_auth_mode, "none", sizeof(cfg->viewer_auth_mode) - 1);
+  cfg->viewer_auth_mode[sizeof(cfg->viewer_auth_mode) - 1] = '\0';
   cfg->display_monitor_count = 1;
   cfg->display_monitor_width = 1920;
   cfg->display_monitor_height = 1080;
@@ -175,6 +180,18 @@ static int parse_one_instance(const IniFile *ini, const char *name,
   inst->viewer_throttle_max_updates_per_sec =
       ini_get_uint(ini, section, "viewer.throttle_max_updates_per_sec",
                    inst->viewer_throttle_max_updates_per_sec);
+  inst->viewer_security_nla_enabled =
+      ini_get_bool(ini, section, "viewer.security.nla_enabled",
+                   inst->viewer_security_nla_enabled);
+  inst->viewer_security_tls_enabled =
+      ini_get_bool(ini, section, "viewer.security.tls_enabled",
+                   inst->viewer_security_tls_enabled);
+  inst->viewer_security_rdp_enabled =
+      ini_get_bool(ini, section, "viewer.security.rdp_enabled",
+                   inst->viewer_security_rdp_enabled);
+  strcpy_safe(
+      inst->viewer_auth_mode, sizeof(inst->viewer_auth_mode),
+      ini_get(ini, section, "viewer.auth.mode", inst->viewer_auth_mode));
 
   /* Display */
   inst->display_monitor_count = ini_get_uint(

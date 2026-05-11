@@ -15,6 +15,9 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <strings.h>
+#endif
 #include <winpr/sspi.h>
 #include <winpr/wlog.h>
 
@@ -35,6 +38,46 @@
 #define VIEWER_GFX_BACKEND_REFRESH_TIMEOUT_MS 15000U
 
 static ViewerServer *g_viewer_server = NULL;
+
+static BOOL viewer_string_has_value(const char *value);
+
+static ViewerSecurityConfig viewer_security_default(void) {
+  ViewerSecurityConfig security = {FALSE, TRUE, TRUE, VIEWER_AUTH_MODE_NONE};
+  return security;
+}
+
+static const char *viewer_auth_mode_name(ViewerAuthMode mode) {
+  switch (mode) {
+  case VIEWER_AUTH_MODE_BACKEND_CREDENTIALS:
+    return "backend_credentials";
+  case VIEWER_AUTH_MODE_NONE:
+  default:
+    return "none";
+  }
+}
+
+static BOOL viewer_domain_matches_local_alias(const char *viewer_domain) {
+#ifdef _WIN32
+  char computer_name[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+  DWORD computer_name_len =
+      (DWORD)(sizeof(computer_name) / sizeof(computer_name[0]));
+
+  if (!viewer_string_has_value(viewer_domain) ||
+      strcmp(viewer_domain, ".") == 0 ||
+      _stricmp(viewer_domain, "localhost") == 0)
+    return TRUE;
+
+  if (GetComputerNameA(computer_name, &computer_name_len) &&
+      _stricmp(viewer_domain, computer_name) == 0)
+    return TRUE;
+
+  return FALSE;
+#else
+  return !viewer_string_has_value(viewer_domain) ||
+         strcmp(viewer_domain, ".") == 0 ||
+         strcasecmp(viewer_domain, "localhost") == 0;
+#endif
+}
 
 static BOOL viewer_gfx_enter_classic_fallback(ViewerServer *server,
                                               Viewer *viewer, UINT64 now,
@@ -133,6 +176,10 @@ static BOOL viewer_credentials_match(const BackendClient *backend,
 
   if (viewer_string_has_value(backend->domain) &&
       (!viewer_domain || (_stricmp(viewer_domain, backend->domain) != 0)))
+    return FALSE;
+
+  if (!viewer_string_has_value(backend->domain) &&
+      !viewer_domain_matches_local_alias(viewer_domain))
     return FALSE;
 
   if (viewer_string_has_value(backend->password) &&
@@ -3781,8 +3828,22 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
 
   (void)automatic;
 
-  if (!peer || !identity || !server || !server->backend) {
-    WLog_WARN(TAG, "Viewer logon rejected: missing peer, identity, or backend");
+  if (!peer || !server) {
+    WLog_WARN(TAG, "Viewer-side logon rejected: missing peer or server");
+    return FALSE;
+  }
+
+  WLog_INFO(TAG, "Viewer-side logon: auth_mode=%s",
+            viewer_auth_mode_name(server->security.auth_mode));
+
+  if (server->security.auth_mode == VIEWER_AUTH_MODE_NONE)
+    return TRUE;
+
+  if (!identity || !server->backend) {
+    WLog_WARN(
+        TAG,
+        "Viewer-side logon rejected: auth_mode=%s missing identity or backend",
+        viewer_auth_mode_name(server->security.auth_mode));
     return FALSE;
   }
 
@@ -3794,18 +3855,24 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
                                                   identity->PasswordLength);
 
   if (!viewer_user || !viewer_domain || !viewer_password) {
-    WLog_WARN(TAG, "Viewer logon rejected: failed to decode identity");
+    WLog_WARN(TAG, "Viewer-side logon rejected: failed to decode identity");
     goto out;
   }
 
   accepted = viewer_credentials_match(server->backend, viewer_user,
                                       viewer_domain, viewer_password);
   if (accepted) {
-    WLog_INFO(TAG, "Viewer logon accepted for '%s%s%s'", viewer_domain,
-              viewer_domain[0] ? "\\" : "", viewer_user);
+    WLog_INFO(TAG, "Viewer-side logon accepted for '%s%s%s' auth_mode=%s",
+              viewer_domain, viewer_domain[0] ? "\\" : "", viewer_user,
+              viewer_auth_mode_name(server->security.auth_mode));
   } else {
-    WLog_WARN(TAG, "Viewer logon rejected for '%s%s%s': credentials mismatch",
-              viewer_domain, viewer_domain[0] ? "\\" : "", viewer_user);
+    WLog_WARN(TAG,
+              "Viewer-side logon rejected: credentials mismatch auth_mode=%s "
+              "username_present=%s domain_present=%s password_present=%s",
+              viewer_auth_mode_name(server->security.auth_mode),
+              viewer_user[0] ? "true" : "false",
+              viewer_domain[0] ? "true" : "false",
+              viewer_password[0] ? "true" : "false");
   }
 
 out:
@@ -4081,9 +4148,12 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
     viewer_get_backend_layout(server->backend, &desktop_width, &desktop_height,
                               NULL);
 
-    freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, TRUE);
+    freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity,
+                              server->security.rdp_enabled);
+    freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity,
+                              server->security.tls_enabled);
+    freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity,
+                              server->security.nla_enabled);
     freerdp_settings_set_uint32(settings, FreeRDP_EncryptionLevel,
                                 ENCRYPTION_LEVEL_CLIENT_COMPATIBLE);
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
@@ -4105,6 +4175,12 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
 
     WLog_INFO(TAG, "peer_accepted: Setting desktop_size=%ux%u for viewer",
               desktop_width, desktop_height);
+    WLog_INFO(
+        TAG, "peer_accepted: viewer security rdp=%s tls=%s nla=%s auth_mode=%s",
+        server->security.rdp_enabled ? "true" : "false",
+        server->security.tls_enabled ? "true" : "false",
+        server->security.nla_enabled ? "true" : "false",
+        viewer_auth_mode_name(server->security.auth_mode));
 
     /* Enable Monitor Layout PDU so the server advertises multi-monitor
      * layout to connecting viewers. Without this, the server only sends
@@ -4226,6 +4302,14 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
 ViewerServer *viewer_server_init(const char *bind_address, UINT16 port,
                                  BackendClient *backend, const char *cert_path,
                                  const char *key_path) {
+  return viewer_server_init_ex(bind_address, port, backend, cert_path, key_path,
+                               NULL);
+}
+
+ViewerServer *viewer_server_init_ex(const char *bind_address, UINT16 port,
+                                    BackendClient *backend,
+                                    const char *cert_path, const char *key_path,
+                                    const ViewerSecurityConfig *security) {
   ViewerServer *server = calloc(1, sizeof(ViewerServer));
   if (!server)
     return NULL;
@@ -4244,6 +4328,7 @@ ViewerServer *viewer_server_init(const char *bind_address, UINT16 port,
   server->backend = backend;
   server->cert_path = cert_path ? _strdup(cert_path) : NULL;
   server->key_path = key_path ? _strdup(key_path) : NULL;
+  server->security = security ? *security : viewer_security_default();
   if (backend)
     server->monitor_layout = backend->monitor_layout;
   server->slow_viewer_disconnect_enabled = TRUE;
@@ -4262,8 +4347,9 @@ BOOL viewer_server_start(ViewerServer *server) {
                               server->port))
     return FALSE;
 
-  LOG_I("viewer_server", "Viewer server listening on %s:%u",
-        server->bind_address, server->port);
+  LOG_I("viewer_server", "Viewer server listening on %s:%u auth_mode=%s",
+        server->bind_address, server->port,
+        viewer_auth_mode_name(server->security.auth_mode));
 
   server->running = TRUE;
   while (server->running) {
