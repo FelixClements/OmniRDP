@@ -3,7 +3,10 @@
 archive/
 OmniRDP/build/
 /*.md
+!AGENTS.md
 .vscode/*
+freerdp-3.26.0/
+
 # Object files
 *.o
 *.ko

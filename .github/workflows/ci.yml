@@ -36,29 +36,33 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
 
-      - name: Auto-fix formatting
-        if: failure()
-        shell: pwsh
-        run: |
-          $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
-          Get-ChildItem -Path "OmniRDP/src", "OmniRDP/include" -Recurse -Include "*.c", "*.h" | ForEach-Object {
-            & clang-format -i $_.FullName
-          }
-          git diff --stat
-
-  memory-check:
-    name: Memory Check (ASan)
+  windows-build-test:
+    name: Windows build and test
     runs-on: windows-2022
-    timeout-minutes: 30
-    if: github.event_name == 'push'
+    timeout-minutes: 45
+    if: success()
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v5
 
-      - name: Use vendored FreeRDP source
-        run: echo "Building freerdp-3.26.0 from this repository"
+      - name: Remove partial FreeRDP tree
+        run: rm -rf freerdp-3.26.0
+
+      - name: Checkout FreeRDP 3.26.0
+        uses: actions/checkout@v5
+        with:
+          repository: FreeRDP/FreeRDP
+          ref: 3.26.0
+          path: freerdp-3.26.0
+          fetch-depth: 1
+
+      - name: Apply FreeRDP patch
+        shell: pwsh
+        run: |
+          git -C freerdp-3.26.0 apply --check "$env:GITHUB_WORKSPACE/patches/freerdp/0001-winpr-skip-legacy-provider-when-internal-md4.patch"
+          git -C freerdp-3.26.0 apply "$env:GITHUB_WORKSPACE/patches/freerdp/0001-winpr-skip-legacy-provider-when-internal-md4.patch"
 
       - name: Checkout vcpkg
         uses: actions/checkout@v5
@@ -77,166 +81,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: vcpkg/installed
-          key: windows-vcpkg-asan-v2-${{ hashFiles('.github/workflows/ci.yml') }}
-          restore-keys: |
-            windows-vcpkg-asan-v2-
-
-      - name: Install Windows dependencies via vcpkg
-        shell: pwsh
-        working-directory: vcpkg
-        run: |
-          .\vcpkg install `
-            openssl:x64-windows `
-            libjpeg-turbo:x64-windows `
-            libpng:x64-windows `
-            zlib:x64-windows `
-            libusb:x64-windows
-
-      - name: Configure FreeRDP (ASan build)
-        run: |
-          cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build-asan \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DWITH_INTERNAL_MD4=ON \
-            -DWITH_INTERNAL_MD5=ON \
-            -DWITH_INTERNAL_RC4=ON \
-            -DWITH_NATIVE_SSPI=ON \
-            -DWITH_AAD=OFF \
-            -DWITH_KRB5=OFF \
-            -DWITH_SERVER=ON \
-            -DWITH_SHADOW=OFF \
-            -DWITH_PROXY=OFF \
-            -DBUILD_TESTING=OFF \
-            -DBUILD_SHARED_LIBS=ON \
-            -DWITH_X11=OFF \
-            -DWITH_WAYLAND=OFF \
-            -DWITH_SDL2=OFF \
-            -DWITH_CAIRO=OFF \
-            -DWITH_FFMPEG=OFF \
-            -DWITH_SWSCALE=OFF \
-            -DWITH_MEDIA_FOUNDATION=OFF \
-            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-            -G "Visual Studio 17 2022" \
-            -A x64
-
-      - name: Build FreeRDP (ASan)
-        run: cmake --build freerdp-3.26.0/build-asan --config Debug -j
-
-      - name: Configure OmniRDP (ASan)
-        run: |
-          cmake -S OmniRDP -B OmniRDP/build-asan \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DUSE_ADDRESS_SANITIZER=ON \
-            -DFREERDP_BUILD="$GITHUB_WORKSPACE/freerdp-3.26.0/build-asan" \
-            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-            -G "Visual Studio 17 2022" \
-            -A x64
-
-      - name: Build OmniRDP (ASan)
-        run: cmake --build OmniRDP/build-asan --config Debug -j
-
-      - name: Run tests under ASan
-        shell: pwsh
-        run: |
-          # Locate ASan runtime DLL
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vsWhere -latest -property installationPath
-          $asanDll = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse `
-            -Filter "clang_rt.asan_dynamic-x86_64.dll" `
-            -ErrorAction SilentlyContinue | Select-Object -First 1
-
-          if ($asanDll) {
-            $env:PATH = "$($asanDll.DirectoryName);$env:PATH"
-            Write-Output "ASan DLL found at: $($asanDll.FullName)"
-          } else {
-            Write-Warning "ASan DLL not found"
-          }
-
-          # ASan options
-          $env:ASAN_OPTIONS = "halt_on_error=1:detect_stack_use_after_return=1:check_initialization_order=1"
-
-          # Run tests individually with timeouts
-          $testDir = "OmniRDP/build-asan/tests"
-          $testBinDir = "$testDir/Debug"
-          $testTimeout = 120
-
-          $tests = @(
-            @{ Name = "test_viewer_state"    },
-            @{ Name = "test_pointer_shape"   }
-          )
-
-          $failed = @()
-          foreach ($test in $tests) {
-            $exe = Join-Path $testBinDir "$($test.Name).exe"
-            if (-not (Test-Path $exe)) {
-              Write-Warning "Skipping $($test.Name): binary not found"
-              continue
-            }
-
-            Write-Output "Running $($test.Name) (timeout: ${testTimeout}s)"
-            $proc = Start-Process -FilePath $exe `
-              -NoNewWindow -PassThru `
-              -RedirectStandardOutput "$testDir/$($test.Name).stdout" `
-              -RedirectStandardError "$testDir/$($test.Name).stderr"
-
-            $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            while (-not $proc.HasExited -and $sw.Elapsed.TotalSeconds -lt $testTimeout) {
-              Start-Sleep -Milliseconds 200
-            }
-
-            if (-not $proc.HasExited) {
-              Write-Output "TIMEOUT: $($test.Name) after ${testTimeout}s"
-              $proc.Kill($true)
-              $proc.WaitForExit(5000)
-              $failed += "$($test.Name) (TIMEOUT)"
-            } elseif ($proc.ExitCode -ne 0) {
-              Write-Output "FAIL: $($test.Name) (exit=$($proc.ExitCode))"
-              Get-Content "$testDir/$($test.Name).stdout" -ErrorAction SilentlyContinue | Select-Object -First 30
-              $failed += "$($test.Name) (exit=$($proc.ExitCode))"
-            } else {
-              Write-Output "PASS: $($test.Name)"
-            }
-          }
-
-          if ($failed.Count -gt 0) {
-            Write-Output "=== FAILURES ==="
-            $failed | ForEach-Object { Write-Output "  $_" }
-            exit 1
-          }
-          Write-Output "All tests passed."
-
-  build-windows:
-    name: Windows OmniRDP build attempt (${{ matrix.build_type }})
-    runs-on: windows-2022
-    strategy:
-      matrix:
-        build_type: [Debug, Release]
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Use vendored FreeRDP source
-        run: echo "Building freerdp-3.26.0 from this repository"
-
-      - name: Checkout vcpkg
-        uses: actions/checkout@v5
-        with:
-          repository: microsoft/vcpkg
-          path: vcpkg
-          fetch-depth: 1
-          ref: "2024.12.16"
-
-      - name: Bootstrap vcpkg
-        shell: pwsh
-        working-directory: vcpkg
-        run: .\bootstrap-vcpkg.bat -disableMetrics
-
-      - name: Cache vcpkg packages
-        uses: actions/cache@v5
-        with:
-          path: vcpkg/installed
-          key: windows-vcpkg-v2-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: windows-vcpkg-v2-${{ hashFiles('.github/workflows/ci.yml', 'patches/freerdp/*.patch') }}
           restore-keys: |
             windows-vcpkg-v2-
 
@@ -251,10 +96,10 @@ jobs:
             zlib:x64-windows `
             libusb:x64-windows
 
-      - name: Configure FreeRDP
+      - name: Configure FreeRDP Debug
         run: |
-          cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build-debug \
+            -DCMAKE_BUILD_TYPE=Debug \
             -DWITH_INTERNAL_MD4=ON \
             -DWITH_INTERNAL_MD5=ON \
             -DWITH_INTERNAL_RC4=ON \
@@ -277,46 +122,115 @@ jobs:
             -G "Visual Studio 17 2022" \
             -A x64
 
-      - name: Build FreeRDP
-        run: cmake --build freerdp-3.26.0/build --config ${{ matrix.build_type }} -j
+      - name: Build FreeRDP Debug
+        run: cmake --build freerdp-3.26.0/build-debug --config Debug -j
 
-      - name: Configure OmniRDP
+      - name: Configure OmniRDP Debug
         run: |
-          cmake -S OmniRDP -B OmniRDP/build-windows \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          cmake -S OmniRDP -B OmniRDP/build-debug \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DFREERDP_BUILD="$GITHUB_WORKSPACE/freerdp-3.26.0/build-debug" \
             -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
             -G "Visual Studio 17 2022" \
             -A x64
 
-      - name: Build OmniRDP
-        run: cmake --build OmniRDP/build-windows --config ${{ matrix.build_type }} -j
+      - name: Build OmniRDP Debug
+        run: cmake --build OmniRDP/build-debug --config Debug -j
+
+      - name: Configure OmniRDP ASan
+        run: |
+          cmake -S OmniRDP -B OmniRDP/build-asan \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DUSE_ADDRESS_SANITIZER=ON \
+            -DFREERDP_BUILD="$GITHUB_WORKSPACE/freerdp-3.26.0/build-debug" \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -G "Visual Studio 17 2022" \
+            -A x64
+
+      - name: Build OmniRDP ASan
+        run: cmake --build OmniRDP/build-asan --config Debug -j
+
+      - name: Run tests under ASan
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vsWhere -latest -property installationPath
+          $asanDll = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse -Filter "clang_rt.asan_dynamic-x86_64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($asanDll) { $env:PATH = "$($asanDll.DirectoryName);$env:PATH" }
+          $env:ASAN_OPTIONS = "halt_on_error=1:detect_stack_use_after_return=1:check_initialization_order=1"
+          $testDir = "OmniRDP/build-asan/tests"
+          $testBinDir = "$testDir/Debug"
+          foreach ($testName in @("test_viewer_state", "test_pointer_shape")) {
+            $exe = Join-Path $testBinDir "$testName.exe"
+            if (Test-Path $exe) { & $exe }
+          }
+
+      - name: Configure FreeRDP Release
+        run: |
+          cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build-release \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_INTERNAL_MD4=ON \
+            -DWITH_INTERNAL_MD5=ON \
+            -DWITH_INTERNAL_RC4=ON \
+            -DWITH_NATIVE_SSPI=ON \
+            -DWITH_AAD=OFF \
+            -DWITH_KRB5=OFF \
+            -DWITH_SERVER=ON \
+            -DWITH_SHADOW=OFF \
+            -DWITH_PROXY=OFF \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_SHARED_LIBS=ON \
+            -DWITH_X11=OFF \
+            -DWITH_WAYLAND=OFF \
+            -DWITH_SDL2=OFF \
+            -DWITH_CAIRO=OFF \
+            -DWITH_FFMPEG=OFF \
+            -DWITH_SWSCALE=OFF \
+            -DWITH_MEDIA_FOUNDATION=OFF \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -G "Visual Studio 17 2022" \
+            -A x64
+
+      - name: Build FreeRDP Release
+        run: cmake --build freerdp-3.26.0/build-release --config Release -j
+
+      - name: Configure OmniRDP Release
+        run: |
+          cmake -S OmniRDP -B OmniRDP/build-release \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DFREERDP_BUILD="$GITHUB_WORKSPACE/freerdp-3.26.0/build-release" \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -G "Visual Studio 17 2022" \
+            -A x64
+
+      - name: Build OmniRDP Release
+        run: cmake --build OmniRDP/build-release --config Release -j
 
       - name: Stage Windows artifacts if build succeeds
         if: success()
         run: |
-          mkdir -p artifacts/windows-${{ matrix.build_type }}/bin
-          # Copy only OmniRDP executables (not test executables)
+          mkdir -p artifacts/windows-Release/bin
           for exe in OmniRDP.exe OmniRDP-svc.exe OmniRDP-tray.exe; do
-            find OmniRDP/build-windows -name "$exe" -type f -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+            find OmniRDP/build-release -name "$exe" -type f -exec cp {} artifacts/windows-Release/bin/ \; 2>/dev/null || true
           done
-          # Copy only the required FreeRDP DLLs (no wfreerdp, winpr-tools, CompilerIdC)
           for dll in freerdp3.dll freerdp-client3.dll freerdp-server3.dll winpr3.dll libcrypto-3-x64.dll libssl-3-x64.dll libusb-1.0.dll zlib1.dll; do
-            find freerdp-3.26.0/build -name "$dll" -type f -exec cp {} artifacts/windows-${{ matrix.build_type }}/bin/ \; 2>/dev/null || true
+            find freerdp-3.26.0/build-release -name "$dll" -type f -exec cp {} artifacts/windows-Release/bin/ \; 2>/dev/null || true
           done
 
       - name: Upload Windows artifacts if build succeeds
-        if: success() && matrix.build_type == 'Release'
+        if: success()
         uses: actions/upload-artifact@v5
         with:
           name: windows-OmniRDP
-          path: artifacts/windows-${{ matrix.build_type }}/
+          path: artifacts/windows-Release/
           retention-days: 7
           if-no-files-found: error
 
   build-installer:
     name: Build Inno Setup Installer
     runs-on: windows-2022
-    needs: build-windows
+    needs: windows-build-test
     if: success()
     steps:
       - uses: actions/checkout@v5

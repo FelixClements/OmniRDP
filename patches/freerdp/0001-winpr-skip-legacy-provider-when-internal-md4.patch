@@ -1,0 +1,20 @@
+diff --git a/winpr/libwinpr/utils/ssl.c b/winpr/libwinpr/utils/ssl.c
+--- a/winpr/libwinpr/utils/ssl.c
++++ b/winpr/libwinpr/utils/ssl.c
+@@ -328,8 +328,15 @@
+ #if defined(OPENSSL_VERSION_MAJOR) && (OPENSSL_VERSION_MAJOR >= 3)
+-	/* The legacy provider is needed for MD4. */
++	/* Modified by the OmniRDP project on 2026-05-11:
++	 * - Skip loading the OpenSSL legacy provider when internal MD4 is compiled in.
++	 */
++	/* The legacy provider is needed for MD4 (unless internal MD4 is compiled in). */
++#if !defined(WITH_INTERNAL_MD4)
+ 	s_winpr_openssl_provider_legacy = OSSL_PROVIDER_load(nullptr, "legacy");
+ 	if (s_winpr_openssl_provider_legacy == nullptr)
+ 	{
+ 		WLog_WARN(TAG, "OpenSSL LEGACY provider failed to load, no md4 support available!");
+ 	}
++#else
++	WLog_DBG(TAG, "Skipping OpenSSL legacy provider load - internal MD4 available");
++#endif
+ 	s_winpr_openssl_provider_default = OSSL_PROVIDER_load(nullptr, "default");
