@@ -11,6 +11,7 @@
 #include <freerdp/client/cmdline.h>
 #include <freerdp/client/rdpgfx.h>
 #include <freerdp/constants.h>
+#include <freerdp/error.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/pointer.h>
@@ -18,7 +19,9 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <winpr/synch.h>
 #include <winpr/sysinfo.h>
+#include <winpr/thread.h>
 #include <winpr/wlog.h>
 #include <winpr/wtypes.h>
 
@@ -1641,6 +1644,7 @@ BackendClient *backend_init(void) {
   }
 
   client->port = 3389;
+  client->connect_timeout_ms = 0;
 
   if (!backend_prepare_rdpgfx_channels(client)) {
     freerdp_context_free(instance);
@@ -1719,7 +1723,39 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
    * later.
    */
 
+  /* Apply connect timeout if set (deprecated but still functional in
+   * FreeRDP 3.x) */
+  if (client->connect_timeout_ms > 0) {
+    freerdp_settings_set_uint32(settings, FreeRDP_TcpConnectTimeout,
+                                client->connect_timeout_ms);
+  }
+
   return TRUE;
+}
+
+typedef struct {
+  rdpContext *context;
+  UINT32 timeout_ms;
+  HANDLE cancel_event;
+} ConnectWatchdogData;
+
+static DWORD WINAPI connect_watchdog_thread(LPVOID arg) {
+  ConnectWatchdogData *data = (ConnectWatchdogData *)arg;
+  DWORD result = WaitForSingleObject(data->cancel_event, data->timeout_ms);
+  if (result == WAIT_TIMEOUT) {
+    WLog_WARN(TAG, "Connect timed out after %" PRIu32 "ms, aborting connection",
+              data->timeout_ms);
+    freerdp_abort_connect_context(data->context);
+  }
+  free(data);
+  return 0;
+}
+
+void backend_set_connect_timeout(BackendClient *client, UINT32 timeout_ms) {
+  if (!client)
+    return;
+  client->connect_timeout_ms = timeout_ms;
+  WLog_INFO(TAG, "Connect timeout set to %" PRIu32 "ms", timeout_ms);
 }
 
 BOOL backend_connect(BackendClient *client) {
@@ -1763,8 +1799,56 @@ BOOL backend_connect(BackendClient *client) {
 
   WLog_INFO(TAG, "Waiting for backend RDPEGFX dynamic channel attach");
 
-  if (!freerdp_connect(client->context->instance)) {
-    WLog_ERR(TAG, "Failed to connect to backend");
+  /* Start watchdog thread if timeout is configured */
+  HANDLE watchdog_thread = NULL;
+  HANDLE cancel_event = NULL;
+  if (client->connect_timeout_ms > 0) {
+    cancel_event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (cancel_event) {
+      ConnectWatchdogData *wd = calloc(1, sizeof(ConnectWatchdogData));
+      if (wd) {
+        wd->context = client->context;
+        wd->timeout_ms = client->connect_timeout_ms;
+        wd->cancel_event = cancel_event;
+        watchdog_thread =
+            CreateThread(NULL, 0, connect_watchdog_thread, wd, 0, NULL);
+        if (!watchdog_thread) {
+          free(wd);
+          CloseHandle(cancel_event);
+          cancel_event = NULL;
+        }
+      } else {
+        CloseHandle(cancel_event);
+        cancel_event = NULL;
+      }
+    }
+  }
+
+  BOOL connected = freerdp_connect(client->context->instance);
+
+  /* Stop watchdog thread */
+  if (cancel_event) {
+    SetEvent(cancel_event);
+    if (watchdog_thread) {
+      WaitForSingleObject(watchdog_thread, INFINITE);
+      CloseHandle(watchdog_thread);
+    }
+    CloseHandle(cancel_event);
+  }
+
+  if (!connected) {
+    UINT32 err = freerdp_get_last_error(client->context);
+    UINT32 err_info = freerdp_error_info(client->context->instance);
+    WLog_ERR(TAG, "Failed to connect to %s:%u",
+             client->hostname ? client->hostname : "(null)", client->port);
+    WLog_ERR(TAG, "  FreeRDP error: 0x%08X [%s] - %s", err,
+             freerdp_get_last_error_name(err),
+             freerdp_get_last_error_string(err));
+    if (err_info != 0 && err_info != 0xFFFFFFFF) {
+      WLog_ERR(TAG, "  Error info: 0x%08X [%s] - %s", err_info,
+               freerdp_get_error_info_name(err_info),
+               freerdp_get_error_info_string(err_info));
+    }
     return FALSE;
   }
 

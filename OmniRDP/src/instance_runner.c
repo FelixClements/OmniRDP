@@ -362,6 +362,8 @@ int instance_runner_main(int argc, char *argv[]) {
     return 1;
   }
 
+  backend_set_connect_timeout(client, (UINT32)inst->backend_connect_timeout_ms);
+
   /* Zero out password after use */
   SecureZeroMemory(password, sizeof(password));
 

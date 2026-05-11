@@ -83,9 +83,9 @@ typedef struct {
   unsigned int codec_frame_acknowledge; /* default: 4 */
 
   /* Backend VM security (explicit keys; legacy security.* fall back here) */
-  int backend_security_nla_enabled;   /* default: 1 */
-  int backend_security_tls_enabled;    /* default: 1 */
-  int backend_security_rdp_enabled;    /* default: 1 */
+  int backend_security_nla_enabled;           /* default: 1 */
+  int backend_security_tls_enabled;           /* default: 1 */
+  int backend_security_rdp_enabled;           /* default: 1 */
   int backend_security_server_authentication; /* default: 1 */
   int backend_security_ignore_certificate;    /* default: 0 */
   /* Legacy compatibility viewer/security keys retained for older configs */

@@ -35,6 +35,7 @@ typedef struct BackendClient {
   char *username;
   char *password;
   char *domain;
+  UINT32 connect_timeout_ms;
   BOOL connected;
   void *frame_callback;
   void *user_data;
@@ -236,6 +237,13 @@ void backend_get_pointer_state(BackendClient *client, UINT16 *x, UINT16 *y,
                                BOOL *visible, UINT32 *type, UINT64 *generation);
 
 void backend_set_monitor_count(BackendClient *client, UINT32 monitor_count);
+
+/**
+ * @brief Set connection timeout
+ * @param client Backend client instance
+ * @param timeout_ms Timeout in milliseconds (0 = no timeout)
+ */
+void backend_set_connect_timeout(BackendClient *client, UINT32 timeout_ms);
 
 #ifdef __cplusplus
 }

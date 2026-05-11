@@ -2749,8 +2749,8 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   if (!sent)
     return FALSE;
 
-  WLog_INFO(TAG, "  sending: send_pos=%d sent=%d final_gen=%llu",
-            send_position, sent, (unsigned long long)position_generation);
+  WLog_INFO(TAG, "  sending: send_pos=%d sent=%d final_gen=%llu", send_position,
+            sent, (unsigned long long)position_generation);
   if (send_position)
     viewer->last_pointer_position_generation = position_generation;
   viewer->last_pointer_shape_generation = shape_generation;
