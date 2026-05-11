@@ -186,7 +186,7 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
     /* Plaintext – encrypt in config file first, then decrypt via round-trip */
     if (svc_dpapi_encrypt_in_file(mgr->configPath, instanceName,
                                   "backend.password") != 0) {
-      LOG_W("svc_inst_mgr",
+      LOG_E("svc_inst_mgr",
             "Start: failed to encrypt password in config "
             "file for '%s' (continuing)",
             instanceName);
@@ -673,10 +673,22 @@ void inst_mgr_poll(InstanceManager *mgr) {
         if (PeekNamedPipe(inst->hHeartbeatPipe, NULL, 0, NULL, &bytesAvail,
                           NULL)) {
           if (bytesAvail > 0) {
-            /* Child sent a heartbeat — read and discard */
+            /* Child sent a heartbeat — read and parse viewer count */
             char buf[256];
             DWORD bytesRead;
-            ReadFile(inst->hHeartbeatPipe, buf, sizeof(buf), &bytesRead, NULL);
+            if (ReadFile(inst->hHeartbeatPipe, buf, sizeof(buf) - 1, &bytesRead,
+                         NULL) &&
+                bytesRead > 0) {
+              buf[bytesRead] = '\0';
+              /* Format: heartbeat:<timestamp>:<viewer_count>\n */
+              char *lastColon = strrchr(buf, ':');
+              if (lastColon) {
+                unsigned int vc = 0;
+                if (sscanf(lastColon + 1, "%u", &vc) == 1) {
+                  inst->viewerCount = vc;
+                }
+              }
+            }
             inst->lastHeartbeatMs = nowMs;
           }
         }

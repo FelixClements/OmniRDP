@@ -320,6 +320,7 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
   int in_target_section = 0;
   int target_found = 0;
   int target_modified = 0;
+  int encryption_failed = 0;
 
   while (fgets(line, sizeof(line), orig)) {
     /* ── Detect section header ──────────────────────────── */
@@ -414,6 +415,7 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
                 } else {
                   /* Encryption failed – write original */
                   fputs(line, tmp);
+                  encryption_failed = 1;
                 }
               } else {
                 /* Already encrypted – write original */
@@ -447,6 +449,9 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
 
   /* No modification was made: clean up temp file */
   remove(tmp_path);
+
+  if (encryption_failed)
+    return -1; /* encryption was attempted and failed */
 
   if (!target_found)
     return -1; /* key was not found in the specified section */

@@ -105,10 +105,11 @@ static DWORD WINAPI heartbeat_thread(LPVOID param) {
   LOG_I("heartbeat", "Connected to heartbeat pipe for '%s'", instanceName);
 
   while (g_running) {
-    /* Send heartbeat: just write a timestamp */
+    /* Send heartbeat: timestamp and viewer count */
     char msg[64];
-    int len = snprintf(msg, sizeof(msg), "heartbeat:%llu\n",
-                       (unsigned long long)GetTickCount64());
+    unsigned int vc = viewer_server_get_count(g_server);
+    int len = snprintf(msg, sizeof(msg), "heartbeat:%llu:%u\n",
+                       (unsigned long long)GetTickCount64(), vc);
     DWORD written;
     WriteFile(hPipe, msg, (DWORD)len, &written, NULL);
 

@@ -15,6 +15,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <winpr/sspi.h>
 #include <winpr/wlog.h>
 
 #ifdef _WIN32
@@ -80,6 +81,65 @@ static BOOL viewer_should_log_bitmap_perf(UINT64 batch_count, UINT64 publish_us,
                                           UINT32 send_failed_count) {
   return (batch_count <= 5) || ((batch_count % 100) == 0) ||
          (publish_us >= 5000ULL) || (send_failed_count > 0);
+}
+
+static BOOL viewer_string_has_value(const char *value) {
+  return value && value[0];
+}
+
+static char *viewer_identity_field_to_utf8(const void *field, UINT32 length) {
+  char *result = NULL;
+
+  if (!field || (length == 0))
+    return _strdup("");
+
+#ifdef _WIN32
+  {
+    int required = WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)field, (int)length,
+                                       NULL, 0, NULL, NULL);
+    if (required <= 0)
+      return NULL;
+
+    result = (char *)calloc((size_t)required + 1, sizeof(char));
+    if (!result)
+      return NULL;
+
+    if (WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)field, (int)length, result,
+                            required, NULL, NULL) != required) {
+      free(result);
+      return NULL;
+    }
+    return result;
+  }
+#else
+  result = (char *)calloc((size_t)length + 1, sizeof(char));
+  if (!result)
+    return NULL;
+  memcpy(result, field, length);
+  return result;
+#endif
+}
+
+static BOOL viewer_credentials_match(const BackendClient *backend,
+                                     const char *viewer_user,
+                                     const char *viewer_domain,
+                                     const char *viewer_password) {
+  if (!backend)
+    return FALSE;
+
+  if (viewer_string_has_value(backend->username) &&
+      (!viewer_user || (_stricmp(viewer_user, backend->username) != 0)))
+    return FALSE;
+
+  if (viewer_string_has_value(backend->domain) &&
+      (!viewer_domain || (_stricmp(viewer_domain, backend->domain) != 0)))
+    return FALSE;
+
+  if (viewer_string_has_value(backend->password) &&
+      (!viewer_password || (strcmp(viewer_password, backend->password) != 0)))
+    return FALSE;
+
+  return TRUE;
 }
 
 /* ---- Classic bitmap queue: deep-copy helpers ---- */
@@ -3710,6 +3770,51 @@ static BOOL peer_post_connect(freerdp_peer *peer) {
   return TRUE;
 }
 
+static BOOL on_viewer_logon(freerdp_peer *peer,
+                            const SEC_WINNT_AUTH_IDENTITY *identity,
+                            BOOL automatic) {
+  ViewerServer *server = g_viewer_server;
+  char *viewer_user = NULL;
+  char *viewer_domain = NULL;
+  char *viewer_password = NULL;
+  BOOL accepted = FALSE;
+
+  (void)automatic;
+
+  if (!peer || !identity || !server || !server->backend) {
+    WLog_WARN(TAG, "Viewer logon rejected: missing peer, identity, or backend");
+    return FALSE;
+  }
+
+  viewer_user =
+      viewer_identity_field_to_utf8(identity->User, identity->UserLength);
+  viewer_domain =
+      viewer_identity_field_to_utf8(identity->Domain, identity->DomainLength);
+  viewer_password = viewer_identity_field_to_utf8(identity->Password,
+                                                  identity->PasswordLength);
+
+  if (!viewer_user || !viewer_domain || !viewer_password) {
+    WLog_WARN(TAG, "Viewer logon rejected: failed to decode identity");
+    goto out;
+  }
+
+  accepted = viewer_credentials_match(server->backend, viewer_user,
+                                      viewer_domain, viewer_password);
+  if (accepted) {
+    WLog_INFO(TAG, "Viewer logon accepted for '%s%s%s'", viewer_domain,
+              viewer_domain[0] ? "\\" : "", viewer_user);
+  } else {
+    WLog_WARN(TAG, "Viewer logon rejected for '%s%s%s': credentials mismatch",
+              viewer_domain, viewer_domain[0] ? "\\" : "", viewer_user);
+  }
+
+out:
+  free(viewer_user);
+  free(viewer_domain);
+  free(viewer_password);
+  return accepted;
+}
+
 static BOOL peer_activate(freerdp_peer *peer) {
   Viewer *viewer = find_viewer_by_peer(peer);
   UINT64 now = platform_get_timestamp_ms();
@@ -3964,6 +4069,7 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
   peer->PostConnect = peer_post_connect;
   peer->Activate = peer_activate;
   peer->ReachedState = peer_reached_state;
+  peer->Logon = on_viewer_logon;
 
   if (!freerdp_peer_context_new(peer))
     return FALSE;
@@ -3977,7 +4083,7 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
 
     freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE);
     freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE);
-    freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, TRUE);
     freerdp_settings_set_uint32(settings, FreeRDP_EncryptionLevel,
                                 ENCRYPTION_LEVEL_CLIENT_COMPATIBLE);
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
