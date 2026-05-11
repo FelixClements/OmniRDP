@@ -50,28 +50,28 @@ static unsigned int g_viewer_max_files = 5;
  * on every call (same pattern as svc_log_check_rotate).
  */
 static BOOL viewer_wlog_callback(const wLogMessage *msg) {
-    if (!g_viewer_logfile)
-        return FALSE;
+  if (!g_viewer_logfile)
+    return FALSE;
 
-    /* Check rotation before writing */
-    long pos = ftell(g_viewer_logfile);
-    if (pos >= 0) {
-        unsigned long long max_bytes =
-            (unsigned long long)g_viewer_max_size_mb * 1024ULL * 1024ULL;
-        if ((unsigned long long)pos >= max_bytes)
-            svc_log_rotate_file(g_viewer_log_path, &g_viewer_logfile,
-                               g_viewer_max_files);
-    }
+  /* Check rotation before writing */
+  long pos = ftell(g_viewer_logfile);
+  if (pos >= 0) {
+    unsigned long long max_bytes =
+        (unsigned long long)g_viewer_max_size_mb * 1024ULL * 1024ULL;
+    if ((unsigned long long)pos >= max_bytes)
+      svc_log_rotate_file(g_viewer_log_path, &g_viewer_logfile,
+                          g_viewer_max_files);
+  }
 
-    if (!g_viewer_logfile)
-        return FALSE;
+  if (!g_viewer_logfile)
+    return FALSE;
 
-    /* Write: prefix is already formatted by WLog layout engine */
-    fprintf(g_viewer_logfile, "%s%s\n",
-            msg->PrefixString ? msg->PrefixString : "",
-            msg->TextString ? msg->TextString : "");
-    fflush(g_viewer_logfile);
-    return TRUE;
+  /* Write: prefix is already formatted by WLog layout engine */
+  fprintf(g_viewer_logfile, "%s%s\n",
+          msg->PrefixString ? msg->PrefixString : "",
+          msg->TextString ? msg->TextString : "");
+  fflush(g_viewer_logfile);
+  return TRUE;
 }
 
 /**
@@ -325,7 +325,7 @@ int instance_runner_main(int argc, char *argv[]) {
 
     /* Open viewer.log ourselves and store rotation params */
     snprintf(g_viewer_log_path, sizeof(g_viewer_log_path), "%s\\viewer.log",
-            instance_log_dir);
+             instance_log_dir);
     g_viewer_logfile = fopen(g_viewer_log_path, "a");
     g_viewer_max_size_mb = config->service.log_max_size_mb;
     g_viewer_max_files = config->service.log_max_files;
@@ -347,14 +347,13 @@ int instance_runner_main(int argc, char *argv[]) {
   backend_set_monitor_count(client, inst->display_monitor_count);
 
   BackendSecurityConfig security = {
-      inst->backend_security_nla_enabled,
-      inst->backend_security_tls_enabled,
+      inst->backend_security_nla_enabled, inst->backend_security_tls_enabled,
       inst->backend_security_rdp_enabled,
       inst->backend_security_server_authentication,
       inst->backend_security_ignore_certificate};
   if (!backend_configure(client, inst->backend_hostname, inst->backend_port,
-                         inst->backend_username, password,
-                         inst->backend_domain, &security)) {
+                         inst->backend_username, password, inst->backend_domain,
+                         &security)) {
     LOG_E("instance_runner", "Failed to configure backend for '%s'",
           args.instance_name);
     SecureZeroMemory(password, sizeof(password));
