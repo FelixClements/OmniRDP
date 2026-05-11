@@ -220,7 +220,7 @@ jobs:
 
       - name: Upload Windows artifacts if build succeeds
         if: success()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v8
         with:
           name: windows-OmniRDP
           path: artifacts/windows-Release/
@@ -236,7 +236,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Download Release artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: windows-OmniRDP
           path: artifacts/windows-Release
@@ -250,10 +250,12 @@ jobs:
         run: iscc setup/OmniRDP.iss
 
       - name: Upload installer
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v8
         with:
           name: windows-OmniRDP-Setup
           path: setup/Output/OmniRDP-Setup.exe
           retention-days: 7
           if-no-files-found: error
+
+
 
