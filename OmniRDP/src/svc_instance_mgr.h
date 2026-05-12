@@ -37,10 +37,10 @@ typedef struct {
   InstanceConfig config; /* Copy of instance config */
 
   /* Child process */
-  HANDLE hProcess; /* Process handle (NULL if not running) */
-  HANDLE hJob;     /* Job object handle */
+  HANDLE hProcess;   /* Process handle (NULL if not running) */
+  HANDLE hJob;       /* Job object handle */
   HANDLE hStopEvent; /* Manual-reset stop event inherited by child */
-  DWORD pid;       /* Process ID (0 if not running) */
+  DWORD pid;         /* Process ID (0 if not running) */
 
   /* Heartbeat */
   HANDLE hHeartbeatPipe;     /* Named pipe for heartbeat
