@@ -3,7 +3,7 @@
 archive/
 OmniRDP/build/
 /*.md
-!AGENTS.md
+AGENTS.md
 .vscode/*
 freerdp-3.26.0/
 
