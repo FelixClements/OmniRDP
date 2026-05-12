@@ -94,6 +94,9 @@ static void populate_listview(HWND hListView, const TrayAppCtx *ctx) {
 
     for (ii = 0; ii < svc->instanceCount; ii++) {
       const PipeInstanceInfo *inst = &svc->instances[ii];
+      char serviceName[256];
+      char instanceName[128];
+      char stateText[32];
       char viewers[32];
       char backend[320];
       int itemIndex;
@@ -103,6 +106,16 @@ static void populate_listview(HWND hListView, const TrayAppCtx *ctx) {
       /* Pack service & instance indices into lParam */
       lParam =
           (LPARAM)((si << LPARAM_SERVICE_SHIFT) | (ii & LPARAM_INSTANCE_MASK));
+
+      _snprintf(serviceName, sizeof(serviceName), "%s", svc->serviceName);
+      serviceName[sizeof(serviceName) - 1] = '\0';
+
+      _snprintf(instanceName, sizeof(instanceName), "%s", inst->name);
+      instanceName[sizeof(instanceName) - 1] = '\0';
+
+      _snprintf(stateText, sizeof(stateText), "%s",
+                state_to_string(inst->state));
+      stateText[sizeof(stateText) - 1] = '\0';
 
       /* Viewer column */
       if (inst->state == INSTANCE_STOPPED)
@@ -122,15 +135,14 @@ static void populate_listview(HWND hListView, const TrayAppCtx *ctx) {
       lvi.mask = LVIF_TEXT | LVIF_PARAM;
       lvi.iItem = itemIndex;
       lvi.iSubItem = 0;
-      lvi.pszText = svc->serviceName;
+      lvi.pszText = serviceName;
       lvi.lParam = lParam;
 
       ListView_InsertItem(hListView, &lvi);
 
       /* Sub-item columns */
-      ListView_SetItemText(hListView, itemIndex, 1, inst->name);
-      ListView_SetItemText(hListView, itemIndex, 2,
-                           (LPSTR)state_to_string(inst->state));
+      ListView_SetItemText(hListView, itemIndex, 1, instanceName);
+      ListView_SetItemText(hListView, itemIndex, 2, stateText);
       ListView_SetItemText(hListView, itemIndex, 3, viewers);
       ListView_SetItemText(hListView, itemIndex, 4, backend);
     }
