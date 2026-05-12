@@ -12,7 +12,7 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
-DefaultDirName={pf}\{#MyAppName}
+DefaultDirName={commonpf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputBaseFilename=OmniRDP-Setup
 Compression=lzma2
@@ -102,12 +102,12 @@ Source: "..\setup\license\*"; DestDir: "{app}\license"; Flags: ignoreversion rec
 
 [Run]
 ; Install service
-Filename: "{app}\OmniRDP-svc.exe"; Parameters: "--install"; Flags: runasoriginaluser
+Filename: "{app}\OmniRDP-svc.exe"; Parameters: "--install"
 ; Install tray
 Filename: "{app}\OmniRDP-tray.exe"; Parameters: "--install"; Flags: runasoriginaluser
 
 [UninstallRun]
 ; Uninstall tray
-Filename: "{app}\OmniRDP-tray.exe"; Parameters: "--uninstall"
+Filename: "{app}\OmniRDP-tray.exe"; Parameters: "--uninstall"; RunOnceId: "UninstallTray"
 ; Uninstall service
-Filename: "{app}\OmniRDP-svc.exe"; Parameters: "--uninstall"
+Filename: "{app}\OmniRDP-svc.exe"; Parameters: "--uninstall"; RunOnceId: "UninstallService"

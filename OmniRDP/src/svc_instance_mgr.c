@@ -112,6 +112,7 @@ int inst_mgr_init(InstanceManager *mgr, SvcConfig *config,
     /* Handles start as NULL / 0 */
     inst->hProcess = NULL;
     inst->hJob = NULL;
+    inst->hStopEvent = NULL;
     inst->pid = 0;
     inst->hHeartbeatPipe = NULL;
     inst->lastHeartbeatMs = 0;
@@ -188,8 +189,11 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
                                   "backend.password") != 0) {
       LOG_E("svc_inst_mgr",
             "Start: failed to encrypt password in config "
-            "file for '%s' (continuing)",
+            "file for '%s'; refusing to start with plaintext password",
             instanceName);
+      inst->state = INST_STOPPED;
+      LeaveCriticalSection(&mgr->lock);
+      return -1;
     }
 
     /* Round-trip: encrypt plaintext → dpapi, then decrypt back */
@@ -226,6 +230,7 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
    * Only the current process token's SID gets access. */
   SECURITY_ATTRIBUTES sa;
   sa.nLength = sizeof(sa);
+  sa.lpSecurityDescriptor = NULL;
   sa.bInheritHandle = TRUE;
 
   /* Build a DACL that grants access only to the current user */
@@ -268,6 +273,18 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
     sa.lpSecurityDescriptor = NULL;
   }
 
+  HANDLE hStopEvent = CreateEventA(&sa, TRUE, FALSE, NULL);
+  if (!hStopEvent) {
+    LOG_W("svc_inst_mgr",
+          "Start: stop event creation failed for '%s' (err=%lu)", instanceName,
+          GetLastError());
+  } else if (!SetHandleInformation(hStopEvent, HANDLE_FLAG_INHERIT,
+                                   HANDLE_FLAG_INHERIT)) {
+    LOG_W("svc_inst_mgr",
+          "Start: SetHandleInformation stop event failed for '%s' (err=%lu)",
+          instanceName, GetLastError());
+  }
+
   if (!CreatePipe(&hPipeRead, &hPipeWrite, &sa, 4096)) {
     LOG_E("svc_inst_mgr", "Start: CreatePipe failed for '%s' (err=%lu)",
           instanceName, GetLastError());
@@ -275,6 +292,8 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
       HeapFree(GetProcessHeap(), 0, pSD);
     if (pACL)
       LocalFree(pACL);
+    if (hStopEvent)
+      CloseHandle(hStopEvent);
     SecureZeroMemory(decrypted_password, sizeof(decrypted_password));
     inst->state = INST_STOPPED;
     LeaveCriticalSection(&mgr->lock);
@@ -297,10 +316,11 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
    * "<configPath>"
    */
   char cmdline[32768];
-  int cmdlen =
-      _snprintf(cmdline, sizeof(cmdline),
-                "\"%s\" --instance \"%s\" --secrets-handle %Iu --config \"%s\"",
-                mgr->exePath, instanceName, (SIZE_T)hPipeRead, mgr->configPath);
+  int cmdlen = _snprintf(cmdline, sizeof(cmdline),
+                         "\"%s\" --instance \"%s\" --secrets-handle %Iu "
+                         "--stop-event %Iu --config \"%s\"",
+                         mgr->exePath, instanceName, (SIZE_T)hPipeRead,
+                         (SIZE_T)hStopEvent, mgr->configPath);
   if (cmdlen < 0 || (size_t)cmdlen >= sizeof(cmdline)) {
     LOG_E("svc_inst_mgr", "Start: command line too long for '%s'",
           instanceName);
@@ -310,6 +330,8 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
       HeapFree(GetProcessHeap(), 0, pSD);
     if (pACL)
       LocalFree(pACL);
+    if (hStopEvent)
+      CloseHandle(hStopEvent);
     SecureZeroMemory(decrypted_password, sizeof(decrypted_password));
     inst->state = INST_STOPPED;
     LeaveCriticalSection(&mgr->lock);
@@ -338,6 +360,8 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
           instanceName, GetLastError());
     CloseHandle(hPipeRead);
     CloseHandle(hPipeWrite);
+    if (hStopEvent)
+      CloseHandle(hStopEvent);
     if (pSD)
       HeapFree(GetProcessHeap(), 0, pSD);
     if (pACL)
@@ -375,6 +399,7 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
       NULL,                /* lpThreadAttributes */
       TRUE,                /* bInheritHandles = TRUE (for pipe) */
       CREATE_NEW_CONSOLE | /* Creation flags: separate console for CTRL_BREAK */
+          CREATE_NEW_PROCESS_GROUP |
           CREATE_SUSPENDED, /* Start suspended so we can assign to job first */
       NULL,                 /* lpEnvironment */
       NULL,                 /* lpCurrentDirectory */
@@ -387,6 +412,8 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
     CloseHandle(hJob);
     CloseHandle(hPipeRead);
     CloseHandle(hPipeWrite);
+    if (hStopEvent)
+      CloseHandle(hStopEvent);
     if (pSD)
       HeapFree(GetProcessHeap(), 0, pSD);
     if (pACL)
@@ -425,6 +452,8 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
     CloseHandle(hJob);
     CloseHandle(hPipeRead);
     CloseHandle(hPipeWrite);
+    if (hStopEvent)
+      CloseHandle(hStopEvent);
     if (pSD)
       HeapFree(GetProcessHeap(), 0, pSD);
     if (pACL)
@@ -448,6 +477,7 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
   /* ── Store handles and state ────────────────────────────────── */
   inst->hProcess = pi.hProcess;
   inst->hJob = hJob;
+  inst->hStopEvent = hStopEvent;
   inst->pid = pi.dwProcessId;
   inst->lastHeartbeatMs = GetTickCount64();
   inst->reconnectAttempts = 0;
@@ -465,11 +495,103 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
   /* ── Clean up password buffer ───────────────────────────────── */
   SecureZeroMemory(decrypted_password, sizeof(decrypted_password));
 
-  LOG_I("svc_inst_mgr", "Started instance '%s' (PID=%lu, job=%p)", instanceName,
-        inst->pid, (void *)inst->hJob);
+  LOG_I("svc_inst_mgr", "Started instance '%s' (PID=%lu, job=%p, stopEvent=%p)",
+        instanceName, inst->pid, (void *)inst->hJob, (void *)inst->hStopEvent);
 
   LeaveCriticalSection(&mgr->lock);
   return 0;
+}
+
+static void inst_mgr_request_stop_locked(ManagedInstance *inst) {
+  if (!inst || inst->state == INST_STOPPED)
+    return;
+
+  inst->stopRequested = TRUE;
+
+  if (inst->hStopEvent) {
+    if (SetEvent(inst->hStopEvent)) {
+      LOG_I("svc_inst_mgr", "Stop: requested graceful stop for '%s' via event",
+            inst->name);
+    } else {
+      LOG_W("svc_inst_mgr", "Stop: SetEvent failed for '%s' (err=%lu)",
+            inst->name, GetLastError());
+    }
+  }
+
+  if (inst->pid != 0) {
+    LOG_W("svc_inst_mgr",
+          "Stop: sending GenerateConsoleCtrlEvent to '%s' (PID=%lu)",
+          inst->name, inst->pid);
+    if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, inst->pid)) {
+      LOG_W("svc_inst_mgr",
+            "Stop: GenerateConsoleCtrlEvent failed for '%s' (err=%lu)",
+            inst->name, GetLastError());
+    }
+  }
+}
+
+static void inst_mgr_wait_stopped_timeout(InstanceManager *mgr,
+                                          ManagedInstance *inst,
+                                          DWORD timeout_ms) {
+  HANDLE hProcess = inst->hProcess;
+  HANDLE hJob = inst->hJob;
+  HANDLE hHeartbeatPipe = inst->hHeartbeatPipe;
+  HANDLE hStopEvent = inst->hStopEvent;
+  DWORD pid = inst->pid;
+  char name_copy[128];
+
+  strncpy(name_copy, inst->name, sizeof(name_copy) - 1);
+  name_copy[sizeof(name_copy) - 1] = '\0';
+
+  inst->state = INST_STOPPED;
+  inst->hProcess = NULL;
+  inst->hJob = NULL;
+  inst->hHeartbeatPipe = NULL;
+  inst->hStopEvent = NULL;
+  inst->pid = 0;
+
+  LeaveCriticalSection(&mgr->lock);
+
+  LOG_I("svc_inst_mgr", "Stopping instance '%s' (PID=%lu)...", name_copy, pid);
+
+  if (hProcess) {
+    DWORD waitResult = WaitForSingleObject(hProcess, timeout_ms);
+
+    if (waitResult == WAIT_TIMEOUT) {
+      LOG_W("svc_inst_mgr",
+            "Stop: instance '%s' did not exit within %u sec, terminating",
+            name_copy, mgr->config->service.graceful_shutdown_sec);
+      TerminateProcess(hProcess, 1);
+      WaitForSingleObject(hProcess, 5000);
+    } else if (waitResult == WAIT_OBJECT_0) {
+      LOG_I("svc_inst_mgr", "Stop: instance '%s' exited gracefully", name_copy);
+    } else {
+      LOG_E("svc_inst_mgr",
+            "Stop: unexpected WaitForSingleObject result for '%s' (%lu)",
+            name_copy, GetLastError());
+    }
+
+    CloseHandle(hProcess);
+  }
+  if (hJob)
+    CloseHandle(hJob);
+  if (hHeartbeatPipe)
+    CloseHandle(hHeartbeatPipe);
+  if (hStopEvent)
+    CloseHandle(hStopEvent);
+
+  EnterCriticalSection(&mgr->lock);
+  inst->lastHeartbeatMs = 0;
+  inst->reconnectAttempts = 0;
+  inst->nextReconnectMs = 0;
+  inst->stopRequested = FALSE;
+
+  LOG_I("svc_inst_mgr", "Instance '%s' stopped", name_copy);
+}
+
+static void inst_mgr_wait_stopped(InstanceManager *mgr, ManagedInstance *inst) {
+  DWORD timeout_ms = mgr->config->service.graceful_shutdown_sec * 1000;
+  inst_mgr_wait_stopped_timeout(mgr, inst, timeout_ms);
 }
 
 /* ── inst_mgr_stop (single instance) ───────────────────────────── */
@@ -493,74 +615,9 @@ int inst_mgr_stop(InstanceManager *mgr, const char *instanceName) {
     return 0;
   }
 
-  inst->stopRequested = TRUE;
-
-  HANDLE hProcess = inst->hProcess;
-  DWORD pid = inst->pid;
-  char name_copy[128];
-  strncpy(name_copy, inst->name, sizeof(name_copy) - 1);
-  name_copy[sizeof(name_copy) - 1] = '\0';
-
-  /* Set state before releasing lock so poll() doesn't interfere */
-  inst->state = INST_STOPPED;
-  inst->hProcess = NULL;
-  inst->pid = 0;
-
+  inst_mgr_request_stop_locked(inst);
+  inst_mgr_wait_stopped(mgr, inst);
   LeaveCriticalSection(&mgr->lock);
-
-  LOG_I("svc_inst_mgr", "Stopping instance '%s' (PID=%lu)...", name_copy, pid);
-
-  /* ── Send CTRL_BREAK_EVENT ──────────────────────────────────── */
-  if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)) {
-    LOG_W("svc_inst_mgr",
-          "Stop: GenerateConsoleCtrlEvent failed for '%s' "
-          "(err=%lu)",
-          name_copy, GetLastError());
-  }
-
-  /* ── Wait for graceful shutdown ─────────────────────────────── */
-  DWORD timeout_ms = mgr->config->service.graceful_shutdown_sec * 1000;
-  DWORD waitResult = WaitForSingleObject(hProcess, timeout_ms);
-
-  if (waitResult == WAIT_TIMEOUT) {
-    LOG_W("svc_inst_mgr",
-          "Stop: instance '%s' did not exit within %u sec, "
-          "terminating",
-          name_copy, mgr->config->service.graceful_shutdown_sec);
-    TerminateProcess(hProcess, 1);
-    WaitForSingleObject(hProcess, 5000); /* Brief wait for cleanup */
-  } else if (waitResult == WAIT_OBJECT_0) {
-    LOG_I("svc_inst_mgr", "Stop: instance '%s' exited gracefully", name_copy);
-  } else {
-    LOG_E("svc_inst_mgr",
-          "Stop: unexpected WaitForSingleObject result for "
-          "'%s' (%lu)",
-          name_copy, GetLastError());
-  }
-
-  /* ── Close handles ──────────────────────────────────────────── */
-  CloseHandle(hProcess);
-
-  EnterCriticalSection(&mgr->lock);
-
-  /* Also close the job handle if still attached */
-  if (inst->hJob) {
-    CloseHandle(inst->hJob);
-    inst->hJob = NULL;
-  }
-  if (inst->hHeartbeatPipe) {
-    CloseHandle(inst->hHeartbeatPipe);
-    inst->hHeartbeatPipe = NULL;
-  }
-
-  inst->lastHeartbeatMs = 0;
-  inst->reconnectAttempts = 0;
-  inst->nextReconnectMs = 0;
-  inst->stopRequested = FALSE;
-
-  LeaveCriticalSection(&mgr->lock);
-
-  LOG_I("svc_inst_mgr", "Instance '%s' stopped", name_copy);
   return 0;
 }
 
@@ -626,11 +683,28 @@ void inst_mgr_stop_all(InstanceManager *mgr) {
 
   LOG_I("svc_inst_mgr", "Stopping all instances...");
 
+  EnterCriticalSection(&mgr->lock);
+  for (unsigned int i = 0; i < mgr->instanceCount; i++) {
+    if (mgr->instances[i].state != INST_STOPPED)
+      inst_mgr_request_stop_locked(&mgr->instances[i]);
+  }
+
+  ULONGLONG timeout_ms =
+      (ULONGLONG)mgr->config->service.graceful_shutdown_sec * 1000ULL;
+  ULONGLONG deadline_ms = GetTickCount64() + timeout_ms;
+
   for (unsigned int i = 0; i < mgr->instanceCount; i++) {
     if (mgr->instances[i].state != INST_STOPPED) {
-      inst_mgr_stop(mgr, mgr->instances[i].name);
+      ULONGLONG now_ms = GetTickCount64();
+      DWORD remaining_ms = 0;
+      if (deadline_ms > now_ms) {
+        ULONGLONG remaining = deadline_ms - now_ms;
+        remaining_ms = remaining > MAXDWORD ? MAXDWORD : (DWORD)remaining;
+      }
+      inst_mgr_wait_stopped_timeout(mgr, &mgr->instances[i], remaining_ms);
     }
   }
+  LeaveCriticalSection(&mgr->lock);
 }
 
 /* ── inst_mgr_poll ─────────────────────────────────────────────── */
@@ -726,6 +800,10 @@ void inst_mgr_poll(InstanceManager *mgr) {
         if (inst->hJob) {
           CloseHandle(inst->hJob);
           inst->hJob = NULL;
+        }
+        if (inst->hStopEvent) {
+          CloseHandle(inst->hStopEvent);
+          inst->hStopEvent = NULL;
         }
         if (inst->hHeartbeatPipe) {
           CloseHandle(inst->hHeartbeatPipe);
@@ -1073,6 +1151,7 @@ int inst_mgr_reload_config(InstanceManager *mgr, const char *configPath) {
       ni->state = INST_STOPPED;
       ni->hProcess = NULL;
       ni->hJob = NULL;
+      ni->hStopEvent = NULL;
       ni->pid = 0;
       ni->hHeartbeatPipe = NULL;
       ni->lastHeartbeatMs = 0;
@@ -1087,6 +1166,7 @@ int inst_mgr_reload_config(InstanceManager *mgr, const char *configPath) {
       ni->state = oldInst->state;
       ni->hProcess = oldInst->hProcess;
       ni->hJob = oldInst->hJob;
+      ni->hStopEvent = oldInst->hStopEvent;
       ni->pid = oldInst->pid;
       ni->hHeartbeatPipe = oldInst->hHeartbeatPipe;
       ni->lastHeartbeatMs = oldInst->lastHeartbeatMs;
@@ -1252,6 +1332,10 @@ void inst_mgr_cleanup(InstanceManager *mgr) {
     if (inst->hHeartbeatPipe) {
       CloseHandle(inst->hHeartbeatPipe);
       inst->hHeartbeatPipe = NULL;
+    }
+    if (inst->hStopEvent) {
+      CloseHandle(inst->hStopEvent);
+      inst->hStopEvent = NULL;
     }
     if (inst->hProcess) {
       CloseHandle(inst->hProcess);

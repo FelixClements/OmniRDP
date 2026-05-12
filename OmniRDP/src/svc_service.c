@@ -93,35 +93,68 @@ static int get_binary_path(const char *binary_name, char *out,
 }
 
 /**
- * @brief Set ACL on the config file
+ * @brief Build the service SID account name used in filesystem ACLs.
+ */
+static int build_service_sid_name(const char *serviceName, char *out,
+                                  size_t out_size) {
+  int ret;
+
+  if (!serviceName || serviceName[0] == '\0' || !out || out_size == 0) {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return -1;
+  }
+
+  ret = _snprintf(out, out_size, "NT SERVICE\\%s", serviceName);
+  if (ret < 0 || (size_t)ret >= out_size) {
+    SetLastError(ERROR_INSUFFICIENT_BUFFER);
+    return -1;
+  }
+
+  return 0;
+}
+
+/**
+ * @brief Set ACL on the ProgramData config directory or config file.
+ *
  *
  * Grants:
  * - SYSTEM: Full Control
  * - BUILTIN\Administrators: Full Control
- * - NT AUTHORITY\Authenticated Users: Read-only
+
+ * * - NT SERVICE\<serviceName>: Modify
  */
-static int set_config_file_acl(const char *filePath) {
+static int set_config_acl(const char *path, const char *serviceName,
+                          BOOL isDirectory) {
   DWORD dwRes;
-  PSECURITY_DESCRIPTOR pSD = NULL;
   EXPLICIT_ACCESSA ea[3];
   PACL pACL = NULL;
+  char serviceSidName[300];
 
   /* SYSTEM SID */
   SID_IDENTIFIER_AUTHORITY ntAuth = SECURITY_NT_AUTHORITY;
   PSID pSystemSid = NULL;
-  AllocateAndInitializeSid(&ntAuth, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0,
-                           0, 0, &pSystemSid);
+  if (!AllocateAndInitializeSid(&ntAuth, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0,
+                                0, 0, 0, 0, &pSystemSid)) {
+    return -1;
+  }
 
   /* Administrators SID */
   PSID pAdminSid = NULL;
-  AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID,
-                           DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
-                           &pAdminSid);
+  if (!AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0,
+                                &pAdminSid)) {
+    FreeSid(pSystemSid);
+    return -1;
+  }
 
-  /* Authenticated Users SID */
-  PSID pAuthUsersSid = NULL;
-  AllocateAndInitializeSid(&ntAuth, 1, SECURITY_AUTHENTICATED_USER_RID, 0, 0, 0,
-                           0, 0, 0, 0, &pAuthUsersSid);
+  if (build_service_sid_name(serviceName, serviceSidName,
+                             sizeof(serviceSidName)) != 0) {
+    if (pSystemSid)
+      FreeSid(pSystemSid);
+    if (pAdminSid)
+      FreeSid(pAdminSid);
+    return -1;
+  }
 
   /* Build explicit access array */
   ZeroMemory(ea, sizeof(ea));
@@ -129,7 +162,9 @@ static int set_config_file_acl(const char *filePath) {
   /* SYSTEM: Full Control */
   ea[0].grfAccessPermissions = GENERIC_ALL;
   ea[0].grfAccessMode = SET_ACCESS;
-  ea[0].grfInheritance = NO_INHERITANCE;
+  ea[0].grfInheritance = isDirectory
+                             ? (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
+                             : NO_INHERITANCE;
   ea[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
   ea[0].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
   ea[0].Trustee.ptstrName = (LPSTR)pSystemSid;
@@ -137,18 +172,24 @@ static int set_config_file_acl(const char *filePath) {
   /* Administrators: Full Control */
   ea[1].grfAccessPermissions = GENERIC_ALL;
   ea[1].grfAccessMode = SET_ACCESS;
-  ea[1].grfInheritance = NO_INHERITANCE;
+  ea[1].grfInheritance = isDirectory
+                             ? (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
+                             : NO_INHERITANCE;
   ea[1].Trustee.TrusteeForm = TRUSTEE_IS_SID;
   ea[1].Trustee.TrusteeType = TRUSTEE_IS_GROUP;
   ea[1].Trustee.ptstrName = (LPSTR)pAdminSid;
 
-  /* Authenticated Users: Read-only */
-  ea[2].grfAccessPermissions = GENERIC_READ;
+  /* Service SID: Modify */
+  ea[2].grfAccessPermissions = FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE;
+  if (isDirectory)
+    ea[2].grfAccessPermissions |= FILE_DELETE_CHILD;
   ea[2].grfAccessMode = SET_ACCESS;
-  ea[2].grfInheritance = NO_INHERITANCE;
-  ea[2].Trustee.TrusteeForm = TRUSTEE_IS_SID;
-  ea[2].Trustee.TrusteeType = TRUSTEE_IS_GROUP;
-  ea[2].Trustee.ptstrName = (LPSTR)pAuthUsersSid;
+  ea[2].grfInheritance = isDirectory
+                             ? (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
+                             : NO_INHERITANCE;
+  ea[2].Trustee.TrusteeForm = TRUSTEE_IS_NAME;
+  ea[2].Trustee.TrusteeType = TRUSTEE_IS_USER;
+  ea[2].Trustee.ptstrName = serviceSidName;
 
   /* Create ACL */
   dwRes = SetEntriesInAclA(3, ea, NULL, &pACL);
@@ -157,13 +198,12 @@ static int set_config_file_acl(const char *filePath) {
       FreeSid(pSystemSid);
     if (pAdminSid)
       FreeSid(pAdminSid);
-    if (pAuthUsersSid)
-      FreeSid(pAuthUsersSid);
+    SetLastError(dwRes);
     return -1;
   }
 
-  /* Apply ACL to file */
-  dwRes = SetNamedSecurityInfoA((LPSTR)filePath, SE_FILE_OBJECT,
+  /* Apply protected ACL, replacing inherited broad Users/Auth Users access. */
+  dwRes = SetNamedSecurityInfoA((LPSTR)path, SE_FILE_OBJECT,
                                 DACL_SECURITY_INFORMATION |
                                     PROTECTED_DACL_SECURITY_INFORMATION,
                                 NULL, NULL, pACL, NULL);
@@ -175,10 +215,51 @@ static int set_config_file_acl(const char *filePath) {
     FreeSid(pSystemSid);
   if (pAdminSid)
     FreeSid(pAdminSid);
-  if (pAuthUsersSid)
-    FreeSid(pAuthUsersSid);
 
-  return (dwRes == ERROR_SUCCESS) ? 0 : -1;
+  if (dwRes != ERROR_SUCCESS) {
+    SetLastError(dwRes);
+    return -1;
+  }
+
+  return 0;
+}
+
+static int set_config_file_acl(const char *filePath, const char *serviceName) {
+  return set_config_acl(filePath, serviceName, FALSE);
+}
+
+static int set_config_dir_acl(const char *dirPath, const char *serviceName) {
+  return set_config_acl(dirPath, serviceName, TRUE);
+}
+
+static int prepare_config_path_acl(const char *configPath,
+                                   const char *serviceName) {
+  char dirPath[MAX_PATH];
+  char *lastSlash;
+  int dirRes;
+
+  if (!configPath || configPath[0] == '\0') {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return -1;
+  }
+
+  strncpy(dirPath, configPath, sizeof(dirPath) - 1);
+  dirPath[sizeof(dirPath) - 1] = '\0';
+  lastSlash = strrchr(dirPath, '\\');
+  if (!lastSlash) {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return -1;
+  }
+
+  *lastSlash = '\0';
+  dirRes = SHCreateDirectoryExA(NULL, dirPath, NULL);
+  if (dirRes != ERROR_SUCCESS && dirRes != ERROR_ALREADY_EXISTS &&
+      dirRes != ERROR_FILE_EXISTS) {
+    SetLastError((DWORD)dirRes);
+    return -1;
+  }
+
+  return set_config_dir_acl(dirPath, serviceName);
 }
 
 /* ── svc_config_write_template ───────────────────────────────────── */
@@ -224,7 +305,8 @@ int svc_config_write_template(const char *configPath) {
           "log_max_size_mb = 10\n"
           "log_max_files = 5\n"
           "\n"
-          "; Named pipe for tray app IPC\n"
+          "; Named pipe for tray app IPC. Custom values are reserved/no-op in "
+          "this build.\n"
           "pipe_name = OmniRDP_ServicePipe\n"
           "\n"
           "; Health monitoring\n"
@@ -264,24 +346,35 @@ int svc_config_write_template(const char *configPath) {
           "; Viewer listener (clients connect here)\n"
           "viewer.bind_address = 127.0.0.1\n"
           "viewer.port = 3390\n"
+          "; Reserved: runtime maximum is currently compiled in as 10\n"
           "viewer.max_viewers = 10\n"
           "viewer.cert_path =\n"
           "viewer.key_path =\n"
+          "; Applied: disconnect viewers that remain severely lagged\n"
           "viewer.slow_disconnect_enabled = true\n"
+          "; Reserved/no-op in this build\n"
           "viewer.slow_lag_interval_ms = 5000\n"
           "viewer.slow_disconnect_after_ms = 30000\n"
+          "; Reserved/no-op in this build\n"
           "viewer.late_join_timeout_ms = 15000\n"
           "viewer.late_join_refresh_deadline_ms = 5000\n"
           "viewer.late_join_replay_max_frames = 4\n"
+          "; Reserved/no-op in this build\n"
           "viewer.throttle_max_updates_per_sec = 0\n"
+          "; Viewer security/auth (clients -> OmniRDP)\n"
+          "viewer.security.nla_enabled = true\n"
+          "viewer.security.tls_enabled = true\n"
+          "viewer.security.rdp_enabled = true\n"
+          "viewer.auth.mode = backend_credentials\n"
           "\n"
-          "; Display\n"
+          "; Display (monitor_count is applied; width/height/depth are "
+          "reserved/no-op)\n"
           "display.monitor_count = 1\n"
           "display.monitor_width = 1920\n"
           "display.monitor_height = 1080\n"
           "display.color_depth = 32\n"
           "\n"
-          "; Codecs\n"
+          "; Codecs (reserved/no-op in this build)\n"
           "codec.nscodec = true\n"
           "codec.remote_fx = true\n"
           "codec.graphics_pipeline = false\n"
@@ -297,15 +390,13 @@ int svc_config_write_template(const char *configPath) {
           "backend.security.* is absent.\n"
           "security.tls_enabled = true\n"
           "security.nla_enabled = true\n"
+          "; Reserved/no-op in this build\n"
           "security.tls_min_version = 1.2\n"
           "security.server_authentication = true\n"
           "security.ignore_certificate = false\n",
           configPath);
 
   fclose(fp);
-
-  /* Set ACLs on the config file */
-  set_config_file_acl(configPath);
 
   return 0;
 }
@@ -419,21 +510,21 @@ int svc_service_install(const char *serviceName, const char *configPath) {
     }
   }
 
-  SC_HANDLE schService =
-      CreateServiceA(schSCManager, /* SCM database */
-                     serviceName,  /* service name */
-                     serviceName,  /* display name */
-                     SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
-                         SERVICE_QUERY_CONFIG,       /* desired access */
-                     SERVICE_WIN32_OWN_PROCESS,      /* service type */
-                     SERVICE_AUTO_START,             /* start type */
-                     SERVICE_ERROR_NORMAL,           /* error control */
-                     binaryPath,                     /* binary path */
-                     NULL,                           /* load order group */
-                     NULL,                           /* tag identifier */
-                     NULL,                           /* dependencies */
-                     "NT AUTHORITY\\NetworkService", /* service start account */
-                     NULL);                          /* password */
+  SC_HANDLE schService = CreateServiceA(
+      schSCManager, /* SCM database */
+      serviceName,  /* service name */
+      serviceName,  /* display name */
+      SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
+          SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG, /* desired access */
+      SERVICE_WIN32_OWN_PROCESS,                        /* service type */
+      SERVICE_AUTO_START,                               /* start type */
+      SERVICE_ERROR_NORMAL,                             /* error control */
+      binaryPath,                                       /* binary path */
+      NULL,                                             /* load order group */
+      NULL,                                             /* tag identifier */
+      NULL,                                             /* dependencies */
+      "NT AUTHORITY\\NetworkService", /* service start account */
+      NULL);                          /* password */
 
   if (!schService) {
     DWORD err = GetLastError();
@@ -451,7 +542,7 @@ int svc_service_install(const char *serviceName, const char *configPath) {
         schService = CreateServiceA(
             schSCManager, serviceName, serviceName,
             SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
-                SERVICE_QUERY_CONFIG,
+                SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG,
             SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
             binaryPath, NULL, NULL, NULL, "NT AUTHORITY\\NetworkService", NULL);
         if (schService)
@@ -472,7 +563,7 @@ int svc_service_install(const char *serviceName, const char *configPath) {
         schService = CreateServiceA(
             schSCManager, serviceName, serviceName,
             SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
-                SERVICE_QUERY_CONFIG,
+                SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG,
             SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
             binaryPath, NULL, NULL, NULL, "NT AUTHORITY\\NetworkService", NULL);
       }
@@ -491,6 +582,63 @@ int svc_service_install(const char *serviceName, const char *configPath) {
   desc.lpDescription = "OmniRDP RDP Multiplexer Service";
   ChangeServiceConfig2A(schService, SERVICE_CONFIG_DESCRIPTION, &desc);
 
+  /* Enable an unrestricted per-service SID while keeping NetworkService. */
+  {
+    SERVICE_SID_INFO sidInfo;
+    sidInfo.dwServiceSidType = SERVICE_SID_TYPE_UNRESTRICTED;
+    if (!ChangeServiceConfig2A(schService, SERVICE_CONFIG_SERVICE_SID_INFO,
+                               &sidInfo)) {
+      fprintf(stderr, "ChangeServiceConfig2(SERVICE_SID_INFO) failed: %lu\n",
+              GetLastError());
+      CloseServiceHandle(schService);
+      CloseServiceHandle(schSCManager);
+      return -1;
+    }
+  }
+
+  /* Generate/repair ProgramData config and ACLs before starting service. */
+  if (configPath && configPath[0] != '\0') {
+    DWORD attr = GetFileAttributesA(configPath);
+    if (prepare_config_path_acl(configPath, serviceName) != 0) {
+      fprintf(stderr, "Failed to set config directory ACL: %lu\n",
+              GetLastError());
+      CloseServiceHandle(schService);
+      CloseServiceHandle(schSCManager);
+      return -1;
+    }
+
+    if (attr == INVALID_FILE_ATTRIBUTES) {
+      LOG_I("svc_service", "Config file not found, generating template at '%s'",
+            configPath);
+      if (svc_config_write_template(configPath) == 0) {
+        LOG_I(
+            "svc_service",
+            "Template config.ini created. Edit it with your backend details.");
+      } else {
+        fprintf(stderr, "Failed to create template config.ini: %lu\n",
+                GetLastError());
+        CloseServiceHandle(schService);
+        CloseServiceHandle(schSCManager);
+        return -1;
+      }
+    }
+
+    if (GetFileAttributesA(configPath) == INVALID_FILE_ATTRIBUTES) {
+      fprintf(stderr, "Config file is missing after template setup: %lu\n",
+              GetLastError());
+      CloseServiceHandle(schService);
+      CloseServiceHandle(schSCManager);
+      return -1;
+    }
+
+    if (set_config_file_acl(configPath, serviceName) != 0) {
+      fprintf(stderr, "Failed to set config file ACL: %lu\n", GetLastError());
+      CloseServiceHandle(schService);
+      CloseServiceHandle(schSCManager);
+      return -1;
+    }
+  }
+
   /* Start the service */
   if (!StartServiceA(schService, 0, NULL)) {
     DWORD err = GetLastError();
@@ -504,22 +652,6 @@ int svc_service_install(const char *serviceName, const char *configPath) {
     }
   } else {
     printf("Service '%s' started successfully.\n", serviceName);
-  }
-
-  /* Generate template config if it doesn't exist */
-  if (configPath && configPath[0] != '\0') {
-    DWORD attr = GetFileAttributesA(configPath);
-    if (attr == INVALID_FILE_ATTRIBUTES) {
-      LOG_I("svc_service", "Config file not found, generating template at '%s'",
-            configPath);
-      if (svc_config_write_template(configPath) == 0) {
-        LOG_I(
-            "svc_service",
-            "Template config.ini created. Edit it with your backend details.");
-      } else {
-        LOG_W("svc_service", "Failed to create template config.ini");
-      }
-    }
   }
 
   CloseServiceHandle(schService);
@@ -681,15 +813,6 @@ int svc_service_start(const char *serviceName, const char *configPath) {
     if (!ctx.config) {
       LOG_E("svc_service", "Failed to create default config");
     }
-  }
-
-  /* Set ACL on config file */
-  if (set_config_file_acl(configPath) != 0) {
-    LOG_W("svc_service", "Failed to set config file ACL (error %lu)",
-          GetLastError());
-    /* Non-fatal: continue with reduced security */
-  } else {
-    LOG_I("svc_service", "Config file ACL set successfully");
   }
 
   SvcServiceConfig *svcCfg = ctx.config ? &ctx.config->service : NULL;
@@ -878,15 +1001,6 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
     if (!ctx.config) {
       LOG_E("svc_service", "Failed to create default config");
     }
-  }
-
-  /* Set ACL on config file */
-  if (set_config_file_acl(configPath) != 0) {
-    LOG_W("svc_service", "Failed to set config file ACL (error %lu)",
-          GetLastError());
-    /* Non-fatal: continue with reduced security */
-  } else {
-    LOG_I("svc_service", "Config file ACL set successfully");
   }
 
   SvcServiceConfig *svcCfg = ctx.config ? &ctx.config->service : NULL;

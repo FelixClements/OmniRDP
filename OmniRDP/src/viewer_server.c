@@ -36,13 +36,20 @@
 #define VIEWER_GFX_MIN_REPLAY_BASELINE_COMMANDS 2U
 #define VIEWER_GFX_MIN_REPLAY_BASELINE_BYTES 4096U
 #define VIEWER_GFX_BACKEND_REFRESH_TIMEOUT_MS 15000U
+#define VIEWER_UPDATE_ACTIVATION_GRACE_MS 250U
+#define VIEWER_CLASSIC_MAX_RECTS_PER_SEND 64U
+#define VIEWER_CLASSIC_MAX_BYTES_PER_SEND (512U * 1024U)
 
 static ViewerServer *g_viewer_server = NULL;
 
 static BOOL viewer_string_has_value(const char *value);
 
 static ViewerSecurityConfig viewer_security_default(void) {
-  ViewerSecurityConfig security = {FALSE, TRUE, TRUE, VIEWER_AUTH_MODE_NONE};
+  ViewerSecurityConfig security = {0};
+  security.nla_enabled = FALSE;
+  security.tls_enabled = TRUE;
+  security.rdp_enabled = TRUE;
+  security.auth_mode = VIEWER_AUTH_MODE_NONE;
   return security;
 }
 
@@ -98,6 +105,47 @@ static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
                                              const BITMAP_UPDATE *bitmap);
 static BOOL viewer_send_surface_bits(Viewer *viewer,
                                      const SURFACE_BITS_COMMAND *cmd);
+
+static BOOL viewer_update_ready(const Viewer *viewer, const char *operation) {
+  freerdp_peer *peer = viewer ? viewer->peer : NULL;
+  UINT64 now = platform_get_timestamp_ms();
+  UINT64 since_activation = 0;
+  BOOL post_connect_complete = FALSE;
+
+  if (!viewer || !peer || !viewer->connected || !viewer->activated ||
+      !peer->activated || viewer->stop_requested || !peer->context ||
+      !peer->context->update) {
+    WLog_INFO(TAG,
+              "Viewer update gate blocked op=%s viewer=%p peer=%p connected=%s "
+              "viewer_activated=%s peer_activated=%s stop=%s context=%s "
+              "update=%s",
+              operation ? operation : "unknown", (const void *)viewer,
+              (void *)peer, viewer && viewer->connected ? "true" : "false",
+              viewer && viewer->activated ? "true" : "false",
+              peer && peer->activated ? "true" : "false",
+              viewer && viewer->stop_requested ? "true" : "false",
+              peer && peer->context ? "true" : "false",
+              peer && peer->context && peer->context->update ? "true"
+                                                             : "false");
+    return FALSE;
+  }
+
+  post_connect_complete = viewer->gfx.post_connect_complete;
+  since_activation =
+      viewer->gfx.last_activated_ts ? (now - viewer->gfx.last_activated_ts) : 0;
+  if (!post_connect_complete ||
+      (since_activation < VIEWER_UPDATE_ACTIVATION_GRACE_MS)) {
+    WLog_INFO(TAG,
+              "Viewer %u update gate delayed op=%s post_connect_complete=%s "
+              "since_activation_ms=%" PRIu64 " required_ms=%u",
+              viewer->id, operation ? operation : "unknown",
+              post_connect_complete ? "true" : "false", since_activation,
+              VIEWER_UPDATE_ACTIVATION_GRACE_MS);
+    return FALSE;
+  }
+
+  return TRUE;
+}
 
 static UINT64 viewer_perf_now_us(void) {
 #ifdef _WIN32
@@ -163,30 +211,350 @@ static char *viewer_identity_field_to_utf8(const void *field, UINT32 length) {
 #endif
 }
 
-static BOOL viewer_credentials_match(const BackendClient *backend,
-                                     const char *viewer_user,
-                                     const char *viewer_domain,
-                                     const char *viewer_password) {
-  if (!backend)
+static BOOL viewer_settings_credentials_to_utf8(freerdp_peer *peer,
+                                                char **viewer_user,
+                                                char **viewer_domain,
+                                                char **viewer_password) {
+  rdpSettings *settings = NULL;
+  const char *settings_user = NULL;
+  const char *settings_domain = NULL;
+  const char *settings_password = NULL;
+
+  if (!peer || !peer->context)
     return FALSE;
 
-  if (viewer_string_has_value(backend->username) &&
-      (!viewer_user || (_stricmp(viewer_user, backend->username) != 0)))
+  settings = peer->context->settings;
+  if (!settings)
     return FALSE;
 
-  if (viewer_string_has_value(backend->domain) &&
-      (!viewer_domain || (_stricmp(viewer_domain, backend->domain) != 0)))
+  settings_user = freerdp_settings_get_string(settings, FreeRDP_Username);
+  settings_domain = freerdp_settings_get_string(settings, FreeRDP_Domain);
+  settings_password = freerdp_settings_get_string(settings, FreeRDP_Password);
+
+  if (!viewer_string_has_value(settings_user) &&
+      !viewer_string_has_value(settings_domain) &&
+      !viewer_string_has_value(settings_password))
     return FALSE;
 
-  if (!viewer_string_has_value(backend->domain) &&
+  *viewer_user = _strdup(settings_user ? settings_user : "");
+  *viewer_domain = _strdup(settings_domain ? settings_domain : "");
+  *viewer_password = _strdup(settings_password ? settings_password : "");
+
+  if (!*viewer_user || !*viewer_domain || !*viewer_password) {
+    free(*viewer_user);
+    free(*viewer_domain);
+    free(*viewer_password);
+    *viewer_user = NULL;
+    *viewer_domain = NULL;
+    *viewer_password = NULL;
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+static BOOL
+viewer_identity_credentials_to_utf8(const SEC_WINNT_AUTH_IDENTITY *identity,
+                                    char **viewer_user, char **viewer_domain,
+                                    char **viewer_password) {
+  if (!identity)
+    return FALSE;
+
+  *viewer_user =
+      viewer_identity_field_to_utf8(identity->User, identity->UserLength);
+  *viewer_domain =
+      viewer_identity_field_to_utf8(identity->Domain, identity->DomainLength);
+  *viewer_password = viewer_identity_field_to_utf8(identity->Password,
+                                                   identity->PasswordLength);
+
+  if (!*viewer_user || !*viewer_domain || !*viewer_password) {
+    free(*viewer_user);
+    free(*viewer_domain);
+    free(*viewer_password);
+    *viewer_user = NULL;
+    *viewer_domain = NULL;
+    *viewer_password = NULL;
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+static const char *
+viewer_comparison_domain_label(const char *configured_domain) {
+  return viewer_string_has_value(configured_domain) ? configured_domain
+                                                    : "<local>";
+}
+
+static BOOL viewer_credentials_match_expected(const char *expected_user,
+                                              const char *expected_domain,
+                                              const char *expected_password,
+                                              const char *viewer_user,
+                                              const char *viewer_domain,
+                                              const char *viewer_password) {
+  if (!viewer_string_has_value(expected_user) ||
+      !viewer_string_has_value(expected_password))
+    return FALSE;
+
+  if (!viewer_user || (_stricmp(viewer_user, expected_user) != 0))
+    return FALSE;
+
+  if (viewer_string_has_value(expected_domain) &&
+      (!viewer_domain || (_stricmp(viewer_domain, expected_domain) != 0)))
+    return FALSE;
+
+  if (!viewer_string_has_value(expected_domain) &&
       !viewer_domain_matches_local_alias(viewer_domain))
     return FALSE;
 
-  if (viewer_string_has_value(backend->password) &&
-      (!viewer_password || (strcmp(viewer_password, backend->password) != 0)))
+  if (!viewer_password || (strcmp(viewer_password, expected_password) != 0))
     return FALSE;
 
   return TRUE;
+}
+
+static BOOL viewer_backend_credentials_match(const BackendClient *backend,
+                                             const char *viewer_user,
+                                             const char *viewer_domain,
+                                             const char *viewer_password) {
+  if (!backend)
+    return FALSE;
+
+  return viewer_credentials_match_expected(backend->username, backend->domain,
+                                           backend->password, viewer_user,
+                                           viewer_domain, viewer_password);
+}
+
+static BOOL viewer_bitmap_bpp_sane(UINT32 bpp) {
+  return (bpp == 8) || (bpp == 15) || (bpp == 16) || (bpp == 24) || (bpp == 32);
+}
+
+static BOOL viewer_get_desktop_size(const Viewer *viewer, UINT32 *width,
+                                    UINT32 *height) {
+  rdpSettings *settings = NULL;
+
+  if (!width || !height)
+    return FALSE;
+
+  *width = 0;
+  *height = 0;
+  if (!viewer || !viewer->peer || !viewer->peer->context)
+    return FALSE;
+
+  settings = viewer->peer->context->settings;
+  if (!settings)
+    return FALSE;
+
+  *width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
+  *height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
+  return (*width > 0) && (*height > 0);
+}
+
+static BOOL
+viewer_validate_bitmap_rect(const Viewer *viewer, const BITMAP_UPDATE *bitmap,
+                            const BITMAP_DATA *rect, UINT32 rect_index,
+                            UINT32 desktop_width, UINT32 desktop_height,
+                            const char *operation, BOOL log_invalid) {
+  UINT32 dest_width = 0;
+  UINT32 dest_height = 0;
+  BOOL compressed = FALSE;
+  const char *reason = NULL;
+
+  if (!bitmap || !rect) {
+    reason = "missing rect";
+    goto invalid;
+  }
+
+  compressed = rect->compressed ? TRUE : FALSE;
+
+  if ((rect->destRight < rect->destLeft) ||
+      (rect->destBottom < rect->destTop)) {
+    reason = "invalid bounds";
+    goto invalid;
+  }
+
+  dest_width = (UINT32)rect->destRight - (UINT32)rect->destLeft + 1U;
+  dest_height = (UINT32)rect->destBottom - (UINT32)rect->destTop + 1U;
+
+  if ((dest_width == 0) || (dest_height == 0) || (rect->width == 0) ||
+      (rect->height == 0)) {
+    reason = "non-positive dimensions";
+    goto invalid;
+  }
+
+  if ((rect->destRight >= desktop_width) ||
+      (rect->destBottom >= desktop_height)) {
+    reason = "outside desktop";
+    goto invalid;
+  }
+
+  if (!viewer_bitmap_bpp_sane(rect->bitsPerPixel)) {
+    reason = "invalid bpp";
+    goto invalid;
+  }
+
+  if ((rect->bitmapLength > 0) && !rect->bitmapDataStream) {
+    reason = "missing bitmap data";
+    goto invalid;
+  }
+
+  return TRUE;
+
+invalid:
+  if (log_invalid) {
+    WLog_WARN(
+        TAG,
+        "Viewer %u dropping BitmapUpdate rect op=%s reason=%s rect=%" PRIu32
+        "/%" PRIu32 " bounds=(%" PRIu16 ",%" PRIu16 ")-(%" PRIu16 ",%" PRIu16
+        ") dest_size=%" PRIu32 "x%" PRIu32 " bitmap_size=%" PRIu16 "x%" PRIu16
+        " desktop=%" PRIu32 "x%" PRIu32 " bpp=%" PRIu32 " flags=0x%" PRIx32
+        " compressed=%s length=%" PRIu32 " data_present=%s",
+        viewer ? viewer->id : 0, operation ? operation : "unknown",
+        reason ? reason : "unknown", rect_index, bitmap ? bitmap->number : 0,
+        rect ? rect->destLeft : 0, rect ? rect->destTop : 0,
+        rect ? rect->destRight : 0, rect ? rect->destBottom : 0, dest_width,
+        dest_height, rect ? rect->width : 0, rect ? rect->height : 0,
+        desktop_width, desktop_height, rect ? (UINT32)rect->bitsPerPixel : 0,
+        rect ? (UINT32)rect->flags : 0, compressed ? "true" : "false",
+        rect ? (UINT32)rect->bitmapLength : 0,
+        rect && rect->bitmapDataStream ? "true" : "false");
+  }
+  return FALSE;
+}
+
+static BOOL viewer_send_bitmap_update_chunks(Viewer *viewer,
+                                             const BITMAP_UPDATE *bitmap,
+                                             BOOL update_lock_held,
+                                             const char *operation) {
+  freerdp_peer *peer = viewer ? viewer->peer : NULL;
+  BITMAP_DATA chunk_rects[VIEWER_CLASSIC_MAX_RECTS_PER_SEND];
+  BITMAP_UPDATE chunk = {0};
+  UINT32 desktop_width = 0;
+  UINT32 desktop_height = 0;
+  UINT32 valid_sent = 0;
+  UINT32 invalid_dropped = 0;
+  UINT32 chunks_sent = 0;
+  UINT32 i = 0;
+  UINT32 chunk_bytes = 0;
+  UINT64 total_payload_bytes = 0;
+  UINT64 send_time_total_us = 0;
+  BOOL ret = TRUE;
+  BOOL logged_invalid = FALSE;
+
+  if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
+    return FALSE;
+
+  if (!bitmap->rectangles || (bitmap->number == 0)) {
+    WLog_WARN(TAG,
+              "Viewer %u dropping BitmapUpdate op=%s: count=%" PRIu32
+              " rectangles_present=%s",
+              viewer->id, operation ? operation : "unknown", bitmap->number,
+              bitmap->rectangles ? "true" : "false");
+    return TRUE;
+  }
+
+  if (!viewer_get_desktop_size(viewer, &desktop_width, &desktop_height)) {
+    WLog_WARN(TAG, "Viewer %u dropping BitmapUpdate op=%s: no desktop size",
+              viewer->id, operation ? operation : "unknown");
+    return TRUE;
+  }
+
+  memset(&chunk, 0, sizeof(chunk));
+  chunk.skipCompression = bitmap->skipCompression;
+  chunk.rectangles = chunk_rects;
+
+#define VIEWER_SEND_BITMAP_CHUNK()                                             \
+  do {                                                                         \
+    BOOL chunk_ret = FALSE;                                                    \
+    UINT64 send_started_us = 0;                                                \
+    UINT64 send_us = 0;                                                        \
+    if (chunk.number > 0) {                                                    \
+      send_started_us = viewer_perf_now_us();                                  \
+      if (!update_lock_held)                                                   \
+        rdp_update_lock(peer->context->update);                                \
+      IFCALLRET(peer->context->update->BitmapUpdate, chunk_ret, peer->context, \
+                &chunk);                                                       \
+      if (!update_lock_held)                                                   \
+        rdp_update_unlock(peer->context->update);                              \
+      send_us = viewer_perf_now_us() - send_started_us;                        \
+      send_time_total_us += send_us;                                           \
+      if (send_us > viewer->bitmap_send_time_max_us)                           \
+        viewer->bitmap_send_time_max_us = send_us;                             \
+      if (chunk_ret) {                                                         \
+        viewer->packets_sent++;                                                \
+        viewer->bitmap_updates_sent++;                                         \
+        viewer->bitmap_rectangles_sent += chunk.number;                        \
+        viewer->bitmap_payload_bytes_sent += chunk_bytes;                      \
+        valid_sent += chunk.number;                                            \
+        chunks_sent++;                                                         \
+      } else {                                                                 \
+        viewer->packets_failed++;                                              \
+        viewer->bitmap_updates_failed++;                                       \
+        ret = FALSE;                                                           \
+      }                                                                        \
+      chunk.number = 0;                                                        \
+      chunk_bytes = 0;                                                         \
+    }                                                                          \
+  } while (0)
+
+  for (i = 0; i < bitmap->number; i++) {
+    const BITMAP_DATA *rect = &bitmap->rectangles[i];
+    UINT32 rect_bytes = rect ? (UINT32)rect->bitmapLength : 0;
+
+    if (!viewer_validate_bitmap_rect(viewer, bitmap, rect, i, desktop_width,
+                                     desktop_height, operation,
+                                     !logged_invalid)) {
+      invalid_dropped++;
+      logged_invalid = TRUE;
+      continue;
+    }
+
+    if ((chunk.number > 0) &&
+        ((chunk.number >= VIEWER_CLASSIC_MAX_RECTS_PER_SEND) ||
+         ((chunk_bytes + rect_bytes) > VIEWER_CLASSIC_MAX_BYTES_PER_SEND))) {
+      VIEWER_SEND_BITMAP_CHUNK();
+      if (!ret)
+        break;
+    }
+
+    chunk_rects[chunk.number++] = *rect;
+    chunk_bytes += rect_bytes;
+    total_payload_bytes += rect_bytes;
+
+    if (chunk.number >= VIEWER_CLASSIC_MAX_RECTS_PER_SEND) {
+      VIEWER_SEND_BITMAP_CHUNK();
+      if (!ret)
+        break;
+    }
+  }
+
+  if (ret && (chunk.number > 0))
+    VIEWER_SEND_BITMAP_CHUNK();
+
+#undef VIEWER_SEND_BITMAP_CHUNK
+
+  viewer->bitmap_send_time_total_us += send_time_total_us;
+
+  if ((valid_sent == 0) && (invalid_dropped > 0)) {
+    WLog_WARN(TAG,
+              "Viewer %u dropped BitmapUpdate op=%s: all rects invalid "
+              "original=%" PRIu32 " invalid=%" PRIu32,
+              viewer->id, operation ? operation : "unknown", bitmap->number,
+              invalid_dropped);
+    return TRUE;
+  }
+
+  WLog_INFO(TAG,
+            "Viewer %u BitmapUpdate op=%s summary original=%" PRIu32
+            " valid_sent=%" PRIu32 " invalid_dropped=%" PRIu32
+            " chunks_sent=%" PRIu32 " total_payload=%" PRIu64
+            " max_rects=%u max_bytes=%u send_ok=%s",
+            viewer->id, operation ? operation : "unknown", bitmap->number,
+            valid_sent, invalid_dropped, chunks_sent, total_payload_bytes,
+            VIEWER_CLASSIC_MAX_RECTS_PER_SEND,
+            VIEWER_CLASSIC_MAX_BYTES_PER_SEND, ret ? "true" : "false");
+
+  return ret;
 }
 
 /* ---- Classic bitmap queue: deep-copy helpers ---- */
@@ -2210,8 +2578,6 @@ static BOOL viewer_pump_gfx(Viewer *viewer) {
 /* Drain the classic bitmap queue and send updates to the viewer.
  * Called from the viewer thread. Returns TRUE on success, FALSE on
  * fatal error (viewer should be disconnected). */
-#define CLASSIC_GATHER_US 15000 /* 15ms gather window for coalescing */
-
 static BOOL viewer_pump_classic(Viewer *viewer) {
   ViewerClassicEvent *event = NULL;
   UINT32 pumped = 0;
@@ -2231,15 +2597,23 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
   if (!classic_fallback)
     return TRUE;
 
-  /* Hold rdp_update_lock across the entire drain loop so that mstsc
-   * receives all bitmap updates as a continuous stream without rendering
-   * between individual sends. */
+  if (!viewer_update_ready(viewer, "pump-classic"))
+    return TRUE;
+
+  /* Hold rdp_update_lock across the entire drain loop so that mstsc receives
+
+   * * all bitmap updates as a continuous stream without rendering between
+   *
+   * individual sends. */
   if (peer && peer->context && peer->context->update)
     rdp_update_lock(peer->context->update);
 
   for (;;) {
-    /* Option C: Frame coalescing — drain the entire queue and merge
-     * multiple BITMAP_UPDATEs into a single send when possible. */
+    /* Drain one queued backend BITMAP_UPDATE at a time. Coalescing is disabled
+
+     * * for now; large source batches are split into bounded chunks by the
+     * send
+     * helper below. */
     EnterCriticalSection(&viewer->send_lock);
 
     /* Skip if viewer needs full refresh (will resync via refresh path) */
@@ -2263,102 +2637,19 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
     if (!event)
       break;
 
-    /* Option C: Coalesce — if there are more entries in the queue,
-     * merge their rectangles into this event's bitmap before sending. */
-    EnterCriticalSection(&viewer->send_lock);
-    while (viewer->classic_queue_count > 0) {
-      ViewerClassicEvent *next = viewer_classic_dequeue_locked(viewer);
-      UINT32 old_number = 0;
-      BITMAP_DATA *new_rects = NULL;
-      UINT32 j = 0;
+    /* Conservative stability mode: do not coalesce multiple backend updates
 
-      if (!next)
-        break;
+     * * into one BitmapUpdate PDU. Sending one queued batch at a time avoids
 
-      old_number = event->bitmap->number;
-      new_rects = (BITMAP_DATA *)realloc(event->bitmap->rectangles,
-                                         (old_number + next->bitmap->number) *
-                                             sizeof(BITMAP_DATA));
-      if (!new_rects) {
-        /* Coalescing failed — send what we have and queue the rest */
-        viewer_classic_event_free(next);
-        break;
-      }
+     * * oversized or mixed batches while investigating MSTSC 0xd06
+     * disconnects.
+     */
 
-      event->bitmap->rectangles = new_rects;
-      for (j = 0; j < next->bitmap->number; j++) {
-        event->bitmap->rectangles[old_number + j] = next->bitmap->rectangles[j];
-        /* Transfer ownership of bitmapDataStream to avoid double-free */
-        next->bitmap->rectangles[j].bitmapDataStream = NULL;
-        next->bitmap->rectangles[j].bitmapLength = 0;
-      }
-      event->bitmap->number += next->bitmap->number;
-      coalesced++;
+    /* Send the bitmap update, split into bounded chunks if necessary.
+     *
+     * rdp_update_lock is already held across the entire pump loop, so mstsc
 
-      /* Free the next event struct (but not the transferred data) */
-      free(next->bitmap->rectangles);
-      next->bitmap->rectangles = NULL;
-      next->bitmap->number = 0;
-      viewer_classic_event_free(next);
-    }
-    LeaveCriticalSection(&viewer->send_lock);
-
-    /* Gather delay: if we only have 1 bitmap (no coalescing happened),
-     * briefly wait for more backend batches to arrive before sending.
-     * This allows multiple BitmapUpdates to accumulate and be coalesced
-     * into a single larger PDU, eliminating the "rows of boxes" effect
-     * where each small update is rendered individually by mstsc. */
-    if (coalesced == 0 && pumped == 0) {
-      UINT64 gather_start = viewer_perf_now_us();
-      while ((viewer_perf_now_us() - gather_start) < CLASSIC_GATHER_US) {
-        EnterCriticalSection(&viewer->send_lock);
-        if (viewer->classic_queue_count > 0) {
-          ViewerClassicEvent *next = viewer_classic_dequeue_locked(viewer);
-          UINT32 old_number = 0;
-          BITMAP_DATA *new_rects = NULL;
-          UINT32 j = 0;
-
-          LeaveCriticalSection(&viewer->send_lock);
-
-          if (!next)
-            break;
-
-          old_number = event->bitmap->number;
-          new_rects = (BITMAP_DATA *)realloc(
-              event->bitmap->rectangles,
-              (old_number + next->bitmap->number) * sizeof(BITMAP_DATA));
-          if (!new_rects) {
-            viewer_classic_event_free(next);
-            break;
-          }
-
-          event->bitmap->rectangles = new_rects;
-          for (j = 0; j < next->bitmap->number; j++) {
-            event->bitmap->rectangles[old_number + j] =
-                next->bitmap->rectangles[j];
-            next->bitmap->rectangles[j].bitmapDataStream = NULL;
-            next->bitmap->rectangles[j].bitmapLength = 0;
-          }
-          event->bitmap->number += next->bitmap->number;
-          coalesced++;
-
-          free(next->bitmap->rectangles);
-          next->bitmap->rectangles = NULL;
-          next->bitmap->number = 0;
-          viewer_classic_event_free(next);
-
-          /* Items are arriving — keep gathering until the window
-           * expires or the queue is empty */
-          continue;
-        }
-        LeaveCriticalSection(&viewer->send_lock);
-        platform_sleep_ms(1);
-      }
-    }
-
-    /* Send the (possibly coalesced) bitmap update.
-     * rdp_update_lock is already held across the entire pump loop,
-     * so mstsc receives all updates as a continuous stream. */
+     * * receives all updates as a continuous stream. */
     if (!viewer_send_bitmap_update_locked(viewer, event->bitmap)) {
       WLog_WARN(TAG, "Viewer %u pump-classic: send failed", viewer->id);
       viewer_classic_event_free(event);
@@ -2783,6 +3074,9 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
       !viewer->connected || !viewer->activated || !peer->activated)
     return FALSE;
 
+  if (!viewer_update_ready(viewer, "pointer"))
+    return FALSE;
+
   backend_get_pointer_snapshot(backend, &pointer_x, &pointer_y,
                                &pointer_visible, &pointer_type, &active_shape,
                                &position_generation, &shape_generation);
@@ -2874,6 +3168,9 @@ static BOOL viewer_send_surface_bits(Viewer *viewer,
   if (!viewer || !peer || !peer->context || !peer->context->update || !cmd)
     return FALSE;
 
+  if (!viewer_update_ready(viewer, "SurfaceBits"))
+    return FALSE;
+
   /* Option A: Skip on write-block — don't stall the viewer thread */
   if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
     viewer->write_block_events++;
@@ -2902,18 +3199,13 @@ static BOOL viewer_send_surface_bits(Viewer *viewer,
 
 static BOOL viewer_send_bitmap_update(Viewer *viewer,
                                       const BITMAP_UPDATE *bitmap) {
-  BOOL ret = FALSE;
   freerdp_peer *peer = viewer ? viewer->peer : NULL;
-  UINT64 send_started_us = 0;
-  UINT64 send_us = 0;
-  UINT64 payload_bytes = 0;
-  UINT32 i = 0;
 
   if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
     return FALSE;
 
-  for (i = 0; i < bitmap->number; i++)
-    payload_bytes += bitmap->rectangles[i].bitmapLength;
+  if (!viewer_update_ready(viewer, "BitmapUpdate"))
+    return FALSE;
 
   if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
     viewer->write_block_events++;
@@ -2922,24 +3214,8 @@ static BOOL viewer_send_bitmap_update(Viewer *viewer,
     return FALSE;
   }
 
-  send_started_us = viewer_perf_now_us();
-  rdp_update_lock(peer->context->update);
-  IFCALLRET(peer->context->update->BitmapUpdate, ret, peer->context, bitmap);
-  rdp_update_unlock(peer->context->update);
-  send_us = viewer_perf_now_us() - send_started_us;
-  viewer->bitmap_send_time_total_us += send_us;
-  if (send_us > viewer->bitmap_send_time_max_us)
-    viewer->bitmap_send_time_max_us = send_us;
-  if (ret) {
-    viewer->packets_sent++;
-    viewer->bitmap_updates_sent++;
-    viewer->bitmap_rectangles_sent += bitmap->number;
-    viewer->bitmap_payload_bytes_sent += payload_bytes;
-  } else {
-    viewer->packets_failed++;
-    viewer->bitmap_updates_failed++;
-  }
-  return ret;
+  return viewer_send_bitmap_update_chunks(viewer, bitmap, FALSE,
+                                          "BitmapUpdate");
 }
 
 /* Same as viewer_send_bitmap_update but assumes rdp_update_lock is already
@@ -2947,18 +3223,13 @@ static BOOL viewer_send_bitmap_update(Viewer *viewer,
  * acquisition, preventing mstsc from rendering between individual updates. */
 static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
                                              const BITMAP_UPDATE *bitmap) {
-  BOOL ret = FALSE;
   freerdp_peer *peer = viewer ? viewer->peer : NULL;
-  UINT64 send_started_us = 0;
-  UINT64 send_us = 0;
-  UINT64 payload_bytes = 0;
-  UINT32 i = 0;
 
   if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
     return FALSE;
 
-  for (i = 0; i < bitmap->number; i++)
-    payload_bytes += bitmap->rectangles[i].bitmapLength;
+  if (!viewer_update_ready(viewer, "BitmapUpdateLocked"))
+    return FALSE;
 
   if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
     viewer->write_block_events++;
@@ -2967,23 +3238,8 @@ static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
     return FALSE;
   }
 
-  send_started_us = viewer_perf_now_us();
-  /* rdp_update_lock is already held by the caller (viewer_pump_classic) */
-  IFCALLRET(peer->context->update->BitmapUpdate, ret, peer->context, bitmap);
-  send_us = viewer_perf_now_us() - send_started_us;
-  viewer->bitmap_send_time_total_us += send_us;
-  if (send_us > viewer->bitmap_send_time_max_us)
-    viewer->bitmap_send_time_max_us = send_us;
-  if (ret) {
-    viewer->packets_sent++;
-    viewer->bitmap_updates_sent++;
-    viewer->bitmap_rectangles_sent += bitmap->number;
-    viewer->bitmap_payload_bytes_sent += payload_bytes;
-  } else {
-    viewer->packets_failed++;
-    viewer->bitmap_updates_failed++;
-  }
-  return ret;
+  return viewer_send_bitmap_update_chunks(viewer, bitmap, TRUE,
+                                          "BitmapUpdateLocked");
 }
 
 static BOOL viewer_send_frame_marker(Viewer *viewer,
@@ -2992,6 +3248,9 @@ static BOOL viewer_send_frame_marker(Viewer *viewer,
   freerdp_peer *peer = viewer ? viewer->peer : NULL;
 
   if (!viewer || !peer || !peer->context || !peer->context->update || !marker)
+    return FALSE;
+
+  if (!viewer_update_ready(viewer, "SurfaceFrameMarker"))
     return FALSE;
 
   rdp_update_lock(peer->context->update);
@@ -3824,6 +4083,9 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
   char *viewer_user = NULL;
   char *viewer_domain = NULL;
   char *viewer_password = NULL;
+  const char *comparison_user = NULL;
+  const char *comparison_domain = NULL;
+  const char *credential_source = "none";
   BOOL accepted = FALSE;
 
   (void)automatic;
@@ -3833,46 +4095,75 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
     return FALSE;
   }
 
-  WLog_INFO(TAG, "Viewer-side logon: auth_mode=%s",
-            viewer_auth_mode_name(server->security.auth_mode));
+  WLog_INFO(TAG, "Viewer-side logon: auth_mode=%s nla_enabled=%s",
+            viewer_auth_mode_name(server->security.auth_mode),
+            server->security.nla_enabled ? "true" : "false");
 
   if (server->security.auth_mode == VIEWER_AUTH_MODE_NONE)
     return TRUE;
 
-  if (!identity || !server->backend) {
-    WLog_WARN(
-        TAG,
-        "Viewer-side logon rejected: auth_mode=%s missing identity or backend",
-        viewer_auth_mode_name(server->security.auth_mode));
+  if ((server->security.auth_mode == VIEWER_AUTH_MODE_BACKEND_CREDENTIALS) &&
+      !server->backend) {
+    WLog_WARN(TAG,
+              "Viewer-side logon rejected: auth_mode=%s nla_enabled=%s "
+              "missing backend credentials source",
+              viewer_auth_mode_name(server->security.auth_mode),
+              server->security.nla_enabled ? "true" : "false");
     return FALSE;
   }
 
-  viewer_user =
-      viewer_identity_field_to_utf8(identity->User, identity->UserLength);
-  viewer_domain =
-      viewer_identity_field_to_utf8(identity->Domain, identity->DomainLength);
-  viewer_password = viewer_identity_field_to_utf8(identity->Password,
-                                                  identity->PasswordLength);
+  if (viewer_settings_credentials_to_utf8(peer, &viewer_user, &viewer_domain,
+                                          &viewer_password)) {
+    credential_source = "settings";
+  } else if (viewer_identity_credentials_to_utf8(
+                 identity, &viewer_user, &viewer_domain, &viewer_password)) {
+    credential_source = "identity";
+  } else {
+    viewer_user = _strdup("");
+    viewer_domain = _strdup("");
+    viewer_password = _strdup("");
+    credential_source = "none";
+  }
 
   if (!viewer_user || !viewer_domain || !viewer_password) {
-    WLog_WARN(TAG, "Viewer-side logon rejected: failed to decode identity");
+    WLog_WARN(TAG,
+              "Viewer-side logon rejected: failed to read credentials "
+              "auth_mode=%s nla_enabled=%s credential_source=%s",
+              viewer_auth_mode_name(server->security.auth_mode),
+              server->security.nla_enabled ? "true" : "false",
+              credential_source);
     goto out;
   }
 
-  accepted = viewer_credentials_match(server->backend, viewer_user,
-                                      viewer_domain, viewer_password);
+  comparison_user = server->backend->username;
+  comparison_domain = server->backend->domain;
+  accepted = viewer_backend_credentials_match(server->backend, viewer_user,
+                                              viewer_domain, viewer_password);
   if (accepted) {
-    WLog_INFO(TAG, "Viewer-side logon accepted for '%s%s%s' auth_mode=%s",
-              viewer_domain, viewer_domain[0] ? "\\" : "", viewer_user,
-              viewer_auth_mode_name(server->security.auth_mode));
+    WLog_INFO(TAG,
+              "Viewer-side logon accepted auth_mode=%s nla_enabled=%s "
+              "credential_source=%s "
+              "username_present=%s domain_present=%s password_present=%s "
+              "viewer='%s%s%s' comparison_user='%s' comparison_domain='%s'",
+              viewer_auth_mode_name(server->security.auth_mode),
+              server->security.nla_enabled ? "true" : "false",
+              credential_source, viewer_user[0] ? "true" : "false",
+              viewer_domain[0] ? "true" : "false",
+              viewer_password[0] ? "true" : "false", viewer_domain,
+              viewer_domain[0] ? "\\" : "", viewer_user, comparison_user,
+              viewer_comparison_domain_label(comparison_domain));
   } else {
     WLog_WARN(TAG,
               "Viewer-side logon rejected: credentials mismatch auth_mode=%s "
-              "username_present=%s domain_present=%s password_present=%s",
+              "nla_enabled=%s credential_source=%s username_present=%s "
+              "domain_present=%s "
+              "password_present=%s comparison_user='%s' comparison_domain='%s'",
               viewer_auth_mode_name(server->security.auth_mode),
-              viewer_user[0] ? "true" : "false",
+              server->security.nla_enabled ? "true" : "false",
+              credential_source, viewer_user[0] ? "true" : "false",
               viewer_domain[0] ? "true" : "false",
-              viewer_password[0] ? "true" : "false");
+              viewer_password[0] ? "true" : "false", comparison_user,
+              viewer_comparison_domain_label(comparison_domain));
   }
 
 out:
@@ -4347,9 +4638,11 @@ BOOL viewer_server_start(ViewerServer *server) {
                               server->port))
     return FALSE;
 
-  LOG_I("viewer_server", "Viewer server listening on %s:%u auth_mode=%s",
+  LOG_I("viewer_server",
+        "Viewer server listening on %s:%u auth_mode=%s nla_enabled=%s",
         server->bind_address, server->port,
-        viewer_auth_mode_name(server->security.auth_mode));
+        viewer_auth_mode_name(server->security.auth_mode),
+        server->security.nla_enabled ? "true" : "false");
 
   server->running = TRUE;
   while (server->running) {
@@ -4361,6 +4654,15 @@ BOOL viewer_server_start(ViewerServer *server) {
   }
 
   return TRUE;
+}
+
+void viewer_server_set_slow_disconnect(ViewerServer *server, BOOL enabled,
+                                       UINT32 disconnect_after_ms) {
+  if (!server)
+    return;
+
+  server->slow_viewer_disconnect_enabled = enabled;
+  server->slow_viewer_disconnect_ms = disconnect_after_ms;
 }
 
 void viewer_server_stop(ViewerServer *server) {

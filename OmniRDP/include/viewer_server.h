@@ -288,6 +288,9 @@ ViewerServer *viewer_server_init_ex(const char *bind_address, UINT16 port,
 
 BOOL viewer_server_start(ViewerServer *server);
 
+void viewer_server_set_slow_disconnect(ViewerServer *server, BOOL enabled,
+                                       UINT32 disconnect_after_ms);
+
 void viewer_server_stop(ViewerServer *server);
 
 void viewer_server_free(ViewerServer *server);

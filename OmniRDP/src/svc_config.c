@@ -54,10 +54,11 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->viewer_late_join_refresh_deadline_ms = 5000;
   cfg->viewer_late_join_replay_max_frames = 4;
   cfg->viewer_throttle_max_updates_per_sec = 0;
-  cfg->viewer_security_nla_enabled = 0;
+  cfg->viewer_security_nla_enabled = 1;
   cfg->viewer_security_tls_enabled = 1;
   cfg->viewer_security_rdp_enabled = 1;
-  strncpy(cfg->viewer_auth_mode, "none", sizeof(cfg->viewer_auth_mode) - 1);
+  strncpy(cfg->viewer_auth_mode, "backend_credentials",
+          sizeof(cfg->viewer_auth_mode) - 1);
   cfg->viewer_auth_mode[sizeof(cfg->viewer_auth_mode) - 1] = '\0';
   cfg->display_monitor_count = 1;
   cfg->display_monitor_width = 1920;
@@ -101,6 +102,25 @@ static int strcpy_safe(char *dest, size_t dest_size, const char *src) {
   return 0;
 }
 
+static uint16_t svc_config_get_port(const IniFile *ini, const char *section,
+                                    const char *key, uint16_t default_val) {
+  const char *val = ini_get(ini, section, key, NULL);
+  if (!val)
+    return default_val;
+
+  char *end;
+  unsigned long result = strtoul(val, &end, 10);
+  if (end == val || *end != '\0')
+    return default_val;
+  if (result > 65535UL) {
+    fprintf(stderr,
+            "Warning: [%s] %s=%lu is outside valid TCP port range; using %u\n",
+            section, key, result, (unsigned int)default_val);
+    return default_val;
+  }
+  return (uint16_t)result;
+}
+
 /* ── Helper: parse a single instance from an [instance:<name>] section ─ */
 
 static int parse_one_instance(const IniFile *ini, const char *name,
@@ -119,7 +139,7 @@ static int parse_one_instance(const IniFile *ini, const char *name,
   strcpy_safe(inst->backend_hostname, sizeof(inst->backend_hostname),
               ini_get(ini, section, "backend.hostname", ""));
   inst->backend_port =
-      (uint16_t)ini_get_uint(ini, section, "backend.port", inst->backend_port);
+      svc_config_get_port(ini, section, "backend.port", inst->backend_port);
   strcpy_safe(inst->backend_username, sizeof(inst->backend_username),
               ini_get(ini, section, "backend.username", ""));
   strcpy_safe(inst->backend_password, sizeof(inst->backend_password),
@@ -152,7 +172,7 @@ static int parse_one_instance(const IniFile *ini, const char *name,
       inst->viewer_bind_address, sizeof(inst->viewer_bind_address),
       ini_get(ini, section, "viewer.bind_address", inst->viewer_bind_address));
   inst->viewer_port =
-      (uint16_t)ini_get_uint(ini, section, "viewer.port", inst->viewer_port);
+      svc_config_get_port(ini, section, "viewer.port", inst->viewer_port);
   inst->viewer_max_viewers = ini_get_uint(ini, section, "viewer.max_viewers",
                                           inst->viewer_max_viewers);
   strcpy_safe(inst->viewer_cert_path, sizeof(inst->viewer_cert_path),

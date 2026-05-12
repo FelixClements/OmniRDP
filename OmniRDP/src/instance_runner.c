@@ -43,6 +43,153 @@ static char g_viewer_log_path[MAX_PATH] = {0};
 static unsigned int g_viewer_max_size_mb = 10;
 static unsigned int g_viewer_max_files = 5;
 
+static const char *bool_str(int value) { return value ? "true" : "false"; }
+
+static const char *svc_log_level_to_wlog(SvcLogLevel level) {
+  switch (level) {
+  case SVC_LOG_DEBUG:
+    return "DEBUG";
+  case SVC_LOG_WARN:
+    return "WARN";
+  case SVC_LOG_ERROR:
+    return "ERROR";
+  case SVC_LOG_INFO:
+  default:
+    return "INFO";
+  }
+}
+
+static const char *svc_log_level_to_text(SvcLogLevel level) {
+  switch (level) {
+  case SVC_LOG_DEBUG:
+    return "debug";
+  case SVC_LOG_WARN:
+    return "warn";
+  case SVC_LOG_ERROR:
+    return "error";
+  case SVC_LOG_INFO:
+  default:
+    return "info";
+  }
+}
+
+static int instance_key_configured(const SvcConfig *config,
+                                   const InstanceConfig *inst,
+                                   const char *key) {
+  char section[256];
+  if (!config || !config->ini || !inst || !key)
+    return 0;
+  if (snprintf(section, sizeof(section), "instance:%s", inst->name) < 0)
+    return 0;
+  return ini_get(config->ini, section, key, NULL) != NULL;
+}
+
+static void log_effective_instance_config(const SvcConfig *config,
+                                          const InstanceConfig *inst) {
+  LOG_I("instance_runner",
+        "Config effective: enabled=%s backend=%s:%u user=%s domain=%s "
+        "connect_timeout_ms=%u",
+        bool_str(inst->enabled), inst->backend_hostname, inst->backend_port,
+        inst->backend_username, inst->backend_domain,
+        inst->backend_connect_timeout_ms);
+  LOG_I("instance_runner",
+        "Config security: backend nla=%s tls=%s rdp=%s server_auth=%s "
+        "ignore_cert=%s viewer nla=%s tls=%s rdp=%s auth=%s",
+        bool_str(inst->backend_security_nla_enabled),
+        bool_str(inst->backend_security_tls_enabled),
+        bool_str(inst->backend_security_rdp_enabled),
+        bool_str(inst->backend_security_server_authentication),
+        bool_str(inst->backend_security_ignore_certificate),
+        bool_str(inst->viewer_security_nla_enabled),
+        bool_str(inst->viewer_security_tls_enabled),
+        bool_str(inst->viewer_security_rdp_enabled), inst->viewer_auth_mode);
+  LOG_I("instance_runner",
+        "Config viewer: bind=%s:%u cert=%s key=%s max_viewers=%u "
+        "slow_disconnect=%s/%ums slow_lag_interval_ms=%u throttle_ups=%u",
+        inst->viewer_bind_address, inst->viewer_port,
+        inst->viewer_cert_path[0] ? "set" : "unset",
+        inst->viewer_key_path[0] ? "set" : "unset", inst->viewer_max_viewers,
+        bool_str(inst->viewer_slow_disconnect_enabled),
+        inst->viewer_slow_disconnect_after_ms,
+        inst->viewer_slow_lag_interval_ms,
+        inst->viewer_throttle_max_updates_per_sec);
+  LOG_I("instance_runner",
+        "Config reconnect: enabled=%s max_attempts=%u initial_delay_ms=%u "
+        "max_delay_ms=%u backoff=%.2f",
+        bool_str(inst->reconnect_enabled), inst->reconnect_max_attempts,
+        inst->reconnect_initial_delay_ms, inst->reconnect_max_delay_ms,
+        inst->reconnect_backoff_multiplier);
+  LOG_I("instance_runner",
+        "Config display/codecs: monitors=%u size=%ux%u depth=%u nscodec=%s "
+        "remote_fx=%s gfx=%s h264=%s avc444=%s avc444v2=%s frame_ack=%u",
+        inst->display_monitor_count, inst->display_monitor_width,
+        inst->display_monitor_height, inst->display_color_depth,
+        bool_str(inst->codec_nscodec), bool_str(inst->codec_remote_fx),
+        bool_str(inst->codec_graphics_pipeline), bool_str(inst->codec_h264),
+        bool_str(inst->codec_avc444), bool_str(inst->codec_avc444v2),
+        inst->codec_frame_acknowledge);
+
+  if (inst->viewer_max_viewers != MAX_VIEWERS ||
+      instance_key_configured(config, inst, "viewer.max_viewers"))
+    LOG_W("instance_runner",
+          "viewer.max_viewers is reserved; runtime fixed maximum is %u",
+          MAX_VIEWERS);
+  if (inst->viewer_slow_lag_interval_ms != 5000 ||
+      instance_key_configured(config, inst, "viewer.slow_lag_interval_ms"))
+    LOG_W("instance_runner",
+          "viewer.slow_lag_interval_ms is currently reserved/no-op");
+  if (inst->viewer_late_join_timeout_ms != 15000 ||
+      inst->viewer_late_join_refresh_deadline_ms != 5000 ||
+      inst->viewer_late_join_replay_max_frames != 4 ||
+      instance_key_configured(config, inst, "viewer.late_join_timeout_ms") ||
+      instance_key_configured(config, inst,
+                              "viewer.late_join_refresh_deadline_ms") ||
+      instance_key_configured(config, inst,
+                              "viewer.late_join_replay_max_frames"))
+    LOG_W("instance_runner",
+          "viewer late-join tunables are currently reserved/no-op");
+  if (inst->viewer_throttle_max_updates_per_sec != 0 ||
+      instance_key_configured(config, inst,
+                              "viewer.throttle_max_updates_per_sec"))
+    LOG_W("instance_runner",
+          "viewer.throttle_max_updates_per_sec is currently reserved/no-op");
+  if (inst->display_monitor_width != 1920 ||
+      inst->display_monitor_height != 1080 || inst->display_color_depth != 32 ||
+      instance_key_configured(config, inst, "display.monitor_width") ||
+      instance_key_configured(config, inst, "display.monitor_height") ||
+      instance_key_configured(config, inst, "display.color_depth"))
+    LOG_W("instance_runner",
+          "display width/height/color_depth are currently reserved/no-op; "
+          "backend negotiated geometry is used");
+  if (inst->codec_nscodec != 1 || inst->codec_remote_fx != 1 ||
+      inst->codec_graphics_pipeline != 0 || inst->codec_h264 != 0 ||
+      inst->codec_avc444 != 0 || inst->codec_avc444v2 != 0 ||
+      inst->codec_frame_acknowledge != 4 ||
+      instance_key_configured(config, inst, "codec.nscodec") ||
+      instance_key_configured(config, inst, "codec.remote_fx") ||
+      instance_key_configured(config, inst, "codec.graphics_pipeline") ||
+      instance_key_configured(config, inst, "codec.h264") ||
+      instance_key_configured(config, inst, "codec.avc444") ||
+      instance_key_configured(config, inst, "codec.avc444v2") ||
+      instance_key_configured(config, inst, "codec.frame_acknowledge"))
+    LOG_W("instance_runner", "codec toggles are currently reserved/no-op");
+  if (strcmp(config->service.pipe_name, "OmniRDP_ServicePipe") != 0)
+    LOG_W("instance_runner",
+          "service.pipe_name custom value is currently reserved/no-op for "
+          "instance heartbeat/status pipes");
+  if (strcmp(inst->security_tls_min_version, "1.2") != 0 ||
+      instance_key_configured(config, inst, "security.tls_min_version"))
+    LOG_W("instance_runner",
+          "security.tls_min_version is currently reserved/no-op");
+  if (inst->backend_security_server_authentication ||
+      instance_key_configured(config, inst,
+                              "backend.security.server_authentication") ||
+      instance_key_configured(config, inst, "security.server_authentication"))
+    LOG_W("instance_runner",
+          "backend server_authentication policy is currently reserved/no-op; "
+          "certificate ignore setting is applied");
+}
+
 /**
  * @brief WLog callback — handles every FreeRDP log message.
  *
@@ -126,6 +273,23 @@ static void instance_shutdown_handler(void) {
     viewer_server_stop(g_server);
 }
 
+#ifdef _WIN32
+static DWORD WINAPI stop_event_thread(LPVOID param) {
+  HANDLE hStopEvent = (HANDLE)param;
+  DWORD result = WaitForSingleObject(hStopEvent, INFINITE);
+  if (result == WAIT_OBJECT_0) {
+    LOG_I("instance_runner", "Stop event signaled; shutting down instance");
+    instance_shutdown_handler();
+  } else {
+    LOG_W("instance_runner", "Stop event wait failed (result=%lu, err=%lu)",
+          result, GetLastError());
+  }
+  if (hStopEvent)
+    CloseHandle(hStopEvent);
+  return 0;
+}
+#endif
+
 static DWORD WINAPI instance_server_thread(LPVOID arg) {
   ViewerServer *server = (ViewerServer *)arg;
   viewer_server_start(server);
@@ -172,6 +336,7 @@ static int read_password_from_pipe(SIZE_T handle_value, char *password_buf,
 typedef struct {
   const char *instance_name;
   SIZE_T secrets_handle;
+  SIZE_T stop_event_handle;
   const char *config_path;
 } InstanceRunnerArgs;
 
@@ -187,6 +352,8 @@ static int parse_instance_args(int argc, char *argv[],
     } else if (strcmp(argv[i], "--secrets-handle") == 0 && i + 1 < argc) {
       /* Parse handle as pointer-sized value */
       args->secrets_handle = (SIZE_T)_strtoui64(argv[++i], NULL, 10);
+    } else if (strcmp(argv[i], "--stop-event") == 0 && i + 1 < argc) {
+      args->stop_event_handle = (SIZE_T)_strtoui64(argv[++i], NULL, 10);
     } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
       args->config_path = argv[++i];
     } else {
@@ -227,7 +394,7 @@ int instance_runner_main(int argc, char *argv[]) {
   if (parse_instance_args(argc, argv, &args) != 0) {
     fprintf(stderr,
             "Usage: OmniRDP.exe --instance <name> --secrets-handle <handle> "
-            "[--config <path>]\n");
+            "[--stop-event <handle>] [--config <path>]\n");
     return 1;
   }
 
@@ -245,7 +412,6 @@ int instance_runner_main(int argc, char *argv[]) {
       memcpy(exeDir, exePath, dirLen);
       exeDir[dirLen] = '\0';
       SetCurrentDirectoryA(exeDir);
-      LOG_I("instance_runner", "Working directory set to: %s", exeDir);
     }
   }
 
@@ -268,37 +434,19 @@ int instance_runner_main(int argc, char *argv[]) {
     return 1;
   }
 
-  if (!inst->enabled) {
-    LOG_W("instance_runner", "Instance '%s' is disabled", args.instance_name);
-    svc_config_free(config);
-    return 1;
-  }
-
-  /* Read password from pipe */
-  char password[MAX_PASSWORD_LEN];
-  if (read_password_from_pipe(args.secrets_handle, password,
-                              sizeof(password)) != 0) {
-    svc_config_free(config);
-    return 1;
-  }
-
-  /* Setup signal handling */
-  platform_signal_init(instance_shutdown_handler);
-
-  LOG_I("instance_runner", "Backend target: %s:%u, Viewer: %s:%u, Monitors: %u",
-        inst->backend_hostname, inst->backend_port, inst->viewer_bind_address,
-        inst->viewer_port, inst->display_monitor_count);
-
   /* Initialize logging */
   {
     const char *log_dir = config->service.log_dir[0] != '\0'
                               ? config->service.log_dir
                               : "C:\\ProgramData\\OmniRDP\\logs";
     char instance_log_dir[512];
+    SvcLogLevel log_level = SVC_LOG_INFO;
+    if (svc_log_level_from_string(config->service.log_level, &log_level) != 0)
+      log_level = SVC_LOG_INFO;
+
     snprintf(instance_log_dir, sizeof(instance_log_dir), "%s\\%s", log_dir,
              args.instance_name);
-    svc_log_init(instance_log_dir, SVC_LOG_DEBUG,
-                 config->service.log_max_size_mb,
+    svc_log_init(instance_log_dir, log_level, config->service.log_max_size_mb,
                  config->service.log_max_files);
     LOG_I("instance_runner", "Instance '%s' starting (config=%s)",
           args.instance_name, args.config_path);
@@ -309,8 +457,7 @@ int instance_runner_main(int argc, char *argv[]) {
      * WLOG_PREFIX env var must be set before WLog_GetRoot() is called. */
     _putenv_s("WLOG_PREFIX", "[%hr:%mi:%se:%ml] [%pid:%tid] [%lv][%mn] - ");
 
-    /* Configure WLog with desired level (INFO) before root init */
-    _putenv_s("WLOG_LEVEL", "INFO");
+    _putenv_s("WLOG_LEVEL", svc_log_level_to_wlog(log_level));
 
     /* Force WLog root initialization */
     wLog *root = WLog_GetRoot();
@@ -330,9 +477,47 @@ int instance_runner_main(int argc, char *argv[]) {
     g_viewer_logfile = fopen(g_viewer_log_path, "a");
     g_viewer_max_size_mb = config->service.log_max_size_mb;
     g_viewer_max_files = config->service.log_max_files;
+    LOG_I("instance_runner",
+          "Effective logging: level=%s log_dir=%s max_size_mb=%u max_files=%u",
+          svc_log_level_to_text(log_level), instance_log_dir,
+          config->service.log_max_size_mb, config->service.log_max_files);
     LOG_I("instance_runner", "Viewer log (CallbackAppender) -> %s",
           g_viewer_log_path);
   }
+
+  log_effective_instance_config(config, inst);
+
+  if (!inst->enabled) {
+    LOG_W("instance_runner", "Instance '%s' is disabled", args.instance_name);
+    svc_config_free(config);
+    return 1;
+  }
+
+  /* Read password from pipe */
+  char password[MAX_PASSWORD_LEN];
+  if (read_password_from_pipe(args.secrets_handle, password,
+                              sizeof(password)) != 0) {
+    svc_config_free(config);
+    return 1;
+  }
+
+  /* Setup signal handling */
+  platform_signal_init(instance_shutdown_handler);
+
+#ifdef _WIN32
+  if (args.stop_event_handle != 0) {
+    HANDLE hStopThread = CreateThread(NULL, 0, stop_event_thread,
+                                      (LPVOID)args.stop_event_handle, 0, NULL);
+    if (hStopThread) {
+      CloseHandle(hStopThread);
+      LOG_I("instance_runner", "Stop event watcher started");
+    } else {
+      LOG_W("instance_runner", "Failed to create stop event watcher (err=%lu)",
+            GetLastError());
+      CloseHandle((HANDLE)args.stop_event_handle);
+    }
+  }
+#endif
 
   /* Initialize backend */
   BackendClient *client = backend_init();
@@ -379,6 +564,21 @@ int instance_runner_main(int argc, char *argv[]) {
   LOG_I("instance_runner", "Connected to backend %s:%u successfully",
         inst->backend_hostname, inst->backend_port);
 
+  if (!g_running) {
+    LOG_I("instance_runner", "Stop requested during startup; exiting");
+    backend_disconnect(client);
+    backend_free(client);
+    svc_config_free(config);
+    if (g_viewer_logfile) {
+      fclose(g_viewer_logfile);
+      g_viewer_logfile = NULL;
+    }
+#ifdef _WIN32
+    WSACleanup();
+#endif
+    return 0;
+  }
+
   /* Initialize viewer server */
   ViewerAuthMode viewer_auth_mode = VIEWER_AUTH_MODE_NONE;
   if (_stricmp(inst->viewer_auth_mode, "backend_credentials") == 0)
@@ -398,10 +598,9 @@ int instance_runner_main(int argc, char *argv[]) {
   if ((viewer_auth_mode == VIEWER_AUTH_MODE_BACKEND_CREDENTIALS) &&
       !inst->viewer_security_nla_enabled) {
     LOG_E("instance_runner",
-          "Invalid viewer auth configuration for instance '%s': "
-          "viewer.auth.mode=backend_credentials requires "
-          "viewer.security.nla_enabled=true.",
-          args.instance_name);
+          "Invalid viewer auth configuration: viewer.auth.mode=%s requires "
+          "viewer.security.nla_enabled=true for instance '%s'.",
+          inst->viewer_auth_mode, args.instance_name);
     backend_disconnect(client);
     backend_free(client);
     svc_config_free(config);
@@ -422,6 +621,13 @@ int instance_runner_main(int argc, char *argv[]) {
     svc_config_free(config);
     return 1;
   }
+  viewer_server_set_slow_disconnect(
+      server, inst->viewer_slow_disconnect_enabled ? TRUE : FALSE,
+      (UINT32)inst->viewer_slow_disconnect_after_ms);
+  LOG_I("instance_runner",
+        "Applied viewer slow disconnect: enabled=%s after_ms=%u",
+        bool_str(inst->viewer_slow_disconnect_enabled),
+        inst->viewer_slow_disconnect_after_ms);
 
   /* Register FreeRDP WTS API */
   {

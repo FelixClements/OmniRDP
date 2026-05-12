@@ -47,6 +47,8 @@ typedef enum {
 int svc_log_init(const char *log_dir, SvcLogLevel log_level,
                  unsigned int max_size_mb, unsigned int max_files);
 
+int svc_log_level_from_string(const char *str, SvcLogLevel *out);
+
 /**
  * @brief Write a log message.
  *
