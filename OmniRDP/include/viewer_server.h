@@ -209,6 +209,9 @@ typedef struct {
   HANDLE thread;
   BOOL connected;
   BOOL activated;
+  BOOL counted_in_viewer_count;
+  BOOL cleanup_in_progress;
+  UINT32 publish_ref_count;
   BOOL needs_full_refresh;
   BOOL stop_requested;
   UINT32 id;

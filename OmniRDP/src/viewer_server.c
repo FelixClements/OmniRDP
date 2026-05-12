@@ -2988,21 +2988,165 @@ static void viewer_join_thread(Viewer *viewer) {
   viewer->thread = NULL;
 }
 
-static void viewer_cleanup_slot(Viewer *viewer) {
+static void viewer_cleanup_slot_finish_locked(Viewer *viewer) {
   if (!viewer)
     return;
 
-  viewer_send_state_uninit(viewer);
-  viewer_graphics_context_uninit(&viewer->gfx);
   viewer->peer = NULL;
   viewer->context = NULL;
   viewer->connected = FALSE;
   viewer->activated = FALSE;
+  viewer->counted_in_viewer_count = FALSE;
+  viewer->cleanup_in_progress = FALSE;
+  viewer->publish_ref_count = 0;
   viewer->needs_full_refresh = FALSE;
   viewer->stop_requested = FALSE;
   viewer->full_refresh_deadline_ts = 0;
   viewer->last_pointer_position_generation = 0;
   viewer->last_pointer_shape_generation = 0;
+}
+
+static void viewer_wait_for_publish_refs(ViewerServer *server, Viewer *viewer) {
+  for (;;) {
+    UINT32 publish_ref_count = 0;
+
+    if (!server || !viewer)
+      return;
+
+    EnterCriticalSection(&server->lock);
+    publish_ref_count = viewer->publish_ref_count;
+    LeaveCriticalSection(&server->lock);
+
+    if (publish_ref_count == 0)
+      return;
+
+    platform_sleep_ms(1);
+  }
+}
+
+static void viewer_cleanup_slot(ViewerServer *server, Viewer *viewer) {
+  if (!viewer)
+    return;
+
+  viewer_wait_for_publish_refs(server, viewer);
+
+  viewer_send_state_uninit(viewer);
+  viewer_graphics_context_uninit(&viewer->gfx);
+
+  if (server) {
+    EnterCriticalSection(&server->lock);
+    viewer_cleanup_slot_finish_locked(viewer);
+    LeaveCriticalSection(&server->lock);
+  } else
+    viewer_cleanup_slot_finish_locked(viewer);
+}
+
+static void viewer_release_count_locked(ViewerServer *server, Viewer *viewer,
+                                        const char *reason) {
+  if (!server || !viewer)
+    return;
+
+  viewer_server_clear_input_owner_locked(
+      server, viewer->id, "disconnected, input ownership cleared");
+  viewer->connected = FALSE;
+  viewer->activated = FALSE;
+  viewer->needs_full_refresh = FALSE;
+  viewer->full_refresh_deadline_ts = 0;
+  viewer->stop_requested = TRUE;
+
+  if (!viewer->counted_in_viewer_count)
+    return;
+
+  if (server->viewer_count > 0)
+    server->viewer_count--;
+  else
+    WLog_WARN(TAG, "Viewer %u release requested with viewer_count already 0",
+              viewer->id);
+  viewer->counted_in_viewer_count = FALSE;
+
+  if (reason)
+    WLog_INFO(TAG, "Viewer %u released from viewer_count (%s); count=%u",
+              viewer->id, reason, server->viewer_count);
+}
+
+static BOOL viewer_matches_peer_context_locked(const Viewer *viewer,
+                                               freerdp_peer *peer,
+                                               rdpContext *context) {
+  if (!viewer || !peer || (viewer->peer != peer))
+    return FALSE;
+
+  return !context || (viewer->context == context);
+}
+
+static BOOL viewer_try_begin_cleanup_locked(Viewer *viewer, freerdp_peer *peer,
+                                            rdpContext *context,
+                                            BOOL require_thread_stopped,
+                                            BOOL close_thread_handle) {
+  if (!viewer_matches_peer_context_locked(viewer, peer, context) ||
+      viewer->cleanup_in_progress)
+    return FALSE;
+
+  if (viewer->thread) {
+    if (require_thread_stopped) {
+      if (WaitForSingleObject(viewer->thread, 0) != WAIT_OBJECT_0)
+        return FALSE;
+      close_thread_handle = TRUE;
+    }
+
+    if (close_thread_handle) {
+      CloseHandle(viewer->thread);
+      viewer->thread = NULL;
+    }
+  }
+
+  viewer->cleanup_in_progress = TRUE;
+  return TRUE;
+}
+
+static BOOL viewer_try_add_publish_ref_locked(Viewer *viewer) {
+  if (!viewer || !viewer->peer || !viewer->connected || !viewer->activated ||
+      viewer->cleanup_in_progress)
+    return FALSE;
+
+  viewer->publish_ref_count++;
+  return TRUE;
+}
+
+static BOOL viewer_try_add_layout_ref_locked(Viewer *viewer) {
+  if (!viewer || !viewer->peer || !viewer->connected ||
+      viewer->cleanup_in_progress || !viewer->gfx.initialized)
+    return FALSE;
+
+  viewer->publish_ref_count++;
+  return TRUE;
+}
+
+static void viewer_release_publish_ref(ViewerServer *server, Viewer *viewer) {
+  if (!server || !viewer)
+    return;
+
+  EnterCriticalSection(&server->lock);
+  if (viewer->publish_ref_count > 0)
+    viewer->publish_ref_count--;
+  else
+    WLog_WARN(TAG, "Viewer %u publish ref release requested with count 0",
+              viewer->id);
+  LeaveCriticalSection(&server->lock);
+}
+
+static BOOL viewer_slot_available_locked(Viewer *viewer) {
+  if (!viewer || viewer->peer || viewer->context || viewer->cleanup_in_progress)
+    return FALSE;
+
+  if (viewer->thread) {
+    if (WaitForSingleObject(viewer->thread, 0) != WAIT_OBJECT_0)
+      return FALSE;
+
+    CloseHandle(viewer->thread);
+    viewer->thread = NULL;
+  }
+
+  return TRUE;
 }
 
 static void viewer_pointer_shape_entry_reset(PointerShapeEntry *shape) {
@@ -3219,8 +3363,11 @@ static BOOL viewer_send_bitmap_update(Viewer *viewer,
 }
 
 /* Same as viewer_send_bitmap_update but assumes rdp_update_lock is already
- * held. Used by viewer_pump_classic to batch multiple sends under a single lock
- * acquisition, preventing mstsc from rendering between individual updates. */
+ *
+ * held. Used by viewer_pump_classic to batch multiple sends under a single
+ * lock
+ * acquisition, preventing mstsc from rendering between individual
+ * updates. */
 static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
                                              const BITMAP_UPDATE *bitmap) {
   freerdp_peer *peer = viewer ? viewer->peer : NULL;
@@ -3667,12 +3814,18 @@ static BOOL viewer_gfx_step_join(ViewerServer *server, Viewer *viewer,
             VIEWER_JOIN_STRATEGY_WAIT_NEXT_SAFE_FRAME,
             viewer->gfx.join_start_ts, now, FULL_REFRESH_TIMEOUT_MS, FALSE)) {
       /* No replay-safe frame arrived within the timeout window.
-       * The backend refresh mechanism (RefreshRect) is a classic-RDP
-       * path that does not work on GFX-only backends. Instead of
-       * waiting for a backend refresh that will never complete,
-       * bootstrap directly to LIVE via surface preamble. The viewer
-       * receives a blank screen initially but will start receiving
-       * frames as soon as the desktop changes. */
+       * The
+       * backend refresh mechanism (RefreshRect) is a classic-RDP
+       * path
+       * that does not work on GFX-only backends. Instead of
+       * waiting
+       * for a backend refresh that will never complete,
+       * bootstrap
+       * directly to LIVE via surface preamble. The viewer
+       * receives a
+       * blank screen initially but will start receiving
+       * frames as soon
+       * as the desktop changes. */
       if (refresh_generation == 0)
         return viewer_gfx_bootstrap_direct_live(
             server, viewer, now, "no replay baseline after timeout");
@@ -3780,6 +3933,8 @@ static BOOL on_keyboard_event(rdpInput *input, UINT16 flags, UINT8 code) {
 static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
   Viewer *viewer = (Viewer *)arg;
   freerdp_peer *peer = viewer->peer;
+  rdpContext *context = viewer->context;
+  BOOL cleanup_slot = FALSE;
   HANDLE gfx_event = NULL;
   DWORD wait_timeout_ms = INFINITE;
 
@@ -3849,11 +4004,16 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
       wait_timeout_ms = 50;
     else {
       /* Use a short periodic timeout even when LIVE so that the GFX
+       *
        * pump runs regularly to drain queued frame events. Without this,
-       * the viewer thread blocks indefinitely waiting for mstsc input
+ * the
+       * viewer thread blocks indefinitely waiting for mstsc input
+       *
        * (keyboard/mouse) and queued GFX frames never get sent. A 50ms
+       *
        * timeout matches the join-state polling interval and keeps frame
-       * delivery responsive. */
+
+       * * delivery responsive. */
       wait_timeout_ms = 50;
     }
     LeaveCriticalSection(&viewer->gfx.lock);
@@ -3868,6 +4028,7 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
       }
 
       /* Add classic_event to the wait set so the viewer thread wakes
+       *
        * immediately when a bitmap update is enqueued (Option B). */
       if (viewer->classic_event && (wait_count < MAXIMUM_WAIT_OBJECTS)) {
         wait_objects[wait_count] = viewer->classic_event;
@@ -3904,8 +4065,10 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
         WTSVirtualChannelManagerIsChannelJoined(viewer->gfx.vcm,
                                                 DRDYNVC_SVC_CHANNEL_NAME)) {
       /* Call CheckFileDescriptor every iteration to drain the VCM message
-       * queue and trigger drdynvc auto-initialization.  This matches the
-       * pattern used by FreeRDP shadow and by the proxy server. */
+
+       * * queue and trigger drdynvc auto-initialization.  This matches the
+
+       * * pattern used by FreeRDP shadow and by the proxy server. */
       if (!WTSVirtualChannelManagerCheckFileDescriptor(viewer->gfx.vcm)) {
         LeaveCriticalSection(&viewer->gfx.lock);
         break;
@@ -3970,8 +4133,11 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
       break;
 
     /* viewer_forward_pointer disabled: cursor position forwarding to viewers
-     * without input lock is not reliable and causes complexity. Viewer cursor
-     * position comes from the RDP server via on_pointer_position callbacks. */
+
+     * * without input lock is not reliable and causes complexity. Viewer
+     * cursor
+     * position comes from the RDP server via on_pointer_position
+     * callbacks. */
     /* (void)viewer_forward_pointer(viewer, FALSE); */
 
     if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer) &&
@@ -3983,19 +4149,27 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
 
   if (g_viewer_server) {
     EnterCriticalSection(&g_viewer_server->lock);
-    viewer_server_clear_input_owner_locked(
-        g_viewer_server, viewer->id, "disconnected, input ownership cleared");
-    viewer->connected = FALSE;
-    viewer->activated = FALSE;
-    viewer->needs_full_refresh = FALSE;
-    viewer->full_refresh_deadline_ts = 0;
-    viewer->peer = NULL;
-    viewer->context = NULL;
+    viewer_release_count_locked(g_viewer_server, viewer,
+                                "viewer peer handler disconnect");
     LeaveCriticalSection(&g_viewer_server->lock);
   }
 
   LOG_I("viewer_server", "Viewer peer disconnected (peer=%p)", (void *)peer);
   peer->Disconnect(peer);
+
+  {
+    ViewerServer *server = g_viewer_server;
+    if (server) {
+      EnterCriticalSection(&server->lock);
+      cleanup_slot =
+          viewer_try_begin_cleanup_locked(viewer, peer, context, FALSE, FALSE);
+      LeaveCriticalSection(&server->lock);
+    }
+
+    if (cleanup_slot)
+      viewer_cleanup_slot(server, viewer);
+  }
+
   return 0;
 }
 
@@ -4018,7 +4192,9 @@ static BOOL peer_post_connect(freerdp_peer *peer) {
             gfx_enabled);
 
   /* Force-disable GFX if the backend doesn't use it. The viewer-side
+   *
    * setting may not propagate correctly through FreeRDP's server
+   *
    * initialization. */
   if (g_viewer_server && g_viewer_server->backend &&
       g_viewer_server->backend->context &&
@@ -4203,8 +4379,10 @@ static BOOL peer_activate(freerdp_peer *peer) {
     viewer_gfx_finish_late_join_locked(viewer,
                                        "peer activated on classic path");
     /* Classic path doesn't need a full refresh gate. SurfaceBits
-     * arrive continuously from the backend — just start receiving
-     * them immediately. */
+     * arrive
+     * continuously from the backend — just start receiving
+     * them
+     * immediately. */
     viewer->needs_full_refresh = FALSE;
     viewer->full_refresh_deadline_ts = 0;
   }
@@ -4246,13 +4424,16 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
 
   EnterCriticalSection(&server->lock);
   for (int i = 0; i < MAX_VIEWERS; i++) {
-    if (!server->viewers[i].peer) {
+    if (viewer_slot_available_locked(&server->viewers[i])) {
       viewer = &server->viewers[i];
       viewer->id = i + 1;
       viewer->peer = peer;
       viewer->context = context;
       viewer->connected = FALSE;
       viewer->activated = FALSE;
+      viewer->counted_in_viewer_count = FALSE;
+      viewer->cleanup_in_progress = FALSE;
+      viewer->publish_ref_count = 0;
       viewer->needs_full_refresh = FALSE;
       viewer->stop_requested = FALSE;
       viewer->connect_time = time(NULL);
@@ -4260,6 +4441,9 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
       if (!viewer_send_state_init(viewer)) {
         viewer->peer = NULL;
         viewer->context = NULL;
+        viewer->counted_in_viewer_count = FALSE;
+        viewer->cleanup_in_progress = FALSE;
+        viewer->publish_ref_count = 0;
         viewer = NULL;
         break;
       }
@@ -4268,6 +4452,7 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
       /* VCM created later in peer_post_connect when context->rdp is ready */
 
       server->viewer_count++;
+      viewer->counted_in_viewer_count = TRUE;
       break;
     }
   }
@@ -4277,53 +4462,81 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
 
 static void peer_context_free(freerdp_peer *peer, rdpContext *context) {
   ViewerServer *server = g_viewer_server;
-  (void)context;
+  Viewer *matched_viewer = NULL;
+  Viewer *cleanup_viewer = NULL;
 
   if (!server)
     return;
 
   EnterCriticalSection(&server->lock);
   for (int i = 0; i < MAX_VIEWERS; i++) {
-    if (server->viewers[i].peer == peer) {
-      viewer_server_clear_input_owner_locked(
-          server, server->viewers[i].id,
-          "disconnected, input ownership cleared");
-      server->viewers[i].stop_requested = TRUE;
-      if (server->viewer_count > 0)
-        server->viewer_count--;
-      if (!server->viewers[i].thread ||
-          WaitForSingleObject(server->viewers[i].thread, 0) == WAIT_OBJECT_0)
-        viewer_cleanup_slot(&server->viewers[i]);
+    if (viewer_matches_peer_context_locked(&server->viewers[i], peer,
+                                           context)) {
+      viewer_release_count_locked(server, &server->viewers[i],
+                                  "FreeRDP context free");
+      matched_viewer = &server->viewers[i];
       break;
     }
   }
   LeaveCriticalSection(&server->lock);
+
+  if (!matched_viewer)
+    return;
+
+  viewer_wait_for_publish_refs(server, matched_viewer);
+
+  EnterCriticalSection(&server->lock);
+  if (viewer_try_begin_cleanup_locked(matched_viewer, peer, context, TRUE,
+                                      FALSE))
+    cleanup_viewer = matched_viewer;
+  LeaveCriticalSection(&server->lock);
+
+  if (cleanup_viewer)
+    viewer_cleanup_slot(server, cleanup_viewer);
 }
 
 /**
  * Re-apply server-side settings that were overwritten by GCC negotiation.
- *
+
+ * *
  * When a viewer client connects, FreeRDP's gcc_read_client_core_data()
+ *
  * overwrites our server-side settings with the CLIENT's values:
- *   - DesktopWidth/Height → client's screen size (e.g. 1920×1080)
- *   - MonitorCount → client's monitor count (e.g. 1)
- *   - MonitorDefArray → client's monitor layout (e.g. single 1920×1080)
- *   - SupportMonitorLayoutPdu → AND'd with client's earlyCapabilityFlags
- *   - SupportDynamicTimeZone → AND'd with client's earlyCapabilityFlags
+ *   -
+ * DesktopWidth/Height → client's screen size (e.g. 1920×1080)
+ *   -
+ * MonitorCount → client's monitor count (e.g. 1)
+ *   - MonitorDefArray →
+ * client's monitor layout (e.g. single 1920×1080)
+ *   -
+ * SupportMonitorLayoutPdu → AND'd with client's earlyCapabilityFlags
+ *   -
+ * SupportDynamicTimeZone → AND'd with client's earlyCapabilityFlags
  *
- * We are the SERVER — we must restore our own desktop dimensions and
- * monitor layout so that:
- *   1. The Demand Active PDU advertises the correct desktop size (3840×1080)
- *   2. The Monitor Layout PDU sends the correct 2-monitor layout
- *   3. SupportDynamicTimeZone=TRUE so timezone data is consumed (fixes TPKT
+ * We
+ * are the SERVER — we must restore our own desktop dimensions and
+ * monitor
+ * layout so that:
+ *   1. The Demand Active PDU advertises the correct desktop
+ * size (3840×1080)
+ *   2. The Monitor Layout PDU sends the correct 2-monitor
+ * layout
+ *   3. SupportDynamicTimeZone=TRUE so timezone data is consumed
+ * (fixes TPKT
  * error)
- *   4. SupportMonitorLayoutPdu=TRUE so the Monitor Layout PDU is sent
+ *   4. SupportMonitorLayoutPdu=TRUE so the Monitor
+ * Layout PDU is sent
  *
- * This callback fires at CONNECTION_STATE_SECURE_SETTINGS_EXCHANGE,
- * which is AFTER GCC negotiation but BEFORE:
+ * This callback fires at
+ * CONNECTION_STATE_SECURE_SETTINGS_EXCHANGE,
+ * which is AFTER GCC negotiation
+ * but BEFORE:
  *   - rdp_recv_client_info() (needs SupportDynamicTimeZone)
- *   - CAPABILITIES_EXCHANGE_DEMAND_ACTIVE (needs DesktopWidth/Height)
- *   - CAPABILITIES_EXCHANGE_MONITOR_LAYOUT (needs MonitorCount/DefArray +
+ *
+ * - CAPABILITIES_EXCHANGE_DEMAND_ACTIVE (needs DesktopWidth/Height)
+ *   -
+ * CAPABILITIES_EXCHANGE_MONITOR_LAYOUT (needs MonitorCount/DefArray +
+ *
  * SupportMonitorLayoutPdu)
  */
 static BOOL peer_reached_state(freerdp_peer *peer, CONNECTION_STATE state) {
@@ -4455,9 +4668,12 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
     freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
     /* SurfaceFrameMarkerEnabled must match codec availability. When
+     *
      * codecs are disabled, sending SURFACE_FRAME_MARKER PDUs to the
+     *
      * client causes a protocol error (0xd06) because the client
-     * hasn't negotiated the Surface Bits Capability Set. */
+     * hasn't
+     * negotiated the Surface Bits Capability Set. */
     freerdp_settings_set_bool(settings, FreeRDP_SurfaceFrameMarkerEnabled,
                               FALSE);
     freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, desktop_width);
@@ -4474,7 +4690,9 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
         viewer_auth_mode_name(server->security.auth_mode));
 
     /* Enable Monitor Layout PDU so the server advertises multi-monitor
+     *
      * layout to connecting viewers. Without this, the server only sends
+     *
      * a single-monitor desktop even if DesktopWidth > 1920. */
     freerdp_settings_set_bool(settings, FreeRDP_SupportMonitorLayoutPdu, TRUE);
 
@@ -4485,8 +4703,11 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
         desktop_width, desktop_width > 1920 ? "TRUE" : "FALSE");
 
     /* Configure multi-monitor layout for viewer if backend uses more
+     *
      * than one monitor. On the server side, we must set MonitorCount
-     * and MonitorDefArray (NOT UseMultimon/SpanMonitors which are
+     * and
+     * MonitorDefArray (NOT UseMultimon/SpanMonitors which are
+     *
      * client-side only). */
     if (desktop_width > 1920) {
       if (server && server->backend) {
@@ -4702,9 +4923,10 @@ void viewer_server_free(ViewerServer *server) {
 
   g_viewer_server = NULL;
 
-  EnterCriticalSection(&server->lock);
   for (int i = 0; i < MAX_VIEWERS; i++)
-    viewer_cleanup_slot(&server->viewers[i]);
+    viewer_cleanup_slot(server, &server->viewers[i]);
+
+  EnterCriticalSection(&server->lock);
   server->viewer_count = 0;
   LeaveCriticalSection(&server->lock);
 
@@ -4732,6 +4954,9 @@ void viewer_server_notify_backend_layout_change(BackendClient *backend,
                                                 UINT32 width, UINT32 height,
                                                 UINT32 generation) {
   ViewerServer *server = g_viewer_server;
+  Viewer *targets[MAX_VIEWERS] = {0};
+  int target_slots[MAX_VIEWERS] = {0};
+  size_t target_count = 0;
   UINT32 queued_viewers = 0;
   UINT64 deadline = platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
 
@@ -4741,8 +4966,18 @@ void viewer_server_notify_backend_layout_change(BackendClient *backend,
   EnterCriticalSection(&server->lock);
   for (int i = 0; i < MAX_VIEWERS; i++) {
     Viewer *viewer = &server->viewers[i];
-    if (!viewer->peer || !viewer->gfx.initialized)
+    if (!viewer_try_add_layout_ref_locked(viewer))
       continue;
+
+    targets[target_count] = viewer;
+    target_slots[target_count] = i;
+    target_count++;
+  }
+  LeaveCriticalSection(&server->lock);
+
+  for (size_t target_index = 0; target_index < target_count; target_index++) {
+    Viewer *viewer = targets[target_index];
+    int i = target_slots[target_index];
 
     EnterCriticalSection(&viewer->gfx.lock);
     viewer->gfx.negotiated_width = width;
@@ -4808,8 +5043,9 @@ void viewer_server_notify_backend_layout_change(BackendClient *backend,
         }
       }
     }
+
+    viewer_release_publish_ref(server, viewer);
   }
-  LeaveCriticalSection(&server->lock);
 
   if (queued_viewers > 0)
     (void)backend_request_full_refresh(server->backend);
@@ -4848,35 +5084,39 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
   EnterCriticalSection(&server->lock);
   for (int i = 0; i < MAX_VIEWERS; i++) {
     Viewer *viewer = &server->viewers[i];
-    BOOL classic_fallback = FALSE;
-    if (!viewer->peer || !viewer->connected || !viewer->activated)
-      continue;
-
-    EnterCriticalSection(&viewer->gfx.lock);
-    classic_fallback = viewer_gfx_negotiation_is_classic_fallback(&viewer->gfx);
-    LeaveCriticalSection(&viewer->gfx.lock);
-    if (!classic_fallback)
+    if (!viewer_try_add_publish_ref_locked(viewer))
       continue;
 
     targets[target_count++] = viewer;
-    classic_target_count++;
   }
   LeaveCriticalSection(&server->lock);
 
   for (size_t i = 0; i < target_count; i++) {
     Viewer *viewer = targets[i];
+    BOOL classic_fallback = FALSE;
     BOOL ready_to_send = FALSE;
     BOOL enqueued = FALSE;
     BOOL throttled = FALSE;
     ViewerSurfaceBitsEvent *event = NULL;
+
+    EnterCriticalSection(&viewer->gfx.lock);
+    classic_fallback = viewer_gfx_negotiation_is_classic_fallback(&viewer->gfx);
+    LeaveCriticalSection(&viewer->gfx.lock);
+    if (!classic_fallback) {
+      viewer_release_publish_ref(server, viewer);
+      continue;
+    }
+    classic_target_count++;
 
     /* Pre-build the deep copy outside send_lock to minimize lock hold time */
     EnterCriticalSection(&viewer->send_lock);
     ready_to_send = viewer->peer && viewer->connected && viewer->activated;
     LeaveCriticalSection(&viewer->send_lock);
 
-    if (!ready_to_send)
+    if (!ready_to_send) {
+      viewer_release_publish_ref(server, viewer);
       continue;
+    }
 
     if (viewer->consecutive_lag_intervals >= VIEWER_THROTTLE_LAG_INTERVALS) {
       /* Per-viewer throttle: skip updates for slow viewers.
@@ -4916,6 +5156,7 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
     event = viewer_surface_bits_event_new(cmd);
     if (!event) {
       enqueue_failed_count++;
+      viewer_release_publish_ref(server, viewer);
       continue;
     }
     EnterCriticalSection(&viewer->send_lock);
@@ -4933,6 +5174,8 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
 
     if (throttled)
       (void)backend_request_full_refresh(server->backend);
+
+    viewer_release_publish_ref(server, viewer);
   }
 
   publish_us = viewer_perf_now_us() - publish_started_us;
@@ -4991,27 +5234,29 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
   EnterCriticalSection(&server->lock);
   for (int i = 0; i < MAX_VIEWERS; i++) {
     Viewer *viewer = &server->viewers[i];
-    BOOL classic_fallback = FALSE;
-    if (!viewer->peer || !viewer->connected || !viewer->activated)
-      continue;
-
-    EnterCriticalSection(&viewer->gfx.lock);
-    classic_fallback = viewer_gfx_negotiation_is_classic_fallback(&viewer->gfx);
-    LeaveCriticalSection(&viewer->gfx.lock);
-    if (!classic_fallback)
+    if (!viewer_try_add_publish_ref_locked(viewer))
       continue;
 
     targets[target_count++] = viewer;
-    classic_target_count++;
   }
   LeaveCriticalSection(&server->lock);
 
   for (size_t i = 0; i < target_count; i++) {
     Viewer *viewer = targets[i];
+    BOOL classic_fallback = FALSE;
     BOOL ready_to_send = FALSE;
     BOOL enqueued = FALSE;
     BOOL throttled = FALSE;
     ViewerClassicEvent *event = NULL;
+
+    EnterCriticalSection(&viewer->gfx.lock);
+    classic_fallback = viewer_gfx_negotiation_is_classic_fallback(&viewer->gfx);
+    LeaveCriticalSection(&viewer->gfx.lock);
+    if (!classic_fallback) {
+      viewer_release_publish_ref(server, viewer);
+      continue;
+    }
+    classic_target_count++;
 
     /* Pre-build the deep copy outside send_lock to minimize lock hold time.
      * The bitmap pointer is const and immutable during this call. */
@@ -5019,8 +5264,10 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
     ready_to_send = viewer->peer && viewer->connected && viewer->activated;
     LeaveCriticalSection(&viewer->send_lock);
 
-    if (!ready_to_send)
+    if (!ready_to_send) {
+      viewer_release_publish_ref(server, viewer);
       continue;
+    }
 
     if (viewer->needs_full_refresh && !refresh_in_flight) {
       /* The viewer needs a full refresh but no refresh is in flight.
@@ -5044,6 +5291,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
       event = viewer_classic_event_new(bitmap);
       if (!event) {
         enqueue_failed_count++;
+        viewer_release_publish_ref(server, viewer);
         continue;
       }
       EnterCriticalSection(&viewer->send_lock);
@@ -5066,6 +5314,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
       event = viewer_classic_event_new(bitmap);
       if (!event) {
         enqueue_failed_count++;
+        viewer_release_publish_ref(server, viewer);
         continue;
       }
       EnterCriticalSection(&viewer->send_lock);
@@ -5098,6 +5347,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
       event = viewer_classic_event_new(bitmap);
       if (!event) {
         enqueue_failed_count++;
+        viewer_release_publish_ref(server, viewer);
         continue;
       }
       EnterCriticalSection(&viewer->send_lock);
@@ -5116,6 +5366,8 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
 
     if (throttled)
       (void)backend_request_full_refresh(server->backend);
+
+    viewer_release_publish_ref(server, viewer);
   }
 
   publish_us = viewer_perf_now_us() - publish_started_us;
@@ -5162,14 +5414,7 @@ BOOL viewer_server_publish_frame_marker(BackendClient *backend,
   EnterCriticalSection(&server->lock);
   for (int i = 0; i < MAX_VIEWERS; i++) {
     Viewer *viewer = &server->viewers[i];
-    BOOL classic_fallback = FALSE;
-    if (!viewer->peer || !viewer->connected || !viewer->activated)
-      continue;
-
-    EnterCriticalSection(&viewer->gfx.lock);
-    classic_fallback = viewer_gfx_negotiation_is_classic_fallback(&viewer->gfx);
-    LeaveCriticalSection(&viewer->gfx.lock);
-    if (!classic_fallback)
+    if (!viewer_try_add_publish_ref_locked(viewer))
       continue;
 
     targets[target_count++] = viewer;
@@ -5185,11 +5430,18 @@ BOOL viewer_server_publish_frame_marker(BackendClient *backend,
    * unnecessary and harmful. */
   for (size_t i = 0; i < target_count; i++) {
     Viewer *viewer = targets[i];
+    BOOL classic_fallback = FALSE;
     rdpSettings *settings =
         viewer->peer
             ? viewer->peer->context ? viewer->peer->context->settings : NULL
             : NULL;
     BOOL has_codec = FALSE;
+
+    EnterCriticalSection(&viewer->gfx.lock);
+    classic_fallback = viewer_gfx_negotiation_is_classic_fallback(&viewer->gfx);
+    LeaveCriticalSection(&viewer->gfx.lock);
+    if (!classic_fallback)
+      continue;
 
     if (settings) {
       has_codec = freerdp_settings_get_bool(settings, FreeRDP_RemoteFxCodec) ||
@@ -5209,6 +5461,14 @@ BOOL viewer_server_publish_frame_marker(BackendClient *backend,
   if (marker->frameAction == SURFACECMD_FRAMEACTION_END) {
     for (size_t i = 0; i < target_count; i++) {
       Viewer *viewer = targets[i];
+      BOOL classic_fallback = FALSE;
+
+      EnterCriticalSection(&viewer->gfx.lock);
+      classic_fallback =
+          viewer_gfx_negotiation_is_classic_fallback(&viewer->gfx);
+      LeaveCriticalSection(&viewer->gfx.lock);
+      if (!classic_fallback)
+        continue;
 
       EnterCriticalSection(&viewer->send_lock);
       if (viewer->needs_full_refresh) {
@@ -5233,6 +5493,14 @@ BOOL viewer_server_publish_frame_marker(BackendClient *backend,
      * refresh cycle independently. */
     for (size_t i = 0; i < target_count; i++) {
       Viewer *viewer = targets[i];
+      BOOL classic_fallback = FALSE;
+
+      EnterCriticalSection(&viewer->gfx.lock);
+      classic_fallback =
+          viewer_gfx_negotiation_is_classic_fallback(&viewer->gfx);
+      LeaveCriticalSection(&viewer->gfx.lock);
+      if (!classic_fallback)
+        continue;
 
       EnterCriticalSection(&viewer->send_lock);
       if (viewer->needs_full_refresh)
@@ -5249,6 +5517,9 @@ BOOL viewer_server_publish_frame_marker(BackendClient *backend,
     WLog_INFO(TAG, "Full refresh completed for %u viewers (frame id=%u)",
               completed_viewers, marker->frameId);
   }
+
+  for (size_t i = 0; i < target_count; i++)
+    viewer_release_publish_ref(server, targets[i]);
 
   return sent_any;
 }

@@ -125,8 +125,11 @@ BOOL viewer_gfx_activation_waits_for_rdpgfx_caps(
 
 BOOL viewer_gfx_pending_activation_begins_rdpgfx_join(
     const ViewerGraphicsContext *gfx) {
-  return gfx && gfx->ready && (gfx->join_state == VIEWER_JOIN_STATE_PENDING) &&
-         (gfx->join_strategy == VIEWER_JOIN_STRATEGY_NONE);
+  return gfx && gfx->ready && !gfx->rdpgfx_temporarily_disabled &&
+         (gfx->join_state == VIEWER_JOIN_STATE_PENDING) &&
+         (gfx->join_strategy == VIEWER_JOIN_STRATEGY_NONE) &&
+         ((gfx->negotiation_outcome == VIEWER_GFX_NEGOTIATION_PENDING) ||
+          (gfx->negotiation_outcome == VIEWER_GFX_NEGOTIATION_RDPEGFX_READY));
 }
 
 BOOL viewer_gfx_vcm_progress_should_be_pumped(
@@ -137,12 +140,12 @@ BOOL viewer_gfx_vcm_progress_should_be_pumped(
 
 BOOL viewer_gfx_drdynvc_initialization_should_run(
     const ViewerGraphicsContext *gfx) {
-  return gfx && gfx->vcm && gfx->post_connect_complete &&
+  return gfx && gfx->vcm && gfx->post_connect_complete && gfx->drdynvc_joined &&
          (gfx->drdynvc_state == DRDYNVC_STATE_NONE);
 }
 
 BOOL viewer_gfx_rdpgfx_open_should_run(const ViewerGraphicsContext *gfx) {
-  return gfx && gfx->vcm && gfx->post_connect_complete &&
+  return gfx && gfx->vcm && gfx->post_connect_complete && gfx->drdynvc_joined &&
          (gfx->drdynvc_state == DRDYNVC_STATE_READY) && gfx->rdpgfx &&
          !gfx->channel_opened && !gfx->rdpgfx_temporarily_disabled;
 }

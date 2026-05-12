@@ -123,6 +123,13 @@ test_joined_state_controls_drdynvc_init_and_rdpgfx_open_paths(void) {
   assert(!viewer_gfx_drdynvc_initialization_should_run(&gfx));
   assert(!viewer_gfx_rdpgfx_open_should_run(&gfx));
 
+  gfx.drdynvc_state = DRDYNVC_STATE_READY;
+  gfx.rdpgfx = (RdpgfxServerContext *)0x1;
+  assert(!viewer_gfx_rdpgfx_open_should_run(&gfx));
+
+  gfx.drdynvc_state = DRDYNVC_STATE_NONE;
+  gfx.rdpgfx = NULL;
+
   gfx.drdynvc_joined = TRUE;
   gfx.drdynvc_state = DRDYNVC_STATE_NONE;
   assert(viewer_gfx_drdynvc_initialization_should_run(&gfx));
@@ -188,6 +195,7 @@ test_activation_waits_for_caps_and_caps_confirm_can_restart_join(void) {
   gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
   assert(!viewer_gfx_activation_waits_for_rdpgfx_caps(&gfx));
   assert(viewer_gfx_negotiation_is_classic_fallback(&gfx));
+  assert(!viewer_gfx_pending_activation_begins_rdpgfx_join(&gfx));
   assert(!viewer_gfx_pending_activation_timeout_due(&gfx, 5000, 3000));
 
   gfx.join_strategy = VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK;
