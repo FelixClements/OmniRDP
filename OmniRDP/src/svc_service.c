@@ -575,7 +575,7 @@ int svc_service_install(const char *serviceName, const char *configPath) {
       NULL,                                             /* load order group */
       NULL,                                             /* tag identifier */
       NULL,                                             /* dependencies */
-      "NT AUTHORITY\\NetworkService", /* service start account */
+      "NT AUTHORITY\\LocalSystem", /* service start account */
       NULL);                          /* password */
 
   if (!schService) {
@@ -596,7 +596,7 @@ int svc_service_install(const char *serviceName, const char *configPath) {
             SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
                 SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG,
             SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-            binaryPath, NULL, NULL, NULL, "NT AUTHORITY\\NetworkService", NULL);
+            binaryPath, NULL, NULL, NULL, "NT AUTHORITY\\LocalSystem", NULL);
         if (schService)
           break;
         err = GetLastError();
@@ -617,7 +617,7 @@ int svc_service_install(const char *serviceName, const char *configPath) {
             SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
                 SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG,
             SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-            binaryPath, NULL, NULL, NULL, "NT AUTHORITY\\NetworkService", NULL);
+            binaryPath, NULL, NULL, NULL, "NT AUTHORITY\\LocalSystem", NULL);
       }
     }
 
@@ -634,7 +634,7 @@ int svc_service_install(const char *serviceName, const char *configPath) {
   desc.lpDescription = "OmniRDP RDP Multiplexer Service";
   ChangeServiceConfig2A(schService, SERVICE_CONFIG_DESCRIPTION, &desc);
 
-  /* Enable an unrestricted per-service SID while keeping NetworkService. */
+  /* Enable an unrestricted per-service SID. */
   {
     SERVICE_SID_INFO sidInfo;
     sidInfo.dwServiceSidType = SERVICE_SID_TYPE_UNRESTRICTED;
