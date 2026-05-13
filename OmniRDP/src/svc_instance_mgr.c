@@ -203,7 +203,8 @@ static BOOL run_netsh_in_user_session(const char *args) {
     return FALSE;
   }
 
-  /* Enable SeTcbPrivilege required for SetTokenInformation(TokenSessionId) */
+  /* Enable SeTcbPrivilege on the duplicated token (required for
+   * SetTokenInformation(TokenSessionId)) */
   {
     TOKEN_PRIVILEGES tp;
     LUID luid;
@@ -211,7 +212,7 @@ static BOOL run_netsh_in_user_session(const char *args) {
       tp.PrivilegeCount = 1;
       tp.Privileges[0].Luid = luid;
       tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-      AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+      AdjustTokenPrivileges(hDupToken, FALSE, &tp, sizeof(tp), NULL, NULL);
     }
   }
 
