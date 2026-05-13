@@ -836,7 +836,8 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
   /* ── Determine log file path ─────────────────────────────── */
   char logDirBuf[MAX_PATH];
   const char *logDir = "C:\\ProgramData\\OmniRDP\\logs";
-  if (server->mgr && server->mgr->config) {
+  if (server->mgr && server->mgr->config &&
+      server->mgr->config->service.log_dir[0] != '\0') {
     logDir = server->mgr->config->service.log_dir;
   }
 
