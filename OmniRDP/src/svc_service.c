@@ -560,7 +560,7 @@ int svc_service_install(const char *serviceName, const char *configPath) {
       fprintf(stderr, "Service '%s' is pending deletion; waiting...\n",
               serviceName);
       CloseServiceHandle(schSCManager);
-      for (int i = 0; i < 30; i++) {
+      for (int i = 0; i < 10; i++) {
         Sleep(1000);
         schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
         if (!schSCManager)
@@ -728,7 +728,7 @@ int svc_service_uninstall(const char *serviceName) {
 
     /* Poll for SERVICE_STOPPED */
     if (!stopped) {
-      for (int i = 0; i < 30; i++) {
+      for (int i = 0; i < 10; i++) {
         if (!QueryServiceStatus(schService, &status))
           break;
         if (status.dwCurrentState == SERVICE_STOPPED) {
@@ -743,7 +743,7 @@ int svc_service_uninstall(const char *serviceName) {
   if (!stopped) {
     fprintf(
         stderr,
-        "Service '%s' did not stop within 30 seconds. Cannot safely delete.\n",
+        "Service '%s' did not stop within 10 seconds. Cannot safely delete.\n",
         serviceName);
     CloseServiceHandle(schService);
     CloseServiceHandle(schSCManager);

@@ -156,7 +156,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   tray_icon_refresh_instances(&g_ctx);
   tray_icon_update(&g_ctx);
 
-  /* First-time installer prompt: if no services found, offer to install */
+  /* First-time installer prompt: if no services found, wait and retry
+   * before asking. The SCM may still be starting the service that was
+   * just installed by the setup wizard. */
+  if (g_ctx.serviceCount == 0) {
+    Sleep(3000);
+    tray_icon_discover_services(&g_ctx);
+    tray_icon_refresh_instances(&g_ctx);
+    tray_icon_update(&g_ctx);
+  }
+
   if (g_ctx.serviceCount == 0) {
     int result =
         MessageBoxA(NULL,
