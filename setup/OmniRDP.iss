@@ -19,6 +19,7 @@ Compression=lzma2
 PrivilegesRequired=admin
 SolidCompression=yes
 DisableProgramGroupPage=yes
+ArchitecturesInstallIn64BitMode=x64compatible
 
 [Code]
 var
