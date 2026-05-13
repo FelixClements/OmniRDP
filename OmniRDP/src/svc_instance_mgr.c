@@ -212,7 +212,7 @@ static void svc_add_firewall_rule(const char *instanceName, uint16_t port) {
   }
   comInitialized = (hr == S_OK);
 
-  hr = CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_INPROC_SERVER,
+  hr = CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_ALL,
                         &IID_INetFwPolicy2, (void **)&fwPolicy);
   if (FAILED(hr) || !fwPolicy) {
     LOG_E("svc_inst_mgr",
@@ -224,9 +224,8 @@ static void svc_add_firewall_rule(const char *instanceName, uint16_t port) {
 
   hr = fwPolicy->lpVtbl->get_Rules(fwPolicy, &fwRules);
   if (FAILED(hr) || !fwRules) {
-    LOG_E("svc_inst_mgr",
-          "Firewall add: get_Rules failed (hr=0x%08lx) for '%s'", hr,
-          instanceName);
+    LOG_E("svc_inst_mgr", "Firewall add: get_Rules failed (hr=0x%08lx) for '%s'",
+          hr, instanceName);
     goto cleanup;
   }
 
@@ -239,7 +238,7 @@ static void svc_add_firewall_rule(const char *instanceName, uint16_t port) {
     }
   }
 
-  hr = CoCreateInstance(&CLSID_NetFwRule, NULL, CLSCTX_INPROC_SERVER,
+  hr = CoCreateInstance(&CLSID_NetFwRule, NULL, CLSCTX_ALL,
                         &IID_INetFwRule, (void **)&fwRule);
   if (FAILED(hr) || !fwRule) {
     LOG_E("svc_inst_mgr",
@@ -319,7 +318,7 @@ static void svc_remove_firewall_rule(const char *instanceName) {
   }
   comInitialized = (hr == S_OK);
 
-  hr = CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_INPROC_SERVER,
+  hr = CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_ALL,
                         &IID_INetFwPolicy2, (void **)&fwPolicy);
   if (FAILED(hr) || !fwPolicy) {
     LOG_E("svc_inst_mgr",
