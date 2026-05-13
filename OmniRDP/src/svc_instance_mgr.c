@@ -167,6 +167,59 @@ ManagedInstance *inst_mgr_find(InstanceManager *mgr, const char *name) {
   return NULL;
 }
 
+/* ── Firewall helpers ─────────────────────────────────────────── */
+
+/**
+ * @brief Add a Windows Firewall inbound rule for the viewer port.
+ * Runs in the service process (SYSTEM) which has admin rights.
+ */
+static void svc_add_firewall_rule(const char *instanceName, uint16_t port) {
+  char ruleName[256];
+  char cmdLine[512];
+  snprintf(ruleName, sizeof(ruleName), "OmniRDP Viewer - %s", instanceName);
+  snprintf(cmdLine, sizeof(cmdLine),
+           "netsh advfirewall firewall add rule name=\"%s\" dir=in "
+           "action=allow protocol=TCP localport=%u profile=domain,private",
+           ruleName, (unsigned)port);
+
+  STARTUPINFOA si = {0};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi = {0};
+
+  if (CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL,
+                     NULL, &si, &pi)) {
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    LOG_I("svc_inst_mgr", "Firewall rule '%s' added for port %u", ruleName,
+          (unsigned)port);
+  } else {
+    LOG_W("svc_inst_mgr",
+          "Failed to add firewall rule '%s' for port %u (error %lu)", ruleName,
+          (unsigned)port, GetLastError());
+  }
+}
+
+static void svc_remove_firewall_rule(const char *instanceName) {
+  char ruleName[256];
+  char cmdLine[512];
+  snprintf(ruleName, sizeof(ruleName), "OmniRDP Viewer - %s", instanceName);
+  snprintf(cmdLine, sizeof(cmdLine),
+           "netsh advfirewall firewall delete rule name=\"%s\"", ruleName);
+
+  STARTUPINFOA si = {0};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi = {0};
+
+  if (CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL,
+                     NULL, &si, &pi)) {
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    LOG_I("svc_inst_mgr", "Firewall rule '%s' removed", ruleName);
+  }
+}
+
 /* ── inst_mgr_start (single instance) ──────────────────────────── */
 
 int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
@@ -547,6 +600,10 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
   LOG_I("svc_inst_mgr", "Started instance '%s' (PID=%lu, job=%p, stopEvent=%p)",
         instanceName, inst->pid, (void *)inst->hJob, (void *)inst->hStopEvent);
 
+  /* Add/update firewall rule for the viewer port */
+  svc_remove_firewall_rule(instanceName);
+  svc_add_firewall_rule(instanceName, inst->config.viewer_port);
+
   LeaveCriticalSection(&mgr->lock);
   return 0;
 }
@@ -620,6 +677,7 @@ static void inst_mgr_wait_stopped_timeout(InstanceManager *mgr,
     }
 
     CloseHandle(hProcess);
+    svc_remove_firewall_rule(name_copy);
   }
   if (hJob)
     CloseHandle(hJob);

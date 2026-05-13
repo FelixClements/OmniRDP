@@ -381,60 +381,6 @@ static int parse_instance_args(int argc, char *argv[],
 }
 
 /**
- * @brief Add a Windows Firewall inbound rule for the viewer port.
- *
- * Creates a per-instance rule named "OmniRDP-<instanceName>" that allows
- * TCP inbound on the specified port. If the rule already exists, netsh
- * will update it silently.
- */
-static void add_firewall_rule(const char *instanceName, uint16_t port) {
-  char ruleName[256];
-  char cmdLine[512];
-  snprintf(ruleName, sizeof(ruleName), "OmniRDP Viewer - %s", instanceName);
-  snprintf(cmdLine, sizeof(cmdLine),
-           "netsh advfirewall firewall add rule name=\"%s\" dir=in "
-           "action=allow protocol=TCP localport=%u profile=domain,private",
-           ruleName, (unsigned)port);
-
-  STARTUPINFOA si = {0};
-  si.cb = sizeof(si);
-  PROCESS_INFORMATION pi = {0};
-
-  if (CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL,
-                     NULL, &si, &pi)) {
-    WaitForSingleObject(pi.hProcess, 5000);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    LOG_I("instance_runner", "Firewall rule '%s' added for port %u", ruleName,
-          (unsigned)port);
-  } else {
-    LOG_W("instance_runner",
-          "Failed to add firewall rule '%s' for port %u (error %lu)", ruleName,
-          (unsigned)port, GetLastError());
-  }
-}
-
-static void remove_firewall_rule(const char *instanceName) {
-  char ruleName[256];
-  char cmdLine[512];
-  snprintf(ruleName, sizeof(ruleName), "OmniRDP Viewer - %s", instanceName);
-  snprintf(cmdLine, sizeof(cmdLine),
-           "netsh advfirewall firewall delete rule name=\"%s\"", ruleName);
-
-  STARTUPINFOA si = {0};
-  si.cb = sizeof(si);
-  PROCESS_INFORMATION pi = {0};
-
-  if (CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL,
-                     NULL, &si, &pi)) {
-    WaitForSingleObject(pi.hProcess, 5000);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    LOG_I("instance_runner", "Firewall rule '%s' removed", ruleName);
-  }
-}
-
-/**
  * @brief Instance mode entry point
  *
  * Called from main() when --instance flag is detected.
@@ -729,9 +675,6 @@ int instance_runner_main(int argc, char *argv[]) {
     return 1;
   }
 
-  /* Remove any existing rule first (handles port changes from config reload) */
-  remove_firewall_rule(inst->name);
-  add_firewall_rule(inst->name, inst->viewer_port);
   LOG_I("instance_runner", "Viewer server started on %s:%u",
         inst->viewer_bind_address, inst->viewer_port);
 
@@ -759,7 +702,6 @@ int instance_runner_main(int argc, char *argv[]) {
   WaitForSingleObject(server_tid, INFINITE);
   CloseHandle(server_tid);
   viewer_server_free(server);
-  remove_firewall_rule(inst->name);
 
   if (hHeartbeat) {
     /* Signal the thread to stop (g_running is already 0) */
