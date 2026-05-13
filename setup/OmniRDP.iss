@@ -120,14 +120,25 @@ end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep = usPostUninstall then
+  if CurUninstallStep = usUninstall then
+  begin
+    { Kill all OmniRDP processes BEFORE the uninstaller attempts file removal. }
+    Log('Uninstall: pre-removal kill of OmniRDP processes');
+    KillAllOmniRDPProcesses;
+    Sleep(1000);
+  end
+  else if CurUninstallStep = usPostUninstall then
   begin
     if AppDirHasFiles then
     begin
-      Log('Uninstall: files remain in {app}, killing OmniRDP processes');
+      { Safety net: files still remain — kill again and give extra time. }
+      Log('Uninstall: files remain in {app}, retrying process kill');
       KillAllOmniRDPProcesses;
-      { Give processes time to exit }
-      Sleep(2000);
+      Sleep(3000);
+      if AppDirHasFiles then
+        Log('Uninstall: files STILL remain after retry — manual cleanup may be needed')
+      else
+        Log('Uninstall: retry succeeded, all files removed');
     end
     else
       Log('Uninstall: all files removed successfully');
