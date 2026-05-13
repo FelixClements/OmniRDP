@@ -42,8 +42,7 @@ static void load_log_content(void) {
 
   if (!resp.success) {
     if (!g_showingError) {
-      SetWindowTextA(g_hEdit,
-                     "Service returned an error retrieving logs.");
+      SetWindowTextA(g_hEdit, "Service returned an error retrieving logs.");
       g_showingError = TRUE;
     }
     return;
