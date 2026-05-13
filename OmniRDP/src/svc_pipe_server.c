@@ -834,13 +834,19 @@ static void cmd_reload_config(PipeServer *server, char *response,
 static void cmd_get_logs(PipeServer *server, const char *payload,
                          char *response, size_t respSize) {
   /* ── Determine log file path ─────────────────────────────── */
+  char logDirBuf[MAX_PATH];
   const char *logDir = "C:\\ProgramData\\OmniRDP\\logs";
   if (server->mgr && server->mgr->config) {
     logDir = server->mgr->config->service.log_dir;
   }
 
+  /* Append service name subdirectory to match svc_service.c log path */
+  _snprintf(logDirBuf, sizeof(logDirBuf), "%s\\%s", logDir,
+            server->serviceName);
+  logDirBuf[sizeof(logDirBuf) - 1] = '\0';
+
   char logPath[MAX_PATH];
-  _snprintf(logPath, sizeof(logPath), "%s\\%s", logDir, LOG_FILE_NAME);
+  _snprintf(logPath, sizeof(logPath), "%s\\%s", logDirBuf, LOG_FILE_NAME);
   logPath[sizeof(logPath) - 1] = '\0';
 
   /* ── Open the log file ───────────────────────────────────── */
@@ -1107,8 +1113,8 @@ static void push_to_all(PipeServer *server, const char *json, DWORD jsonLen) {
 /* ════════════════════════════════════════════════════════════════ */
 
 int pipe_server_init(PipeServer *server, const char *pipeName,
-                     InstanceManager *mgr) {
-  if (!server || !pipeName || !mgr) {
+                     InstanceManager *mgr, const char *serviceName) {
+  if (!server || !pipeName || !mgr || !serviceName) {
     LOG_E("pipe_server", "pipe_server_init: invalid parameters");
     return -1;
   }
@@ -1116,6 +1122,8 @@ int pipe_server_init(PipeServer *server, const char *pipeName,
   memset(server, 0, sizeof(*server));
   server->mgr = mgr;
   server->running = FALSE;
+  strncpy_s(server->serviceName, sizeof(server->serviceName), serviceName,
+            _TRUNCATE);
 
   /* ── Build the full pipe path ──────────────────────────────── */
   int ret = _snprintf(server->pipeName, sizeof(server->pipeName),

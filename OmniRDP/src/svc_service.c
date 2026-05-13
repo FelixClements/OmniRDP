@@ -930,7 +930,8 @@ int svc_service_start(const char *serviceName, const char *configPath) {
         if (*p == '-')
           *p = '_';
       }
-      if (pipe_server_init(&ctx.pipeServer, pipeName, &ctx.mgr) != 0) {
+      if (pipe_server_init(&ctx.pipeServer, pipeName, &ctx.mgr,
+                            ctx.serviceName) != 0) {
         LOG_E("svc_service_start", "Failed to initialize pipe server");
         /* Continue anyway — pipe server is not critical for operation */
       } else {
@@ -1149,7 +1150,8 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
         if (*p == '-')
           *p = '_';
       }
-      if (pipe_server_init(&ctx.pipeServer, pipeName, &ctx.mgr) != 0) {
+      if (pipe_server_init(&ctx.pipeServer, pipeName, &ctx.mgr,
+                            ctx.serviceName) != 0) {
         LOG_E("svc_service_run_console", "Failed to initialize pipe server");
         /* Continue anyway — pipe server is not critical for operation */
       } else {

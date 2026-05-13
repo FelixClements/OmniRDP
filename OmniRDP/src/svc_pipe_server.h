@@ -28,6 +28,7 @@ extern "C" {
  */
 typedef struct {
   char pipeName[256]; /* Full pipe path, e.g. "\\.\pipe\OmniRDP_ServicePipe" */
+  char serviceName[256]; /* Windows service name (e.g., "OmniRDP") */
   InstanceManager *mgr;  /* Pointer to instance manager (not owned) */
   CRITICAL_SECTION lock; /* Protects client list */
 
@@ -51,7 +52,7 @@ typedef struct {
  * @return 0 on success, -1 on error
  */
 int pipe_server_init(PipeServer *server, const char *pipeName,
-                     InstanceManager *mgr);
+                     InstanceManager *mgr, const char *serviceName);
 
 /**
  * @brief Stop the pipe server and disconnect all clients

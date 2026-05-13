@@ -1137,8 +1137,14 @@ static void tray_on_command(TrayAppCtx *ctx, WPARAM wParam) {
     LOG_I(LOG_TAG, "Menu: View Service Log");
     {
       char logPath[MAX_PATH];
-      snprintf(logPath, sizeof(logPath),
-               "C:\\ProgramData\\OmniRDP\\logs\\OmniRDP-svc.log");
+      if (ctx->serviceCount > 0) {
+        snprintf(logPath, sizeof(logPath),
+                 "C:\\ProgramData\\OmniRDP\\logs\\%s\\OmniRDP-svc.log",
+                 ctx->services[0].serviceName);
+      } else {
+        snprintf(logPath, sizeof(logPath),
+                 "C:\\ProgramData\\OmniRDP\\logs\\OmniRDP\\OmniRDP-svc.log");
+      }
       tray_log_viewer_show(ctx->hInstance, logPath);
     }
     break;
