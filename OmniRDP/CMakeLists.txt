@@ -151,8 +151,6 @@ set(SVC_LIBS
     advapi32    # SCM, DPAPI, security
     crypt32     # DPAPI
     kernel32    # Job objects, processes
-    ole32       # COM (firewall)
-    oleaut32    # BSTR (firewall)
     wtsapi32    # WTSQueryUserToken, WTSGetActiveConsoleSessionId
 )
 

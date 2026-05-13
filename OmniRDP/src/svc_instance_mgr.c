@@ -23,10 +23,7 @@
 #include <windows.h>
 
 #include <aclapi.h>
-#include <combaseapi.h>
 #include <limits.h>
-#include <netfw.h>
-#include <oleauto.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -170,194 +167,113 @@ ManagedInstance *inst_mgr_find(InstanceManager *mgr, const char *name) {
   return NULL;
 }
 
-/* ── Firewall COM helpers ──────────────────────────────────────── */
+/**
+ * @brief Run a netsh command in the user's interactive session.
+ *
+ * The service runs in session 0 as SYSTEM, which cannot access the
+ * firewall.  This helper duplicates the process token, sets the
+ * session ID to the active console session, and launches netsh in
+ * that session with SYSTEM privileges.
+ */
+static BOOL run_netsh_in_user_session(const char *args) {
+  BOOL ok = FALSE;
+  HANDLE hToken = NULL;
+  HANDLE hDupToken = NULL;
+  DWORD consoleSessionId;
+  STARTUPINFOA si = {0};
+  PROCESS_INFORMATION pi = {0};
+  char cmdLine[512];
 
-static BSTR bstr_from_utf8(const char *str) {
-  if (!str)
-    return NULL;
-  int wlen = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
-  if (wlen <= 0)
-    return NULL;
-  wchar_t *wbuf =
-      (wchar_t *)HeapAlloc(GetProcessHeap(), 0, (size_t)wlen * sizeof(wchar_t));
-  if (!wbuf)
-    return NULL;
-  MultiByteToWideChar(CP_UTF8, 0, str, -1, wbuf, wlen);
-  BSTR bstr = SysAllocString(wbuf);
-  HeapFree(GetProcessHeap(), 0, wbuf);
-  return bstr;
-}
+  _snprintf(cmdLine, sizeof(cmdLine), "netsh %s", args);
+  cmdLine[sizeof(cmdLine) - 1] = '\0';
 
-static void svc_add_firewall_rule(const char *instanceName, uint16_t port) {
-  INetFwPolicy2 *fwPolicy = NULL;
-  INetFwRule *fwRule = NULL;
-  INetFwRules *fwRules = NULL;
-  BOOL comInitialized = FALSE;
-  HRESULT hr;
-  char ruleName[256];
-  wchar_t wPort[16];
-  BSTR bstrName = NULL, bstrPort = NULL, bstrGroup = NULL, bstrDesc = NULL;
-
-  _snprintf(ruleName, sizeof(ruleName), "OmniRDP Viewer - %s", instanceName);
-  ruleName[sizeof(ruleName) - 1] = '\0';
-  _snwprintf(wPort, 16, L"%u", (unsigned)port);
-  wPort[15] = L'\0';
-
-  hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-  if (FAILED(hr)) {
-    LOG_E("svc_inst_mgr",
-          "Firewall add: CoInitializeEx failed (hr=0x%08lx) for '%s'", hr,
-          instanceName);
-    return;
-  }
-  comInitialized = (hr == S_OK);
-
-  hr = CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_ALL,
-                        &IID_INetFwPolicy2, (void **)&fwPolicy);
-  if (FAILED(hr) || !fwPolicy) {
-    LOG_E("svc_inst_mgr",
-          "Firewall add: CoCreateInstance(NetFwPolicy2) failed (hr=0x%08lx) "
-          "for '%s'",
-          hr, instanceName);
-    goto cleanup;
+  if (!OpenProcessToken(GetCurrentProcess(),
+                        TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_SESSIONID,
+                        &hToken)) {
+    LOG_W("svc_inst_mgr", "Firewall: OpenProcessToken failed (err=%lu)",
+          GetLastError());
+    return FALSE;
   }
 
-  hr = fwPolicy->lpVtbl->get_Rules(fwPolicy, &fwRules);
-  if (FAILED(hr) || !fwRules) {
-    LOG_E("svc_inst_mgr", "Firewall add: get_Rules failed (hr=0x%08lx) for '%s'",
-          hr, instanceName);
-    goto cleanup;
+  if (!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL, SecurityImpersonation,
+                        TokenPrimary, &hDupToken)) {
+    LOG_W("svc_inst_mgr", "Firewall: DuplicateTokenEx failed (err=%lu)",
+          GetLastError());
+    CloseHandle(hToken);
+    return FALSE;
   }
 
-  /* Remove any stale rule with the same name first */
-  {
-    BSTR bstrRemove = bstr_from_utf8(ruleName);
-    if (bstrRemove) {
-      fwRules->lpVtbl->Remove(fwRules, bstrRemove);
-      SysFreeString(bstrRemove);
+  consoleSessionId = WTSGetActiveConsoleSessionId();
+  if (!SetTokenInformation(hDupToken, TokenSessionId, &consoleSessionId,
+                           sizeof(consoleSessionId))) {
+    LOG_W("svc_inst_mgr",
+          "Firewall: SetTokenInformation(TokenSessionId=%lu) failed (err=%lu)",
+          consoleSessionId, GetLastError());
+  }
+
+  si.cb = sizeof(si);
+
+  if (CreateProcessAsUserA(hDupToken, NULL, cmdLine, NULL, NULL, FALSE,
+                           CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+    WaitForSingleObject(pi.hProcess, 10000);
+    DWORD exitCode = 0;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    ok = (exitCode == 0);
+    if (!ok) {
+      LOG_W("svc_inst_mgr", "Firewall: netsh exited with code %lu for: %s",
+            exitCode, args);
     }
-  }
-
-  hr = CoCreateInstance(&CLSID_NetFwRule, NULL, CLSCTX_ALL,
-                        &IID_INetFwRule, (void **)&fwRule);
-  if (FAILED(hr) || !fwRule) {
-    LOG_E("svc_inst_mgr",
-          "Firewall add: CoCreateInstance(NetFwRule) failed (hr=0x%08lx) for "
-          "'%s'",
-          hr, instanceName);
-    goto cleanup;
-  }
-
-  bstrName = bstr_from_utf8(ruleName);
-  bstrPort = SysAllocString(wPort);
-  bstrGroup = SysAllocString(L"OmniRDP");
-  bstrDesc = SysAllocString(L"OmniRDP viewer inbound rule");
-
-  if (!bstrName || !bstrPort || !bstrGroup || !bstrDesc) {
-    LOG_E("svc_inst_mgr", "Firewall add: SysAllocString failed for '%s'",
-          instanceName);
-    goto cleanup;
-  }
-
-  fwRule->lpVtbl->put_Name(fwRule, bstrName);
-  fwRule->lpVtbl->put_Description(fwRule, bstrDesc);
-  fwRule->lpVtbl->put_Grouping(fwRule, bstrGroup);
-  fwRule->lpVtbl->put_Protocol(fwRule, NET_FW_IP_PROTOCOL_TCP);
-  fwRule->lpVtbl->put_LocalPorts(fwRule, bstrPort);
-  fwRule->lpVtbl->put_Direction(fwRule, NET_FW_RULE_DIR_IN);
-  fwRule->lpVtbl->put_Action(fwRule, NET_FW_ACTION_ALLOW);
-  fwRule->lpVtbl->put_Enabled(fwRule, VARIANT_TRUE);
-  fwRule->lpVtbl->put_Profiles(fwRule, NET_FW_PROFILE2_DOMAIN |
-                                           NET_FW_PROFILE2_PRIVATE);
-
-  hr = fwRules->lpVtbl->Add(fwRules, fwRule);
-  if (SUCCEEDED(hr)) {
-    LOG_I("svc_inst_mgr", "Firewall rule '%s' added for port %u", ruleName,
-          (unsigned)port);
   } else {
-    LOG_E("svc_inst_mgr",
-          "Firewall add: rules->Add failed (hr=0x%08lx) for '%s' port %u", hr,
-          ruleName, (unsigned)port);
+    LOG_W("svc_inst_mgr",
+          "Firewall: CreateProcessAsUser failed (err=%lu) for: %s",
+          GetLastError(), args);
   }
 
-cleanup:
-  if (bstrName)
-    SysFreeString(bstrName);
-  if (bstrPort)
-    SysFreeString(bstrPort);
-  if (bstrGroup)
-    SysFreeString(bstrGroup);
-  if (bstrDesc)
-    SysFreeString(bstrDesc);
-  if (fwRule)
-    fwRule->lpVtbl->Release(fwRule);
-  if (fwRules)
-    fwRules->lpVtbl->Release(fwRules);
-  if (fwPolicy)
-    fwPolicy->lpVtbl->Release(fwPolicy);
-  if (comInitialized)
-    CoUninitialize();
+  CloseHandle(hDupToken);
+  CloseHandle(hToken);
+  return ok;
 }
 
 static void svc_remove_firewall_rule(const char *instanceName) {
-  INetFwPolicy2 *fwPolicy = NULL;
-  INetFwRules *fwRules = NULL;
-  BOOL comInitialized = FALSE;
-  HRESULT hr;
   char ruleName[256];
+  char args[512];
 
   _snprintf(ruleName, sizeof(ruleName), "OmniRDP Viewer - %s", instanceName);
   ruleName[sizeof(ruleName) - 1] = '\0';
 
-  hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-  if (FAILED(hr)) {
-    LOG_E("svc_inst_mgr",
-          "Firewall remove: CoInitializeEx failed (hr=0x%08lx) for '%s'", hr,
-          instanceName);
-    return;
-  }
-  comInitialized = (hr == S_OK);
+  _snprintf(args, sizeof(args), "advfirewall firewall delete rule name=\"%s\"",
+            ruleName);
+  args[sizeof(args) - 1] = '\0';
 
-  hr = CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_ALL,
-                        &IID_INetFwPolicy2, (void **)&fwPolicy);
-  if (FAILED(hr) || !fwPolicy) {
-    LOG_E("svc_inst_mgr",
-          "Firewall remove: CoCreateInstance(NetFwPolicy2) failed (hr=0x%08lx) "
-          "for '%s'",
-          hr, instanceName);
-    goto cleanup;
+  if (run_netsh_in_user_session(args)) {
+    LOG_I("svc_inst_mgr", "Firewall rule '%s' removed", ruleName);
   }
+}
 
-  hr = fwPolicy->lpVtbl->get_Rules(fwPolicy, &fwRules);
-  if (FAILED(hr) || !fwRules) {
-    LOG_E("svc_inst_mgr",
-          "Firewall remove: get_Rules failed (hr=0x%08lx) for '%s'", hr,
-          instanceName);
-    goto cleanup;
+static void svc_add_firewall_rule(const char *instanceName, uint16_t port) {
+  char ruleName[256];
+  char args[512];
+
+  _snprintf(ruleName, sizeof(ruleName), "OmniRDP Viewer - %s", instanceName);
+  ruleName[sizeof(ruleName) - 1] = '\0';
+
+  svc_remove_firewall_rule(instanceName);
+
+  _snprintf(args, sizeof(args),
+            "advfirewall firewall add rule name=\"%s\" dir=in "
+            "action=allow protocol=TCP localport=%u profile=domain,private",
+            ruleName, (unsigned)port);
+  args[sizeof(args) - 1] = '\0';
+
+  if (run_netsh_in_user_session(args)) {
+    LOG_I("svc_inst_mgr", "Firewall rule '%s' added for port %u", ruleName,
+          (unsigned)port);
+  } else {
+    LOG_E("svc_inst_mgr", "Failed to add firewall rule '%s' for port %u",
+          ruleName, (unsigned)port);
   }
-
-  {
-    BSTR bstrName = bstr_from_utf8(ruleName);
-    if (bstrName) {
-      hr = fwRules->lpVtbl->Remove(fwRules, bstrName);
-      if (SUCCEEDED(hr)) {
-        LOG_I("svc_inst_mgr", "Firewall rule '%s' removed", ruleName);
-      } else if (hr != HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
-        LOG_W("svc_inst_mgr",
-              "Firewall remove: Remove failed (hr=0x%08lx) for '%s'", hr,
-              ruleName);
-      }
-      SysFreeString(bstrName);
-    }
-  }
-
-cleanup:
-  if (fwRules)
-    fwRules->lpVtbl->Release(fwRules);
-  if (fwPolicy)
-    fwPolicy->lpVtbl->Release(fwPolicy);
-  if (comInitialized)
-    CoUninitialize();
 }
 
 /* ── inst_mgr_start (single instance) ──────────────────────────── */
