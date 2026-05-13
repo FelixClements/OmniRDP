@@ -51,6 +51,14 @@ static VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv) {
 static SERVICE_TABLE_ENTRY serviceTable[] = {
     {(LPSTR)g_serviceName, (LPSERVICE_MAIN_FUNCTION)ServiceMain}, {NULL, NULL}};
 
+static int copy_arg_string(char *dest, size_t dest_size, const char *src) {
+  int ret;
+  if (!dest || dest_size == 0 || !src)
+    return -1;
+  ret = snprintf(dest, dest_size, "%s", src);
+  return (ret < 0 || (size_t)ret >= dest_size) ? -1 : 0;
+}
+
 /* ── Usage ──────────────────────────────────────────────────────── */
 
 static void print_usage(const char *program) {
@@ -97,12 +105,16 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[i], "--run") == 0) {
       runConsole = TRUE;
     } else if (strcmp(argv[i], "--service-name") == 0 && i + 1 < argc) {
-      strncpy(serviceName, argv[++i], sizeof(serviceName) - 1);
-      serviceName[sizeof(serviceName) - 1] = '\0';
+      if (copy_arg_string(serviceName, sizeof(serviceName), argv[++i]) != 0) {
+        fprintf(stderr, "Service name too long.\n");
+        return 1;
+      }
       hasServiceName = TRUE;
     } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
-      strncpy(configPath, argv[++i], sizeof(configPath) - 1);
-      configPath[sizeof(configPath) - 1] = '\0';
+      if (copy_arg_string(configPath, sizeof(configPath), argv[++i]) != 0) {
+        fprintf(stderr, "Config path too long.\n");
+        return 1;
+      }
       hasConfigPath = TRUE;
     } else if (strcmp(argv[i], "--service") == 0) {
       /*
@@ -159,10 +171,11 @@ int main(int argc, char *argv[]) {
 
   /* ── Service mode (SCM) ────────────────────────────────────── */
   /* Store globals for ServiceMain callback */
-  strncpy(g_serviceName, serviceName, sizeof(g_serviceName) - 1);
-  g_serviceName[sizeof(g_serviceName) - 1] = '\0';
-  strncpy(g_configPath, configPath, sizeof(g_configPath) - 1);
-  g_configPath[sizeof(g_configPath) - 1] = '\0';
+  if (copy_arg_string(g_serviceName, sizeof(g_serviceName), serviceName) != 0 ||
+      copy_arg_string(g_configPath, sizeof(g_configPath), configPath) != 0) {
+    fprintf(stderr, "Service name or config path too long.\n");
+    return 1;
+  }
 
   /* Update the service table with the actual service name.
    * StartServiceCtrlDispatcher requires a non-const pointer. */

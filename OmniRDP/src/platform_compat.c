@@ -14,6 +14,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+extern char **environ;
+#endif
+
 static platform_shutdown_fn g_shutdown_handler = NULL;
 
 #ifdef _WIN32
@@ -35,15 +39,17 @@ void platform_signal_init(platform_shutdown_fn handler) {
 }
 
 const char *platform_cert_path(void) {
-  const char *env = getenv("MULTIPLEXER_CERT");
-  if (env)
+  static char env[MAX_PATH];
+  DWORD len = GetEnvironmentVariableA("MULTIPLEXER_CERT", env, ARRAYSIZE(env));
+  if ((len > 0) && (len < ARRAYSIZE(env)))
     return env;
   return "server.crt";
 }
 
 const char *platform_key_path(void) {
-  const char *env = getenv("MULTIPLEXER_KEY");
-  if (env)
+  static char env[MAX_PATH];
+  DWORD len = GetEnvironmentVariableA("MULTIPLEXER_KEY", env, ARRAYSIZE(env));
+  if ((len > 0) && (len < ARRAYSIZE(env)))
     return env;
   return "server.key";
 }
@@ -76,16 +82,26 @@ void platform_signal_init(platform_shutdown_fn handler) {
 }
 
 const char *platform_cert_path(void) {
-  const char *env = getenv("MULTIPLEXER_CERT");
-  if (env)
-    return env;
+  const char prefix[] = "MULTIPLEXER_CERT=";
+  const size_t prefix_len = sizeof(prefix) - 1;
+  if (environ) {
+    for (char **entry = environ; *entry; entry++) {
+      if (strncmp(*entry, prefix, prefix_len) == 0)
+        return *entry + prefix_len;
+    }
+  }
   return "/tmp/server.crt";
 }
 
 const char *platform_key_path(void) {
-  const char *env = getenv("MULTIPLEXER_KEY");
-  if (env)
-    return env;
+  const char prefix[] = "MULTIPLEXER_KEY=";
+  const size_t prefix_len = sizeof(prefix) - 1;
+  if (environ) {
+    for (char **entry = environ; *entry; entry++) {
+      if (strncmp(*entry, prefix, prefix_len) == 0)
+        return *entry + prefix_len;
+    }
+  }
   return "/tmp/server.key";
 }
 

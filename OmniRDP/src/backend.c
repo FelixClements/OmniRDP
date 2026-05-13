@@ -152,6 +152,7 @@ static void backend_normalize_domain_username(const char **domain,
   const char *u = username ? *username : NULL;
   const char *d = domain ? *domain : NULL;
   const char *slash;
+  int written = 0;
 
   if (!u || u[0] == '\0' || (d && d[0] != '\0') || strchr(u, '@'))
     return;
@@ -162,10 +163,12 @@ static void backend_normalize_domain_username(const char **domain,
   size_t dom_len = (size_t)(slash - u);
   if (dom_len >= sizeof(domain_buf))
     dom_len = sizeof(domain_buf) - 1;
-  strncpy(domain_buf, u, dom_len);
-  domain_buf[dom_len] = '\0';
-  strncpy(user_buf, slash + 1, sizeof(user_buf) - 1);
-  user_buf[sizeof(user_buf) - 1] = '\0';
+  written = snprintf(domain_buf, sizeof(domain_buf), "%.*s", (int)dom_len, u);
+  if ((written < 0) || ((size_t)written >= sizeof(domain_buf)))
+    return;
+  written = snprintf(user_buf, sizeof(user_buf), "%s", slash + 1);
+  if ((written < 0) || ((size_t)written >= sizeof(user_buf)))
+    return;
   if (domain)
     *domain = domain_buf;
   *username = user_buf;
@@ -1428,9 +1431,21 @@ BackendClient *backend_init(void) {
   if (!client)
     return NULL;
 
-  InitializeCriticalSection(&client->layout_lock);
-  InitializeCriticalSection(&client->pointer_lock);
-  InitializeCriticalSection(&client->refresh_lock);
+  if (!InitializeCriticalSectionAndSpinCount(&client->layout_lock, 4000)) {
+    free(client);
+    return NULL;
+  }
+  if (!InitializeCriticalSectionAndSpinCount(&client->pointer_lock, 4000)) {
+    DeleteCriticalSection(&client->layout_lock);
+    free(client);
+    return NULL;
+  }
+  if (!InitializeCriticalSectionAndSpinCount(&client->refresh_lock, 4000)) {
+    DeleteCriticalSection(&client->layout_lock);
+    DeleteCriticalSection(&client->pointer_lock);
+    free(client);
+    return NULL;
+  }
   client->pointer_visible = TRUE;
   client->pointer_type = SYSPTR_DEFAULT;
   client->pointer_position_generation = 1;

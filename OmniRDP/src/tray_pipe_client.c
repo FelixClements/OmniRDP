@@ -30,6 +30,84 @@
 /** Log source tag. */
 #define LOG_TAG "pipe_client"
 
+typedef struct PipeClientInitNode {
+  PipeClient *client;
+  struct PipeClientInitNode *next;
+} PipeClientInitNode;
+
+static SRWLOCK g_pipe_client_init_lock = SRWLOCK_INIT;
+static PipeClientInitNode *g_pipe_client_init_list = NULL;
+
+static BOOL pipe_client_lock_is_initialized(PipeClient *client) {
+  BOOL initialized = FALSE;
+
+  if (!client)
+    return FALSE;
+
+  AcquireSRWLockShared(&g_pipe_client_init_lock);
+  for (PipeClientInitNode *node = g_pipe_client_init_list; node;
+       node = node->next) {
+    if (node->client == client) {
+      initialized = TRUE;
+      break;
+    }
+  }
+  ReleaseSRWLockShared(&g_pipe_client_init_lock);
+
+  return initialized;
+}
+
+static BOOL pipe_client_register_lock(PipeClient *client) {
+  PipeClientInitNode *node;
+
+  if (!client)
+    return FALSE;
+
+  node = (PipeClientInitNode *)HeapAlloc(GetProcessHeap(), 0, sizeof(*node));
+  if (!node)
+    return FALSE;
+
+  node->client = client;
+
+  AcquireSRWLockExclusive(&g_pipe_client_init_lock);
+  for (PipeClientInitNode *existing = g_pipe_client_init_list; existing;
+       existing = existing->next) {
+    if (existing->client == client) {
+      ReleaseSRWLockExclusive(&g_pipe_client_init_lock);
+      HeapFree(GetProcessHeap(), 0, node);
+      return TRUE;
+    }
+  }
+  node->next = g_pipe_client_init_list;
+  g_pipe_client_init_list = node;
+  ReleaseSRWLockExclusive(&g_pipe_client_init_lock);
+
+  return TRUE;
+}
+
+static void pipe_client_unregister_lock(PipeClient *client) {
+  PipeClientInitNode **link;
+  PipeClientInitNode *removed = NULL;
+
+  if (!client)
+    return;
+
+  AcquireSRWLockExclusive(&g_pipe_client_init_lock);
+  link = &g_pipe_client_init_list;
+  while (*link) {
+    if ((*link)->client == client) {
+      removed = *link;
+      *link = removed->next;
+      break;
+    }
+    link = &(*link)->next;
+  }
+  ReleaseSRWLockExclusive(&g_pipe_client_init_lock);
+
+  if (removed)
+    HeapFree(GetProcessHeap(), 0, removed);
+}
+
 /* ══════════════════════════════════════════════════════════════════ */
 /*  Public API                                                        */
 /* ══════════════════════════════════════════════════════════════════ */
@@ -38,15 +116,27 @@ void pipe_client_init(PipeClient *client, const char *pipeName) {
   if (!client || !pipeName)
     return;
 
+  if (pipe_client_lock_is_initialized(client))
+    pipe_client_cleanup(client);
+
   client->hPipe = INVALID_HANDLE_VALUE;
   client->connected = FALSE;
+  client->pipeName[0] = '\0';
+
+  if (!InitializeCriticalSectionAndSpinCount(&client->lock, 4000)) {
+    LOG_E(LOG_TAG, "PipeClient lock initialisation failed");
+    return;
+  }
+
+  if (!pipe_client_register_lock(client)) {
+    DeleteCriticalSection(&client->lock);
+    LOG_E(LOG_TAG, "PipeClient lock registration failed");
+    return;
+  }
 
   /* Build full pipe path: \\.\pipe\<pipeName> */
-  _snprintf(client->pipeName, sizeof(client->pipeName), "\\\\.\\pipe\\%s",
-            pipeName);
-  client->pipeName[sizeof(client->pipeName) - 1] = '\0';
-
-  InitializeCriticalSection(&client->lock);
+  snprintf(client->pipeName, sizeof(client->pipeName), "\\\\.\\pipe\\%s",
+           pipeName);
 
   LOG_I(LOG_TAG, "PipeClient initialised (pipe: %s)", client->pipeName);
 }
@@ -54,6 +144,11 @@ void pipe_client_init(PipeClient *client, const char *pipeName) {
 int pipe_client_connect(PipeClient *client) {
   if (!client)
     return -1;
+
+  if (!pipe_client_lock_is_initialized(client)) {
+    LOG_E(LOG_TAG, "connect: client not initialised");
+    return -1;
+  }
 
   if (client->connected) {
     LOG_W(LOG_TAG, "Already connected to %s", client->pipeName);
@@ -108,7 +203,10 @@ void pipe_client_disconnect(PipeClient *client) {
 }
 
 BOOL pipe_client_is_connected(PipeClient *client) {
-  return (client && client->connected) ? TRUE : FALSE;
+  return (client && pipe_client_lock_is_initialized(client) &&
+          client->connected)
+             ? TRUE
+             : FALSE;
 }
 
 int pipe_client_send_request(PipeClient *client, const PipeRequest *request,
@@ -116,10 +214,16 @@ int pipe_client_send_request(PipeClient *client, const PipeRequest *request,
   char *jsonReq = NULL;
   char *reply = NULL;
   DWORD replyLen = 0;
+  size_t jsonReqSize = 0;
   int ret = -1;
 
   if (!client || !request || !response)
     return -1;
+
+  if (!pipe_client_lock_is_initialized(client)) {
+    LOG_E(LOG_TAG, "send_request: client not initialised");
+    return -1;
+  }
 
   if (!client->connected) {
     LOG_E(LOG_TAG, "send_request: not connected");
@@ -142,8 +246,12 @@ int pipe_client_send_request(PipeClient *client, const PipeRequest *request,
      * Calculate required buffer size:
      *   fixed overhead ~64 bytes + instance_name + json_payload
      */
-    size_t needed =
-        64 + strlen(request->instance_name) + strlen(request->json_payload);
+    size_t instanceLen =
+        strnlen_s(request->instance_name, sizeof(request->instance_name));
+    size_t payloadLen =
+        strnlen_s(request->json_payload, sizeof(request->json_payload));
+    size_t needed = 64 + instanceLen + payloadLen;
+    jsonReqSize = needed;
 
     jsonReq = (char *)HeapAlloc(GetProcessHeap(), 0, needed);
     if (!jsonReq) {
@@ -160,11 +268,11 @@ int pipe_client_send_request(PipeClient *client, const PipeRequest *request,
   }
 
   LOG_D("pipe_client", "send_request: sending %lu bytes: %s",
-        (DWORD)strlen(jsonReq), jsonReq);
+        (DWORD)strnlen_s(jsonReq, jsonReqSize), jsonReq);
 
   /* ── Send the frame ─────────────────────────────────────────── */
   {
-    DWORD jsonLen = (DWORD)strlen(jsonReq);
+    DWORD jsonLen = (DWORD)strnlen_s(jsonReq, jsonReqSize);
     BOOL sendResult = pipe_frame_send(client->hPipe, jsonReq, jsonLen);
     LOG_D("pipe_client",
           "send_request: pipe_frame_send returned %d, lastError=%lu",
@@ -271,7 +379,8 @@ int pipe_client_send_request(PipeClient *client, const PipeRequest *request,
         len = (size_t)(end - p);
         if (len >= sizeof(response->error_message))
           len = sizeof(response->error_message) - 1;
-        memcpy(response->error_message, p, len);
+        memcpy_s(response->error_message, sizeof(response->error_message), p,
+                 len);
         response->error_message[len] = '\0';
       }
     }
@@ -281,8 +390,7 @@ int pipe_client_send_request(PipeClient *client, const PipeRequest *request,
     p = strstr(reply, "\"json_payload\":");
     if (p) {
       p += 15; /* skip past the key */
-      strncpy(response->json_payload, p, sizeof(response->json_payload) - 1);
-      response->json_payload[sizeof(response->json_payload) - 1] = '\0';
+      snprintf(response->json_payload, sizeof(response->json_payload), "%s", p);
     }
   }
 
@@ -307,6 +415,11 @@ int pipe_client_recv_push(PipeClient *client, PipePushType *pushType,
 
   if (!client || !pushType || !payload || !payloadLen)
     return -1;
+
+  if (!pipe_client_lock_is_initialized(client)) {
+    LOG_E(LOG_TAG, "recv_push: client not initialised");
+    return -1;
+  }
 
   if (!client->connected)
     return -1;
@@ -371,8 +484,13 @@ void pipe_client_cleanup(PipeClient *client) {
   if (!client)
     return;
 
+  if (!pipe_client_lock_is_initialized(client))
+    return;
+
   pipe_client_disconnect(client);
+  pipe_client_unregister_lock(client);
   DeleteCriticalSection(&client->lock);
+  client->pipeName[0] = '\0';
 
   LOG_I(LOG_TAG, "PipeClient cleaned up");
 }

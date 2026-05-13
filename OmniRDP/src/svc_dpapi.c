@@ -30,6 +30,8 @@ static const char b64_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                                    "abcdefghijklmnopqrstuvwxyz"
                                    "0123456789+/";
 
+static size_t dpapi_prefix_len(void) { return strnlen_s(DPAPI_PREFIX, 64); }
+
 /**
  * @brief Encode a byte buffer to base64 (null-terminated).
  *
@@ -158,7 +160,7 @@ static int b64_decode(const char *in, size_t in_len, unsigned char *out,
 int svc_dpapi_is_encrypted(const char *password) {
   if (!password)
     return 0;
-  return (strncmp(password, DPAPI_PREFIX, strlen(DPAPI_PREFIX)) == 0) ? 1 : 0;
+  return (strncmp(password, DPAPI_PREFIX, dpapi_prefix_len()) == 0) ? 1 : 0;
 }
 
 int svc_dpapi_decrypt(const char *encrypted_password, char *plaintext_out,
@@ -167,14 +169,16 @@ int svc_dpapi_decrypt(const char *encrypted_password, char *plaintext_out,
     return -1;
 
   /* 1. Verify the dpapi: prefix */
-  size_t prefix_len = strlen(DPAPI_PREFIX);
+  size_t prefix_len = dpapi_prefix_len();
   if (strncmp(encrypted_password, DPAPI_PREFIX, prefix_len) != 0)
     return -1;
 
   /* 2. Skip past the prefix to get the base64 string */
   const char *b64_str = encrypted_password + prefix_len;
-  size_t b64_len = strlen(b64_str);
+  size_t b64_len = strnlen_s(b64_str, 16384);
   if (b64_len == 0)
+    return -1;
+  if (b64_len >= 16384)
     return -1;
 
   /* 3. Base64-decode to get the encrypted blob */
@@ -216,7 +220,11 @@ int svc_dpapi_decrypt(const char *encrypted_password, char *plaintext_out,
   if (copy_len >= plaintext_out_size)
     copy_len = plaintext_out_size - 1;
 
-  memcpy(plaintext_out, decrypted_blob.pbData, copy_len);
+  if (memcpy_s(plaintext_out, plaintext_out_size, decrypted_blob.pbData,
+               copy_len) != 0) {
+    LocalFree(decrypted_blob.pbData);
+    return -1;
+  }
   plaintext_out[copy_len] = '\0';
 
   /* 6. Free DPAPI-allocated memory */
@@ -230,7 +238,9 @@ int svc_dpapi_encrypt(const char *plaintext, char *encrypted_out,
   if (!plaintext || !encrypted_out || encrypted_out_size == 0)
     return -1;
 
-  size_t plaintext_len = strlen(plaintext);
+  size_t plaintext_len = strnlen_s(plaintext, 4096);
+  if (plaintext_len >= 4096)
+    return -1;
 
   /* 1. Create a DATA_BLOB from the plaintext password */
   DATA_BLOB plaintext_blob;
@@ -274,14 +284,19 @@ int svc_dpapi_encrypt(const char *plaintext, char *encrypted_out,
   }
 
   /* 4. Format as "dpapi:<base64>" into encrypted_out */
-  size_t prefix_len = strlen(DPAPI_PREFIX);
+  size_t prefix_len = dpapi_prefix_len();
   if (encrypted_out_size < prefix_len + (size_t)b64_len + 1) {
     free(b64_buf);
     return -1;
   }
 
-  memcpy(encrypted_out, DPAPI_PREFIX, prefix_len);
-  memcpy(encrypted_out + prefix_len, b64_buf, (size_t)b64_len);
+  if (memcpy_s(encrypted_out, encrypted_out_size, DPAPI_PREFIX, prefix_len) !=
+          0 ||
+      memcpy_s(encrypted_out + prefix_len, encrypted_out_size - prefix_len,
+               b64_buf, (size_t)b64_len) != 0) {
+    free(b64_buf);
+    return -1;
+  }
   encrypted_out[prefix_len + (size_t)b64_len] = '\0';
 
   free(b64_buf);
@@ -300,15 +315,21 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
     return -1;
 
   /* ── Open original file for reading ───────────────────────── */
-  FILE *orig = fopen(config_path, "r");
+  FILE *orig = NULL;
+  fopen_s(&orig, config_path, "r");
   if (!orig)
     return -1;
 
   /* ── Build temp file path ─────────────────────────────────── */
   char tmp_path[MAX_PATH];
-  _snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", config_path);
+  ret = _snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", config_path);
+  if (ret < 0 || (size_t)ret >= sizeof(tmp_path)) {
+    fclose(orig);
+    return -1;
+  }
 
-  FILE *tmp = fopen(tmp_path, "w");
+  FILE *tmp = NULL;
+  fopen_s(&tmp, tmp_path, "w");
   if (!tmp) {
     fclose(orig);
     return -1;
@@ -338,18 +359,32 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
         size_t sec_len = (size_t)(end_bracket - p - 1);
         if (sec_len >= sizeof(sec))
           sec_len = sizeof(sec) - 1;
-        strncpy(sec, p + 1, sec_len);
+        if (memcpy_s(sec, sizeof(sec), p + 1, sec_len) != 0) {
+          fclose(orig);
+          fclose(tmp);
+          remove(tmp_path);
+          return -1;
+        }
         sec[sec_len] = '\0';
 
         /* Trim whitespace from section name */
         char *sp = sec;
         while (*sp && isspace((unsigned char)*sp))
           sp++;
-        char *se = sp + strlen(sp) - 1;
-        while (se > sp && isspace((unsigned char)*se))
-          *se-- = '\0';
+        size_t sp_len = strnlen_s(sp, sizeof(sec));
+        if (sp_len > 0) {
+          char *se = sp + sp_len - 1;
+          while (se > sp && isspace((unsigned char)*se))
+            *se-- = '\0';
+        }
 
-        strncpy(current_section, sp, sizeof(current_section) - 1);
+        if (_snprintf(current_section, sizeof(current_section), "%s", sp) <
+            0) {
+          fclose(orig);
+          fclose(tmp);
+          remove(tmp_path);
+          return -1;
+        }
         current_section[sizeof(current_section) - 1] = '\0';
         in_target_section = (strcmp(current_section, section) == 0);
       } else {
@@ -396,15 +431,20 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
 
               /* Copy the value and trim trailing ws/newlines */
               char value[8192];
-              strncpy(value, val_start, sizeof(value) - 1);
+              if (_snprintf(value, sizeof(value), "%s", val_start) < 0) {
+                fclose(orig);
+                fclose(tmp);
+                remove(tmp_path);
+                return -1;
+              }
               value[sizeof(value) - 1] = '\0';
 
-              size_t vlen = strlen(value);
+              size_t vlen = strnlen_s(value, sizeof(value));
               while (vlen > 0 && isspace((unsigned char)value[vlen - 1]))
                 value[--vlen] = '\0';
 
               /* Check if already encrypted */
-              if (strncmp(value, DPAPI_PREFIX, strlen(DPAPI_PREFIX)) != 0) {
+              if (strncmp(value, DPAPI_PREFIX, dpapi_prefix_len()) != 0) {
                 /* Encrypt the value */
                 char encrypted[4096];
                 if (svc_dpapi_encrypt(value, encrypted, sizeof(encrypted)) ==

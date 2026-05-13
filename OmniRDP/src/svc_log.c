@@ -27,6 +27,7 @@
 
 #define LOG_FILE_NAME "OmniRDP-svc.log"
 #define LINE_BUF_SIZE 8192
+#define LOG_CS_SPIN_COUNT 4000U
 
 /* ── Internal state ───────────────────────────────────────────── */
 
@@ -67,8 +68,9 @@ static int svc_log_mkdir_recursive(const char *path) {
 
   /* One or more parent components are missing -- walk the path. */
   char tmp[MAX_PATH];
-  strncpy(tmp, path, sizeof(tmp) - 1);
-  tmp[sizeof(tmp) - 1] = '\0';
+  if (snprintf(tmp, sizeof(tmp), "%s", path) < 0 ||
+      strnlen_s(path, sizeof(tmp)) >= sizeof(tmp))
+    return -1;
 
   /* Skip the leading "X:\" (drive root) on absolute paths */
   char *p = tmp;
@@ -190,7 +192,7 @@ static void svc_log_rotate_internal(void) {
   MoveFileExA(g_log_path, newpath, MOVEFILE_REPLACE_EXISTING);
 
   /* 5. Open a fresh file */
-  g_logfile = fopen(g_log_path, "a");
+  fopen_s(&g_logfile, g_log_path, "a");
 }
 
 /**
@@ -233,8 +235,9 @@ int svc_log_rotate_file(const char *filepath, FILE **logfile_ptr,
 
   /* Extract directory from filepath */
   char dir[MAX_PATH];
-  strncpy(dir, filepath, sizeof(dir) - 1);
-  dir[sizeof(dir) - 1] = '\0';
+  if (snprintf(dir, sizeof(dir), "%s", filepath) < 0 ||
+      strnlen_s(filepath, sizeof(dir)) >= sizeof(dir))
+    return -1;
   char *backslash = strrchr(dir, '\\');
   if (backslash) {
     *backslash = '\0';
@@ -266,7 +269,7 @@ int svc_log_rotate_file(const char *filepath, FILE **logfile_ptr,
   MoveFileExA(filepath, newpath, MOVEFILE_REPLACE_EXISTING);
 
   /* 5. Open a fresh file */
-  *logfile_ptr = fopen(filepath, "a");
+  fopen_s(logfile_ptr, filepath, "a");
   return (*logfile_ptr != NULL) ? 0 : -1;
 }
 
@@ -312,20 +315,27 @@ int svc_log_init(const char *log_dir, SvcLogLevel log_level,
   svc_log_mkdir_recursive(log_dir);
 
   /* Open the log file for appending */
-  FILE *f = fopen(g_log_path, "a");
+  FILE *f = NULL;
+  fopen_s(&f, g_log_path, "a");
   if (!f)
     return -1; /* directory creation may have failed */
 
   /* Store copies of configuration strings */
-  strncpy(g_log_dir, log_dir, sizeof(g_log_dir) - 1);
-  g_log_dir[sizeof(g_log_dir) - 1] = '\0';
+  if (snprintf(g_log_dir, sizeof(g_log_dir), "%s", log_dir) < 0 ||
+      strnlen_s(log_dir, sizeof(g_log_dir)) >= sizeof(g_log_dir)) {
+    fclose(f);
+    return -1;
+  }
 
   g_min_level = log_level;
   g_max_size = max_size_mb;
   g_max_files = max_files;
 
   /* Initialise synchronisation */
-  InitializeCriticalSection(&g_cs);
+  if (!InitializeCriticalSectionAndSpinCount(&g_cs, LOG_CS_SPIN_COUNT)) {
+    fclose(f);
+    return -1;
+  }
 
   g_logfile = f;
   g_init = 1;

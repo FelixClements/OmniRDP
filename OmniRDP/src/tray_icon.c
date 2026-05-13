@@ -449,7 +449,11 @@ int tray_icon_init(TrayAppCtx *ctx, HINSTANCE hInstance) {
   ctx->hInstance = hInstance;
 
   /* ── Initialise synchronisation ───────────────────────────── */
-  InitializeCriticalSection(&ctx->lock);
+  if (!InitializeCriticalSectionAndSpinCount(&ctx->lock, 4000)) {
+    LOG_E(LOG_TAG, "Critical section initialisation failed: %lu",
+          GetLastError());
+    return -1;
+  }
   ctx->running = TRUE;
   ctx->currentState = TRAY_ICON_GRAY;
 
@@ -770,15 +774,14 @@ void tray_icon_discover_services(TrayAppCtx *ctx) {
     if (_strnicmp(svcName, "OmniRDP", 7) != 0)
       continue;
     /* Must be exactly "OmniRDP" or start with "OmniRDP-" */
-    if (strlen(svcName) > 7 && svcName[7] != '-')
+    if (svcName[7] != '\0' && svcName[7] != '-')
       continue;
 
     TrayServiceInfo *svc = &ctx->services[ctx->serviceCount];
     memset(svc, 0, sizeof(TrayServiceInfo));
 
     /* Store the service name */
-    strncpy(svc->serviceName, svcName, sizeof(svc->serviceName) - 1);
-    svc->serviceName[sizeof(svc->serviceName) - 1] = '\0';
+    snprintf(svc->serviceName, sizeof(svc->serviceName), "%s", svcName);
 
     /* Derive pipe name: replace hyphens with underscores, append "_Pipe" */
     {
@@ -793,7 +796,8 @@ void tray_icon_discover_services(TrayAppCtx *ctx) {
           *dst++ = *src;
         src++;
       }
-      memcpy(dst, "_Pipe", 6); /* includes NUL */
+      snprintf(dst, (size_t)(svc->pipeName + sizeof(svc->pipeName) - dst),
+               "_Pipe");
     }
 
     /* Initialise and attempt to connect the pipe client */
@@ -951,7 +955,7 @@ void tray_icon_refresh_instances(TrayAppCtx *ctx) {
             size_t len = (size_t)(valEnd - valStart);
             if (len > sizeof(info->name) - 1)
               len = sizeof(info->name) - 1;
-            memcpy(info->name, valStart, len);
+            memcpy_s(info->name, sizeof(info->name), valStart, len);
             info->name[len] = '\0';
           }
         }
@@ -996,7 +1000,8 @@ void tray_icon_refresh_instances(TrayAppCtx *ctx) {
             size_t len = (size_t)(valEnd - valStart);
             if (len > sizeof(info->backend_hostname) - 1)
               len = sizeof(info->backend_hostname) - 1;
-            memcpy(info->backend_hostname, valStart, len);
+            memcpy_s(info->backend_hostname, sizeof(info->backend_hostname),
+                     valStart, len);
             info->backend_hostname[len] = '\0';
           }
         }
@@ -1147,7 +1152,9 @@ static void tray_on_command(TrayAppCtx *ctx, WPARAM wParam) {
       /* Replace tray exe name with service exe name */
       char *lastSlash = strrchr(exePath, '\\');
       if (lastSlash) {
-        strcpy(lastSlash + 1, "OmniRDP-svc.exe");
+        snprintf(lastSlash + 1,
+                 (size_t)(exePath + sizeof(exePath) - (lastSlash + 1)),
+                 "OmniRDP-svc.exe");
       }
 
       SHELLEXECUTEINFOA sei = {0};
@@ -1240,8 +1247,8 @@ static void tray_on_command(TrayAppCtx *ctx, WPARAM wParam) {
             PipeRequest req;
             memset(&req, 0, sizeof(req));
             req.command = cmd;
-            strncpy(req.instance_name, instName, sizeof(req.instance_name) - 1);
-            req.instance_name[sizeof(req.instance_name) - 1] = '\0';
+            snprintf(req.instance_name, sizeof(req.instance_name), "%s",
+                     instName);
 
             PipeResponse resp;
             memset(&resp, 0, sizeof(resp));

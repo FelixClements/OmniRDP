@@ -127,7 +127,6 @@ test_joined_state_controls_drdynvc_init_and_rdpgfx_open_paths(void) {
   gfx.rdpgfx = (RdpgfxServerContext *)0x1;
   assert(!viewer_gfx_rdpgfx_open_should_run(&gfx));
 
-  gfx.drdynvc_state = DRDYNVC_STATE_NONE;
   gfx.rdpgfx = NULL;
 
   gfx.drdynvc_joined = TRUE;

@@ -10,6 +10,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -409,7 +413,9 @@ int instance_runner_main(int argc, char *argv[]) {
     char *lastSlash = strrchr(exePath, '\\');
     if (lastSlash) {
       size_t dirLen = (size_t)(lastSlash - exePath);
-      memcpy(exeDir, exePath, dirLen);
+      if (dirLen >= sizeof(exeDir))
+        dirLen = sizeof(exeDir) - 1;
+      memmove(exeDir, exePath, dirLen);
       exeDir[dirLen] = '\0';
       SetCurrentDirectoryA(exeDir);
     }
@@ -474,7 +480,19 @@ int instance_runner_main(int argc, char *argv[]) {
     /* Open viewer.log ourselves and store rotation params */
     snprintf(g_viewer_log_path, sizeof(g_viewer_log_path), "%s\\viewer.log",
              instance_log_dir);
-    g_viewer_logfile = fopen(g_viewer_log_path, "a");
+#ifdef _WIN32
+    if (fopen_s(&g_viewer_logfile, g_viewer_log_path, "a") != 0)
+      g_viewer_logfile = NULL;
+#else
+    {
+      int fd = open(g_viewer_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+      if (fd >= 0) {
+        g_viewer_logfile = fdopen(fd, "a");
+        if (!g_viewer_logfile)
+          close(fd);
+      }
+    }
+#endif
     g_viewer_max_size_mb = config->service.log_max_size_mb;
     g_viewer_max_files = config->service.log_max_files;
     LOG_I("instance_runner",

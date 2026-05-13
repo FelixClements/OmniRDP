@@ -41,6 +41,20 @@ static BOOL WINAPI console_ctrl_handler(DWORD dwCtrlType);
  */
 static OmniRDPSvcContext *g_ctx = NULL;
 
+static int svc_copy_string(char *dest, size_t dest_size, const char *src) {
+  int ret;
+  if (!dest || dest_size == 0 || !src) {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return -1;
+  }
+  ret = snprintf(dest, dest_size, "%s", src);
+  if (ret < 0 || (size_t)ret >= dest_size) {
+    SetLastError(ERROR_INSUFFICIENT_BUFFER);
+    return -1;
+  }
+  return 0;
+}
+
 /* ── Helpers ───────────────────────────────────────────────────── */
 
 /**
@@ -86,7 +100,8 @@ static int get_binary_path(const char *binary_name, char *out,
 
   *(last_slash + 1) = '\0'; /* keep the trailing backslash */
 
-  if (_snprintf(out, out_size, "%s%s", module_path, binary_name) < 0)
+  int ret = _snprintf(out, out_size, "%s%s", module_path, binary_name);
+  if (ret < 0 || (size_t)ret >= out_size)
     return -1;
 
   return 0;
@@ -243,8 +258,8 @@ static int prepare_config_path_acl(const char *configPath,
     return -1;
   }
 
-  strncpy(dirPath, configPath, sizeof(dirPath) - 1);
-  dirPath[sizeof(dirPath) - 1] = '\0';
+  if (svc_copy_string(dirPath, sizeof(dirPath), configPath) != 0)
+    return -1;
   lastSlash = strrchr(dirPath, '\\');
   if (!lastSlash) {
     SetLastError(ERROR_INVALID_PARAMETER);
@@ -265,10 +280,15 @@ static int prepare_config_path_acl(const char *configPath,
 /* ── svc_config_write_template ───────────────────────────────────── */
 
 int svc_config_write_template(const char *configPath) {
+  if (!configPath || configPath[0] == '\0') {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return -1;
+  }
+
   /* Create directory structure */
   char dirPath[MAX_PATH];
-  strncpy(dirPath, configPath, sizeof(dirPath) - 1);
-  dirPath[sizeof(dirPath) - 1] = '\0';
+  if (svc_copy_string(dirPath, sizeof(dirPath), configPath) != 0)
+    return -1;
   char *lastSlash = strrchr(dirPath, '\\');
   if (lastSlash) {
     *lastSlash = '\0';
@@ -276,7 +296,8 @@ int svc_config_write_template(const char *configPath) {
     SHCreateDirectoryExA(NULL, dirPath, NULL);
   }
 
-  FILE *fp = fopen(configPath, "w");
+  FILE *fp = NULL;
+  fopen_s(&fp, configPath, "w");
   if (!fp) {
     return -1;
   }
@@ -500,7 +521,12 @@ int svc_service_install(const char *serviceName, const char *configPath) {
   }
 
   if (configPath && configPath[0] != '\0') {
-    size_t existing = strlen(binaryPath);
+    size_t existing = strnlen_s(binaryPath, sizeof(binaryPath));
+    if (existing >= sizeof(binaryPath)) {
+      fprintf(stderr, "Binary path too long\n");
+      CloseServiceHandle(schSCManager);
+      return -1;
+    }
     ret = _snprintf(binaryPath + existing, sizeof(binaryPath) - existing,
                     " --config \"%s\"", configPath);
     if (ret < 0 || existing + (size_t)ret >= sizeof(binaryPath)) {
@@ -733,7 +759,7 @@ int svc_service_uninstall(const char *serviceName) {
   }
 
   CloseServiceHandle(schService);
-  CloseServiceHandle(schSCManager);
+  schService = NULL;
 
   /* Wait for deletion to take effect */
   for (int i = 0; i < 15; i++) {
@@ -744,8 +770,11 @@ int svc_service_uninstall(const char *serviceName) {
         break;
     } else {
       CloseServiceHandle(schService);
+      schService = NULL;
     }
   }
+
+  CloseServiceHandle(schSCManager);
 
   printf("Service '%s' uninstalled successfully.\n", serviceName);
   return 0;
@@ -755,15 +784,20 @@ int svc_service_uninstall(const char *serviceName) {
 
 int svc_service_start(const char *serviceName, const char *configPath) {
   OmniRDPSvcContext ctx;
+  BOOL mgrInitialized = FALSE;
+  BOOL pipeInitialized = FALSE;
   memset(&ctx, 0, sizeof(ctx));
   g_ctx = &ctx;
 
   /* ── Determine service name ─────────────────────────────── */
   if (serviceName && serviceName[0] != '\0') {
-    strncpy(ctx.serviceName, serviceName, sizeof(ctx.serviceName) - 1);
-    ctx.serviceName[sizeof(ctx.serviceName) - 1] = '\0';
+    if (svc_copy_string(ctx.serviceName, sizeof(ctx.serviceName),
+                        serviceName) != 0) {
+      g_ctx = NULL;
+      return -1;
+    }
   } else {
-    strncpy(ctx.serviceName, "OmniRDP", sizeof(ctx.serviceName) - 1);
+    svc_copy_string(ctx.serviceName, sizeof(ctx.serviceName), "OmniRDP");
   }
   ctx.shuttingDown = FALSE;
 
@@ -799,8 +833,12 @@ int svc_service_start(const char *serviceName, const char *configPath) {
   if (!configPath || configPath[0] == '\0')
     configPath = "C:\\ProgramData\\OmniRDP\\config.ini";
 
-  strncpy(ctx.configPath, configPath, sizeof(ctx.configPath) - 1);
-  ctx.configPath[sizeof(ctx.configPath) - 1] = '\0';
+  if (svc_copy_string(ctx.configPath, sizeof(ctx.configPath), configPath) !=
+      0) {
+    CloseHandle(ctx.hStopEvent);
+    g_ctx = NULL;
+    return -1;
+  }
 
   ctx.config = svc_config_load(configPath);
   if (!ctx.config) {
@@ -827,11 +865,15 @@ int svc_service_start(const char *serviceName, const char *configPath) {
     if (svcCfg && svcCfg->log_dir[0] != '\0') {
       /* Use configured log dir, but append service name for per-service
        * isolation */
-      snprintf(log_dir, sizeof(log_dir), "%s\\%s", svcCfg->log_dir,
-               ctx.serviceName);
+      if (snprintf(log_dir, sizeof(log_dir), "%s\\%s", svcCfg->log_dir,
+                   ctx.serviceName) < 0 ||
+          strnlen_s(log_dir, sizeof(log_dir)) >= sizeof(log_dir) - 1)
+        log_dir[0] = '\0';
     } else {
-      snprintf(log_dir, sizeof(log_dir), "C:\\ProgramData\\OmniRDP\\logs\\%s",
-               ctx.serviceName);
+      if (snprintf(log_dir, sizeof(log_dir),
+                   "C:\\ProgramData\\OmniRDP\\logs\\%s", ctx.serviceName) < 0 ||
+          strnlen_s(log_dir, sizeof(log_dir)) >= sizeof(log_dir) - 1)
+        log_dir[0] = '\0';
     }
 
     if (svcCfg) {
@@ -851,8 +893,7 @@ int svc_service_start(const char *serviceName, const char *configPath) {
   if (get_binary_path("OmniRDP.exe", ctx.exePath, sizeof(ctx.exePath)) != 0) {
     LOG_W("svc_service_start",
           "Failed to locate OmniRDP.exe; using fallback name");
-    strncpy(ctx.exePath, "OmniRDP.exe", sizeof(ctx.exePath) - 1);
-    ctx.exePath[sizeof(ctx.exePath) - 1] = '\0';
+    svc_copy_string(ctx.exePath, sizeof(ctx.exePath), "OmniRDP.exe");
   }
 
   /* ── 7. Initialize the instance manager ─────────────────── */
@@ -861,6 +902,7 @@ int svc_service_start(const char *serviceName, const char *configPath) {
     SetEvent(ctx.hStopEvent);
     /* Fall through to the shutdown path */
   } else {
+    mgrInitialized = TRUE;
     /* ── 8. Report SERVICE_RUNNING ───────────────────────── */
     ctx.status.dwCurrentState = SERVICE_RUNNING;
     ctx.status.dwCheckPoint = 0;
@@ -875,17 +917,25 @@ int svc_service_start(const char *serviceName, const char *configPath) {
   }
 
   /* Initialize pipe server for tray app communication */
-  {
+  if (mgrInitialized) {
     char pipeName[256];
-    snprintf(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName);
-    /* Replace hyphens with underscores for Windows pipe name compatibility */
-    for (char *p = pipeName; *p; p++) {
-      if (*p == '-')
-        *p = '_';
-    }
-    if (pipe_server_init(&ctx.pipeServer, pipeName, &ctx.mgr) != 0) {
-      LOG_E("svc_service_start", "Failed to initialize pipe server");
-      /* Continue anyway — pipe server is not critical for operation */
+    if (snprintf(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName) < 0 ||
+        strnlen_s(pipeName, sizeof(pipeName)) >= sizeof(pipeName))
+      pipeName[0] = '\0';
+    if (pipeName[0] == '\0') {
+      LOG_E("svc_service_start", "Pipe name construction failed");
+    } else {
+      /* Replace hyphens with underscores for Windows pipe name compatibility */
+      for (char *p = pipeName; *p; p++) {
+        if (*p == '-')
+          *p = '_';
+      }
+      if (pipe_server_init(&ctx.pipeServer, pipeName, &ctx.mgr) != 0) {
+        LOG_E("svc_service_start", "Failed to initialize pipe server");
+        /* Continue anyway — pipe server is not critical for operation */
+      } else {
+        pipeInitialized = TRUE;
+      }
     }
   }
 
@@ -902,14 +952,16 @@ int svc_service_start(const char *serviceName, const char *configPath) {
         break; /* stop event was signaled */
 
       /* Poll instance health and reconnection logic */
-      inst_mgr_poll(&ctx.mgr);
+      if (mgrInitialized)
+        inst_mgr_poll(&ctx.mgr);
 
       /* Push stats to connected tray apps every 5 seconds */
       {
         static ULONGLONG lastStatsPushMs = 0;
         ULONGLONG nowMs = GetTickCount64();
         if (nowMs - lastStatsPushMs >= 5000) {
-          pipe_server_push_stats(&ctx.pipeServer);
+          if (pipeInitialized)
+            pipe_server_push_stats(&ctx.pipeServer);
           lastStatsPushMs = nowMs;
         }
       }
@@ -926,10 +978,16 @@ int svc_service_start(const char *serviceName, const char *configPath) {
                               : 10000;
   SetServiceStatus(ctx.statusHandle, &ctx.status);
 
-  inst_mgr_stop_all(&ctx.mgr);
-  inst_mgr_cleanup(&ctx.mgr);
+  if (pipeInitialized) {
+    pipe_server_stop(&ctx.pipeServer);
+    pipeInitialized = FALSE;
+  }
 
-  pipe_server_stop(&ctx.pipeServer);
+  if (mgrInitialized) {
+    inst_mgr_stop_all(&ctx.mgr);
+    inst_mgr_cleanup(&ctx.mgr);
+    mgrInitialized = FALSE;
+  }
 
   if (ctx.config) {
     svc_config_free(ctx.config);
@@ -956,15 +1014,20 @@ int svc_service_start(const char *serviceName, const char *configPath) {
 
 int svc_service_run_console(const char *serviceName, const char *configPath) {
   OmniRDPSvcContext ctx;
+  BOOL mgrInitialized = FALSE;
+  BOOL pipeInitialized = FALSE;
   memset(&ctx, 0, sizeof(ctx));
   g_ctx = &ctx;
 
   /* ── Service name ──────────────────────────────────────────── */
   if (serviceName && serviceName[0] != '\0') {
-    strncpy(ctx.serviceName, serviceName, sizeof(ctx.serviceName) - 1);
-    ctx.serviceName[sizeof(ctx.serviceName) - 1] = '\0';
+    if (svc_copy_string(ctx.serviceName, sizeof(ctx.serviceName),
+                        serviceName) != 0) {
+      g_ctx = NULL;
+      return -1;
+    }
   } else {
-    strncpy(ctx.serviceName, "OmniRDP", sizeof(ctx.serviceName) - 1);
+    svc_copy_string(ctx.serviceName, sizeof(ctx.serviceName), "OmniRDP");
   }
   ctx.shuttingDown = FALSE;
 
@@ -987,8 +1050,12 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
   if (!configPath || configPath[0] == '\0')
     configPath = "C:\\ProgramData\\OmniRDP\\config.ini";
 
-  strncpy(ctx.configPath, configPath, sizeof(ctx.configPath) - 1);
-  ctx.configPath[sizeof(ctx.configPath) - 1] = '\0';
+  if (svc_copy_string(ctx.configPath, sizeof(ctx.configPath), configPath) !=
+      0) {
+    CloseHandle(ctx.hStopEvent);
+    g_ctx = NULL;
+    return -1;
+  }
 
   ctx.config = svc_config_load(configPath);
   if (!ctx.config) {
@@ -1015,11 +1082,15 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
     if (svcCfg && svcCfg->log_dir[0] != '\0') {
       /* Use configured log dir, but append service name for per-service
        * isolation */
-      snprintf(log_dir, sizeof(log_dir), "%s\\%s", svcCfg->log_dir,
-               ctx.serviceName);
+      if (snprintf(log_dir, sizeof(log_dir), "%s\\%s", svcCfg->log_dir,
+                   ctx.serviceName) < 0 ||
+          strnlen_s(log_dir, sizeof(log_dir)) >= sizeof(log_dir) - 1)
+        log_dir[0] = '\0';
     } else {
-      snprintf(log_dir, sizeof(log_dir), "C:\\ProgramData\\OmniRDP\\logs\\%s",
-               ctx.serviceName);
+      if (snprintf(log_dir, sizeof(log_dir),
+                   "C:\\ProgramData\\OmniRDP\\logs\\%s", ctx.serviceName) < 0 ||
+          strnlen_s(log_dir, sizeof(log_dir)) >= sizeof(log_dir) - 1)
+        log_dir[0] = '\0';
     }
 
     if (svcCfg) {
@@ -1044,8 +1115,7 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
   if (get_binary_path("OmniRDP.exe", ctx.exePath, sizeof(ctx.exePath)) != 0) {
     LOG_W("svc_service_run_console",
           "Failed to locate OmniRDP.exe; using fallback name");
-    strncpy(ctx.exePath, "OmniRDP.exe", sizeof(ctx.exePath) - 1);
-    ctx.exePath[sizeof(ctx.exePath) - 1] = '\0';
+    svc_copy_string(ctx.exePath, sizeof(ctx.exePath), "OmniRDP.exe");
   }
 
   /* ── Initialize the instance manager ───────────────────────── */
@@ -1055,6 +1125,7 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
            "failed\n");
     SetEvent(ctx.hStopEvent);
   } else {
+    mgrInitialized = TRUE;
     /* ── Start all enabled instances ───────────────────────── */
     inst_mgr_start_all(&ctx.mgr);
 
@@ -1065,17 +1136,25 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
   }
 
   /* Initialize pipe server for tray app communication */
-  {
+  if (mgrInitialized) {
     char pipeName[256];
-    snprintf(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName);
-    /* Replace hyphens with underscores for Windows pipe name compatibility */
-    for (char *p = pipeName; *p; p++) {
-      if (*p == '-')
-        *p = '_';
-    }
-    if (pipe_server_init(&ctx.pipeServer, pipeName, &ctx.mgr) != 0) {
-      LOG_E("svc_service_run_console", "Failed to initialize pipe server");
-      /* Continue anyway — pipe server is not critical for operation */
+    if (snprintf(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName) < 0 ||
+        strnlen_s(pipeName, sizeof(pipeName)) >= sizeof(pipeName))
+      pipeName[0] = '\0';
+    if (pipeName[0] == '\0') {
+      LOG_E("svc_service_run_console", "Pipe name construction failed");
+    } else {
+      /* Replace hyphens with underscores for Windows pipe name compatibility */
+      for (char *p = pipeName; *p; p++) {
+        if (*p == '-')
+          *p = '_';
+      }
+      if (pipe_server_init(&ctx.pipeServer, pipeName, &ctx.mgr) != 0) {
+        LOG_E("svc_service_run_console", "Failed to initialize pipe server");
+        /* Continue anyway — pipe server is not critical for operation */
+      } else {
+        pipeInitialized = TRUE;
+      }
     }
   }
 
@@ -1090,14 +1169,16 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
       DWORD wr = WaitForSingleObject(ctx.hStopEvent, pollIntervalMs);
       if (wr == WAIT_OBJECT_0)
         break;
-      inst_mgr_poll(&ctx.mgr);
+      if (mgrInitialized)
+        inst_mgr_poll(&ctx.mgr);
 
       /* Push stats to connected tray apps every 5 seconds */
       {
         static ULONGLONG lastStatsPushMs = 0;
         ULONGLONG nowMs = GetTickCount64();
         if (nowMs - lastStatsPushMs >= 5000) {
-          pipe_server_push_stats(&ctx.pipeServer);
+          if (pipeInitialized)
+            pipe_server_push_stats(&ctx.pipeServer);
           lastStatsPushMs = nowMs;
         }
       }
@@ -1108,10 +1189,16 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
   LOG_I("svc_service_run_console", "Shutting down...");
   printf("[OmniRDP] Shutting down...\n");
 
-  inst_mgr_stop_all(&ctx.mgr);
-  inst_mgr_cleanup(&ctx.mgr);
+  if (pipeInitialized) {
+    pipe_server_stop(&ctx.pipeServer);
+    pipeInitialized = FALSE;
+  }
 
-  pipe_server_stop(&ctx.pipeServer);
+  if (mgrInitialized) {
+    inst_mgr_stop_all(&ctx.mgr);
+    inst_mgr_cleanup(&ctx.mgr);
+    mgrInitialized = FALSE;
+  }
 
   if (ctx.config) {
     svc_config_free(ctx.config);

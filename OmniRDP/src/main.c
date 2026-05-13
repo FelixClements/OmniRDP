@@ -1,4 +1,6 @@
+#include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +20,36 @@ int instance_runner_main(int argc, char *argv[]);
 
 static volatile int running = 1;
 static ViewerServer *g_server = NULL;
+
+static UINT32 parse_uint32_arg(const char *value, UINT32 default_value,
+                               UINT32 max_value, BOOL *parsed_ok) {
+  char *end = NULL;
+  unsigned long result = 0;
+
+  if (parsed_ok)
+    *parsed_ok = FALSE;
+  if (!value || value[0] == '\0')
+    return default_value;
+
+  errno = 0;
+  result = strtoul(value, &end, 10);
+  if ((errno != 0) || (end == value) || (end && *end != '\0') ||
+      (result > max_value))
+    return default_value;
+
+  if (parsed_ok)
+    *parsed_ok = TRUE;
+  return (UINT32)result;
+}
+
+static size_t arg_bounded_len(const char *value, size_t max_len) {
+  size_t len = 0;
+  if (!value)
+    return 0;
+  while ((len < max_len) && (value[len] != '\0'))
+    len++;
+  return len;
+}
 
 static void shutdown_handler(void) {
   running = 0;
@@ -73,7 +105,7 @@ int main(int argc, char *argv[]) {
   }
 
   const char *hostname = argv[1];
-  UINT16 port = (UINT16)atoi(argv[2]);
+  UINT16 port = (UINT16)parse_uint32_arg(argv[2], 0, UINT16_MAX, NULL);
   const char *username = argv[3];
   const char *password = argv[4];
   const char *domain = NULL;
@@ -87,13 +119,15 @@ int main(int argc, char *argv[]) {
   if (argc > 6) {
     /* Both domain and monitors provided */
     domain = argv[5];
-    monitor_count = (UINT32)atoi(argv[6]);
+    monitor_count = parse_uint32_arg(argv[6], 0, OMNIRDP_MAX_MONITORS, NULL);
   } else if (argc > 5) {
     /* Only one optional arg — is it a monitor count or a domain? */
     const char *maybe_monitors = argv[5];
-    int parsed = atoi(maybe_monitors);
-    if (parsed > 0 && parsed <= OMNIRDP_MAX_MONITORS &&
-        strchr(maybe_monitors, '.') == NULL && strlen(maybe_monitors) < 3) {
+    BOOL parsed_ok = FALSE;
+    UINT32 parsed =
+        parse_uint32_arg(maybe_monitors, 0, OMNIRDP_MAX_MONITORS, &parsed_ok);
+    if (parsed_ok && parsed > 0 && strchr(maybe_monitors, '.') == NULL &&
+        arg_bounded_len(maybe_monitors, 3) < 3) {
       /* Looks like a monitor count (small positive integer), not a domain */
       monitor_count = (UINT32)parsed;
       domain = NULL;

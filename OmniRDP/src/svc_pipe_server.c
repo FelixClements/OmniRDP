@@ -39,6 +39,14 @@
 /** Log file base name (matches svc_log.c). */
 #define LOG_FILE_NAME "OmniRDP-svc.log"
 
+#define PIPE_SERVER_CS_SPIN_COUNT 4000U
+
+static PipeServer *g_initialized_pipe_server = NULL;
+
+static BOOL pipe_server_is_initialized(const PipeServer *server) {
+  return server && g_initialized_pipe_server == server;
+}
+
 /* ── Internal types ────────────────────────────────────────────── */
 
 /**
@@ -153,7 +161,8 @@ static BOOL build_pipe_security_attributes(SECURITY_ATTRIBUTES *sa,
 
     /* Try to get the token of the interactive user from the console session */
     if (WTSQueryUserToken(WTSGetActiveConsoleSessionId(), &hToken)) {
-      if (GetTokenInformation(hToken, TokenUser, NULL, 0, &tokenInfoLen)) {
+      if (!GetTokenInformation(hToken, TokenUser, NULL, 0, &tokenInfoLen) &&
+          GetLastError() == ERROR_INSUFFICIENT_BUFFER && tokenInfoLen > 0) {
         PTOKEN_USER pTokenUser =
             (PTOKEN_USER)HeapAlloc(GetProcessHeap(), 0, tokenInfoLen);
         if (pTokenUser && GetTokenInformation(hToken, TokenUser, pTokenUser,
@@ -351,14 +360,15 @@ static int extract_command(const char *payload) {
   if (!p)
     return -1;
 
-  int cmd = -1;
-  if (sscanf(p + 6, "%d", &cmd) != 1)
+  char *end = NULL;
+  unsigned long cmd = strtoul(p + 6, &end, 10);
+  if (end == p + 6)
     return -1;
 
-  if (cmd < 0 || cmd >= PIPE_CMD_COUNT)
+  if (cmd >= PIPE_CMD_COUNT)
     return -1;
 
-  return cmd;
+  return (int)cmd;
 }
 
 /**
@@ -380,8 +390,17 @@ static int extract_instance_name(const char *payload, char *name,
   if (!p)
     return -1;
 
-  if (sscanf(p, "\"instance_name\":\"%127[^\"]\"", name) != 1)
+  p += sizeof("\"instance_name\":\"") - 1;
+  const char *end = strchr(p, '"');
+  if (!end)
     return -1;
+
+  size_t len = (size_t)(end - p);
+  if (len >= nameSize)
+    return -1;
+  if (memcpy_s(name, nameSize, p, len) != 0)
+    return -1;
+  name[len] = '\0';
 
   return 0;
 }
@@ -474,7 +493,10 @@ static DWORD WINAPI client_handler(LPVOID arg) {
     HeapFree(GetProcessHeap(), 0, payload);
 
     /* Send the response — synchronously (dedicated thread) */
-    DWORD responseLen = (DWORD)strlen(response);
+    size_t responseLenSize = strnlen_s(response, sizeof(response));
+    if (responseLenSize >= sizeof(response))
+      responseLenSize = sizeof(response) - 1;
+    DWORD responseLen = (DWORD)responseLenSize;
     if (responseLen > 0) {
       LOG_D("pipe_server", "Client handler: sending response (%lu bytes): %s",
             responseLen, response);
@@ -822,7 +844,8 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
   logPath[sizeof(logPath) - 1] = '\0';
 
   /* ── Open the log file ───────────────────────────────────── */
-  FILE *f = fopen(logPath, "r");
+  FILE *f = NULL;
+  fopen_s(&f, logPath, "r");
   if (!f) {
     _snprintf(response, respSize,
               "{\"type\":\"response\",\"success\":0,"
@@ -935,7 +958,8 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
       *nextLine = '\0';
 
     /* Trim trailing \r */
-    size_t lineLen = strlen(line);
+    size_t maxLineLen = tailBytes - (size_t)(line - tailBuf);
+    size_t lineLen = strnlen_s(line, maxLineLen + 1);
     while (lineLen > 0 && (line[lineLen - 1] == '\r'))
       line[--lineLen] = '\0';
 
@@ -1094,18 +1118,31 @@ int pipe_server_init(PipeServer *server, const char *pipeName,
   server->running = FALSE;
 
   /* ── Build the full pipe path ──────────────────────────────── */
-  _snprintf(server->pipeName, sizeof(server->pipeName), "\\\\.\\pipe\\%s",
-            pipeName);
-  server->pipeName[sizeof(server->pipeName) - 1] = '\0';
+  int ret = _snprintf(server->pipeName, sizeof(server->pipeName),
+                      "\\\\.\\pipe\\%s", pipeName);
+  if (ret < 0 || (size_t)ret >= sizeof(server->pipeName)) {
+    LOG_E("pipe_server", "Pipe name is too long");
+    memset(server, 0, sizeof(*server));
+    return -1;
+  }
 
   /* ── Initialise the client-list critical section ───────────── */
-  InitializeCriticalSection(&server->lock);
+  if (!InitializeCriticalSectionAndSpinCount(&server->lock,
+                                             PIPE_SERVER_CS_SPIN_COUNT)) {
+    LOG_E("pipe_server", "InitializeCriticalSectionAndSpinCount failed");
+    memset(server, 0, sizeof(*server));
+    return -1;
+  }
+  g_initialized_pipe_server = server;
 
   /* ── Pre-create the first pipe instance to verify security ─── */
   HANDLE hPipe = create_pipe_instance(server->pipeName);
   if (hPipe == INVALID_HANDLE_VALUE) {
     LOG_E("pipe_server", "Initial pipe creation failed — check ACLs");
     DeleteCriticalSection(&server->lock);
+    if (g_initialized_pipe_server == server)
+      g_initialized_pipe_server = NULL;
+    memset(server, 0, sizeof(*server));
     return -1;
   }
   /* Close this test instance; the listener will create real ones. */
@@ -1120,6 +1157,9 @@ int pipe_server_init(PipeServer *server, const char *pipeName,
     LOG_E("pipe_server", "CreateThread(listener) failed: %lu", GetLastError());
     server->running = FALSE;
     DeleteCriticalSection(&server->lock);
+    if (g_initialized_pipe_server == server)
+      g_initialized_pipe_server = NULL;
+    memset(server, 0, sizeof(*server));
     return -1;
   }
 
@@ -1128,7 +1168,7 @@ int pipe_server_init(PipeServer *server, const char *pipeName,
 }
 
 void pipe_server_stop(PipeServer *server) {
-  if (!server)
+  if (!pipe_server_is_initialized(server))
     return;
 
   LOG_I("pipe_server", "Stopping pipe server...");
@@ -1200,6 +1240,9 @@ void pipe_server_stop(PipeServer *server) {
 
   /* ── Clean up synchronisation objects ──────────────────────── */
   DeleteCriticalSection(&server->lock);
+  if (g_initialized_pipe_server == server)
+    g_initialized_pipe_server = NULL;
+  memset(server, 0, sizeof(*server));
 
   LOG_I("pipe_server", "Pipe server stopped");
 }

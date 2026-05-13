@@ -115,18 +115,19 @@ static BOOL viewer_update_ready(const Viewer *viewer, const char *operation) {
   if (!viewer || !peer || !viewer->connected || !viewer->activated ||
       !peer->activated || viewer->stop_requested || !peer->context ||
       !peer->context->update) {
-    WLog_INFO(TAG,
-              "Viewer update gate blocked op=%s viewer=%p peer=%p connected=%s "
-              "viewer_activated=%s peer_activated=%s stop=%s context=%s "
-              "update=%s",
-              operation ? operation : "unknown", (const void *)viewer,
-              (void *)peer, viewer && viewer->connected ? "true" : "false",
-              viewer && viewer->activated ? "true" : "false",
-              peer && peer->activated ? "true" : "false",
-              viewer && viewer->stop_requested ? "true" : "false",
-              peer && peer->context ? "true" : "false",
-              peer && peer->context && peer->context->update ? "true"
-                                                             : "false");
+    WLog_INFO(
+        TAG,
+        "Viewer update gate blocked op=%s viewer=%p peer=%p connected=%s "
+        "viewer_activated=%s peer_activated=%s stop=%s context=%s "
+        "update=%s",
+        operation ? operation : "unknown", (const void *)viewer, (void *)peer,
+        viewer ? (viewer->connected ? "true" : "false") : "false",
+        viewer ? (viewer->activated ? "true" : "false") : "false",
+        peer ? (peer->activated ? "true" : "false") : "false",
+        viewer ? (viewer->stop_requested ? "true" : "false") : "false",
+        peer ? (peer->context ? "true" : "false") : "false",
+        (peer && peer->context) ? (peer->context->update ? "true" : "false")
+                                : "false");
     return FALSE;
   }
 
@@ -206,7 +207,7 @@ static char *viewer_identity_field_to_utf8(const void *field, UINT32 length) {
   result = (char *)calloc((size_t)length + 1, sizeof(char));
   if (!result)
     return NULL;
-  memcpy(result, field, length);
+  memmove(result, field, length);
   return result;
 #endif
 }
@@ -615,9 +616,9 @@ viewer_classic_event_new(const BITMAP_UPDATE *bitmap) {
         free(event);
         return NULL;
       }
-      memcpy(event->bitmap->rectangles[i].bitmapDataStream,
-             bitmap->rectangles[i].bitmapDataStream,
-             bitmap->rectangles[i].bitmapLength);
+      memmove(event->bitmap->rectangles[i].bitmapDataStream,
+              bitmap->rectangles[i].bitmapDataStream,
+              bitmap->rectangles[i].bitmapLength);
     } else {
       event->bitmap->rectangles[i].bitmapDataStream = NULL;
     }
@@ -667,8 +668,8 @@ viewer_surface_bits_event_new(const SURFACE_BITS_COMMAND *cmd) {
       free(event);
       return NULL;
     }
-    memcpy(event->cmd.bmp.bitmapData, cmd->bmp.bitmapData,
-           cmd->bmp.bitmapDataLength);
+    memmove(event->cmd.bmp.bitmapData, cmd->bmp.bitmapData,
+            cmd->bmp.bitmapDataLength);
   } else {
     event->cmd.bmp.bitmapData = NULL;
     event->cmd.bmp.bitmapDataLength = 0;
@@ -953,12 +954,15 @@ viewer_gfx_reset_graphics_pdu_copy(RDPGFX_RESET_GRAPHICS_PDU *destination,
   if (source->monitorCount == 0)
     return TRUE;
 
+  if (!source->monitorDefArray)
+    return FALSE;
+
   monitor_bytes = sizeof(MONITOR_DEF) * source->monitorCount;
   destination->monitorDefArray = (MONITOR_DEF *)malloc(monitor_bytes);
   if (!destination->monitorDefArray)
     return FALSE;
 
-  memcpy(destination->monitorDefArray, source->monitorDefArray, monitor_bytes);
+  memmove(destination->monitorDefArray, source->monitorDefArray, monitor_bytes);
   return TRUE;
 }
 
@@ -1000,12 +1004,16 @@ viewer_gfx_event_new_surface_command(const RDPGFX_SURFACE_COMMAND *cmd) {
   event->u.surface_command.extra = NULL;
 
   if (cmd->length > 0) {
+    if (!cmd->data) {
+      free(event);
+      return NULL;
+    }
     event->u.surface_command.data = (BYTE *)malloc(cmd->length);
     if (!event->u.surface_command.data) {
       free(event);
       return NULL;
     }
-    memcpy(event->u.surface_command.data, cmd->data, cmd->length);
+    memmove(event->u.surface_command.data, cmd->data, cmd->length);
   }
 
   return event;
@@ -1018,7 +1026,12 @@ static ViewerGfxEvent *viewer_gfx_event_new_simple(ViewerGfxEventType type,
   if (!event)
     return NULL;
 
-  memcpy(&event->u, payload, payload_size);
+  if (payload_size > 0 && !payload) {
+    free(event);
+    return NULL;
+  }
+
+  memmove(&event->u, payload, payload_size);
   return event;
 }
 
@@ -1194,12 +1207,16 @@ viewer_gfx_frame_buffer_recompute_ids_locked(ViewerGfxFrameBuffer *buffer) {
   buffer->newest_frame_id = have_frame ? newest : 0;
 }
 
-static void viewer_gfx_frame_buffer_init(ViewerGfxFrameBuffer *buffer) {
+static BOOL viewer_gfx_frame_buffer_init(ViewerGfxFrameBuffer *buffer) {
   if (!buffer || buffer->initialized)
-    return;
+    return buffer && buffer->initialized;
 
-  InitializeCriticalSection(&buffer->lock);
+  if (!InitializeCriticalSectionAndSpinCount(&buffer->lock, 4000)) {
+    WLog_ERR(TAG, "Failed to initialize RDPEGFX frame buffer lock");
+    return FALSE;
+  }
   buffer->initialized = TRUE;
+  return TRUE;
 }
 
 static void viewer_gfx_frame_buffer_reset_locked(ViewerGfxFrameBuffer *buffer) {
@@ -1800,15 +1817,22 @@ static void viewer_disable_rdpgfx_locked(Viewer *viewer) {
   viewer->gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
 }
 
-static void viewer_gfx_publisher_state_init(ViewerGfxPublisherState *gfx) {
+static BOOL viewer_gfx_publisher_state_init(ViewerGfxPublisherState *gfx) {
   if (!gfx || gfx->initialized)
-    return;
+    return gfx && gfx->initialized;
 
-  InitializeCriticalSection(&gfx->lock);
-  viewer_gfx_frame_buffer_init(&gfx->frame_buffer);
+  if (!InitializeCriticalSectionAndSpinCount(&gfx->lock, 4000)) {
+    WLog_ERR(TAG, "Failed to initialize shared RDPEGFX publisher lock");
+    return FALSE;
+  }
+  if (!viewer_gfx_frame_buffer_init(&gfx->frame_buffer)) {
+    DeleteCriticalSection(&gfx->lock);
+    return FALSE;
+  }
   gfx->initialized = TRUE;
   WLog_INFO(TAG, "Initialized shared RDPEGFX frame ring capacity=%u",
             VIEWER_GFX_FRAME_RING_CAPACITY);
+  return TRUE;
 }
 
 static void
@@ -1828,11 +1852,11 @@ viewer_gfx_publisher_state_reset_locked(ViewerGfxPublisherState *gfx) {
    * must exist in the publisher state. If the Windows VM hasn't sent
    * new CreateSurface/MapSurfaceToOutput yet, the preamble sends 0
    * surfaces and the viewer gets no renderable baseline. */
-  memcpy(saved_surfaces, gfx->surfaces, sizeof(saved_surfaces));
+  memmove(saved_surfaces, gfx->surfaces, sizeof(saved_surfaces));
   memset(gfx->surfaces, 0, sizeof(gfx->surfaces));
   viewer_gfx_frame_buffer_reset_locked(&gfx->frame_buffer);
   /* Restore surfaces after ring reset (which preserves golden frame) */
-  memcpy(gfx->surfaces, saved_surfaces, sizeof(saved_surfaces));
+  memmove(gfx->surfaces, saved_surfaces, sizeof(saved_surfaces));
 
   gfx->has_latest_reset_graphics = FALSE;
   gfx->in_frame = FALSE;
@@ -2846,12 +2870,16 @@ static BOOL viewer_input_owner_alive_locked(ViewerServer *server,
   return FALSE;
 }
 
-static void viewer_graphics_context_init(ViewerGraphicsContext *gfx) {
+static BOOL viewer_graphics_context_init(ViewerGraphicsContext *gfx) {
   if (!gfx || gfx->initialized)
-    return;
+    return gfx && gfx->initialized;
 
-  InitializeCriticalSection(&gfx->lock);
+  if (!InitializeCriticalSectionAndSpinCount(&gfx->lock, 4000)) {
+    WLog_ERR(TAG, "Failed to initialize viewer RDPEGFX context lock");
+    return FALSE;
+  }
   gfx->initialized = TRUE;
+  return TRUE;
 }
 
 static void viewer_graphics_context_reset(ViewerGraphicsContext *gfx,
@@ -2917,7 +2945,8 @@ static BOOL viewer_send_state_init(Viewer *viewer) {
   if (!viewer)
     return FALSE;
 
-  InitializeCriticalSection(&viewer->send_lock);
+  if (!InitializeCriticalSectionAndSpinCount(&viewer->send_lock, 4000))
+    return FALSE;
   viewer->packets_sent = 0;
   viewer->packets_failed = 0;
   viewer->write_block_events = 0;
@@ -2962,7 +2991,7 @@ static BOOL viewer_send_state_init(Viewer *viewer) {
 }
 
 static void viewer_send_state_uninit(Viewer *viewer) {
-  if (!viewer || !viewer->gfx.initialized)
+  if (!viewer || !viewer->classic_event)
     return;
 
   /* Free any remaining classic queue entries */
@@ -3169,23 +3198,29 @@ static BOOL viewer_pointer_shape_entry_copy(PointerShapeEntry *destination,
   destination->andMaskData = NULL;
 
   if (source->xorMaskLength > 0) {
+    if (!source->xorMaskData)
+      return FALSE;
     destination->xorMaskData = (BYTE *)malloc(source->xorMaskLength);
     if (!destination->xorMaskData) {
       viewer_pointer_shape_entry_reset(destination);
       return FALSE;
     }
-    memcpy(destination->xorMaskData, source->xorMaskData,
-           source->xorMaskLength);
+    memmove(destination->xorMaskData, source->xorMaskData,
+            source->xorMaskLength);
   }
 
   if (source->andMaskLength > 0) {
+    if (!source->andMaskData) {
+      viewer_pointer_shape_entry_reset(destination);
+      return FALSE;
+    }
     destination->andMaskData = (BYTE *)malloc(source->andMaskLength);
     if (!destination->andMaskData) {
       viewer_pointer_shape_entry_reset(destination);
       return FALSE;
     }
-    memcpy(destination->andMaskData, source->andMaskData,
-           source->andMaskLength);
+    memmove(destination->andMaskData, source->andMaskData,
+            source->andMaskLength);
   }
 
   return TRUE;
@@ -4438,7 +4473,7 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
       viewer->stop_requested = FALSE;
       viewer->connect_time = time(NULL);
       viewer->full_refresh_deadline_ts = 0;
-      if (!viewer_send_state_init(viewer)) {
+      if (!viewer_graphics_context_init(&viewer->gfx)) {
         viewer->peer = NULL;
         viewer->context = NULL;
         viewer->counted_in_viewer_count = FALSE;
@@ -4447,7 +4482,16 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
         viewer = NULL;
         break;
       }
-      viewer_graphics_context_init(&viewer->gfx);
+      if (!viewer_send_state_init(viewer)) {
+        viewer_graphics_context_uninit(&viewer->gfx);
+        viewer->peer = NULL;
+        viewer->context = NULL;
+        viewer->counted_in_viewer_count = FALSE;
+        viewer->cleanup_in_progress = FALSE;
+        viewer->publish_ref_count = 0;
+        viewer = NULL;
+        break;
+      }
       viewer_graphics_context_reset(&viewer->gfx, server->backend);
       /* VCM created later in peer_post_connect when context->rdp is ready */
 
@@ -4845,8 +4889,23 @@ ViewerServer *viewer_server_init_ex(const char *bind_address, UINT16 port,
     server->monitor_layout = backend->monitor_layout;
   server->slow_viewer_disconnect_enabled = TRUE;
   server->slow_viewer_disconnect_ms = 30000;
-  InitializeCriticalSection(&server->lock);
-  viewer_gfx_publisher_state_init(&server->gfx);
+  if (!InitializeCriticalSectionAndSpinCount(&server->lock, 4000)) {
+    free(server->cert_path);
+    free(server->key_path);
+    free(server->bind_address);
+    freerdp_listener_free(server->listener);
+    free(server);
+    return NULL;
+  }
+  if (!viewer_gfx_publisher_state_init(&server->gfx)) {
+    DeleteCriticalSection(&server->lock);
+    free(server->cert_path);
+    free(server->key_path);
+    free(server->bind_address);
+    freerdp_listener_free(server->listener);
+    free(server);
+    return NULL;
+  }
   g_viewer_server = server;
   return server;
 }

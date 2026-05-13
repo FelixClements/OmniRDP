@@ -61,9 +61,10 @@ static int install_autostart(void) {
 
   char exePath[MAX_PATH];
   GetModuleFileNameA(NULL, exePath, MAX_PATH);
+  exePath[MAX_PATH - 1] = '\0';
 
   err = RegSetValueExA(hKey, RUN_VALUE_NAME, 0, REG_SZ, (const BYTE *)exePath,
-                       (DWORD)strlen(exePath) + 1);
+                       (DWORD)strnlen_s(exePath, sizeof(exePath)) + 1);
   RegCloseKey(hKey);
 
   if (err != ERROR_SUCCESS) {
@@ -141,15 +142,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
   svc_log_init("C:\\ProgramData\\OmniRDP\\logs", SVC_LOG_DEBUG, 10, 5);
   LOG_I("tray", "OmniRDP Tray starting");
 
-  /* Initialize tray context */
-  memset(&g_ctx, 0, sizeof(g_ctx));
-  g_ctx.running = TRUE;
-  InitializeCriticalSection(&g_ctx.lock);
-
   /* Initialize tray icon */
   if (tray_icon_init(&g_ctx, hInstance) != 0) {
     LOG_E("tray", "Failed to initialize tray icon");
-    DeleteCriticalSection(&g_ctx.lock);
     svc_log_shutdown();
     if (hMutex)
       CloseHandle(hMutex);
@@ -172,9 +167,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
       /* Find OmniRDP-svc.exe in the same directory */
       char exePath[MAX_PATH];
       GetModuleFileNameA(NULL, exePath, MAX_PATH);
+      exePath[MAX_PATH - 1] = '\0';
       char *lastSlash = strrchr(exePath, '\\');
       if (lastSlash) {
-        strcpy(lastSlash + 1, "OmniRDP-svc.exe");
+        snprintf(lastSlash + 1,
+                 (size_t)(exePath + sizeof(exePath) - (lastSlash + 1)),
+                 "OmniRDP-svc.exe");
       }
 
       SHELLEXECUTEINFOA sei = {0};
@@ -224,7 +222,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
           /* Config file doesn't exist — create directory and template */
           SHCreateDirectoryExA(NULL, "C:\\ProgramData\\OmniRDP", NULL);
 
-          FILE *fp = fopen(configPath, "w");
+          FILE *fp = NULL;
+          if (fopen_s(&fp, configPath, "w") != 0)
+            fp = NULL;
           if (fp) {
             fprintf(fp,
                     "; OmniRDP Configuration\n"

@@ -31,7 +31,7 @@ static BOOL pointer_shape_copy_mask(BYTE **destination, const BYTE *source,
   if (!buffer)
     return FALSE;
 
-  memcpy(buffer, source, length);
+  memmove(buffer, source, length);
   *destination = buffer;
   return TRUE;
 }

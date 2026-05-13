@@ -147,6 +147,14 @@ These are retained for backward compatibility. If `backend.security.*` keys are 
 | Installer skipped | Previous job failed; check `windows-build-test` |
 | vcpkg errors | Check vcpkg cache key or dependency list |
 
+## Preventing code-scanning warning alerts
+
+- Avoid unsafe C library calls that GitHub code scanning flags in this repo: `strcpy`, `strncpy`, `strlen`, `memcpy`, `fopen`, `atoi`, `getenv`, and direct `fgetc` loops without robust EOF/error handling.
+- Prefer bounded, checked patterns: `snprintf` with return-value/truncation checks, `strnlen_s`, `memcpy_s` or whole-struct assignment where appropriate, `fopen_s`, `strtol`/`strtoul` with `errno`, end-pointer, and range checks, and `InitializeCriticalSectionAndSpinCount`/`InitializeCriticalSectionEx` with failure handling.
+- Do not commit generated `freerdp-3.26.0/` source trees, build directories, artifacts, logs, or archives; keep FreeRDP changes as small patches under `patches/freerdp/`.
+- Fix code-scanning, compiler, clang-format, and relevant build/test warnings before opening PRs.
+- Use `backend.security.*` config keys for new examples and changes; keep legacy `security.*` keys only for compatibility notes.
+
 ## Build outputs
 
 | What | Local path |

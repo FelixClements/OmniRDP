@@ -13,35 +13,63 @@ static void load_log_content(void) {
   if (!g_hEdit || g_logPath[0] == '\0')
     return;
 
-  FILE *fp = fopen(g_logPath, "r");
-  if (!fp) {
+  FILE *fp = NULL;
+  if (fopen_s(&fp, g_logPath, "r") != 0 || !fp) {
     SetWindowTextA(g_hEdit, "Log file not found or cannot be opened.");
     return;
   }
 
   /* Get file size */
-  fseek(fp, 0, SEEK_END);
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    fclose(fp);
+    SetWindowTextA(g_hEdit, "Log file cannot be read.");
+    return;
+  }
   long fileSize = ftell(fp);
-  fseek(fp, 0, SEEK_SET);
+  if (fileSize < 0 || fseek(fp, 0, SEEK_SET) != 0) {
+    fclose(fp);
+    SetWindowTextA(g_hEdit, "Log file cannot be read.");
+    return;
+  }
 
   /* Read last 64KB max */
   long maxSize = 64 * 1024;
   long skip = 0;
   if (fileSize > maxSize) {
     skip = fileSize - maxSize;
-    fseek(fp, skip, SEEK_SET);
-    /* Skip to next newline */
-    int ch;
-    while ((ch = fgetc(fp)) != '\n' && ch != EOF) {
-      skip++;
+    if (fseek(fp, skip, SEEK_SET) != 0) {
+      fclose(fp);
+      SetWindowTextA(g_hEdit, "Log file cannot be read.");
+      return;
+    }
+    /* Skip to next newline within the bounded 64KB window. */
+    long remaining = maxSize;
+    char lineBuf[512];
+    while (remaining > 0 && fgets(lineBuf, sizeof(lineBuf), fp) != NULL) {
+      size_t consumed = strnlen_s(lineBuf, sizeof(lineBuf));
+      const char *newline = strchr(lineBuf, '\n');
+      if ((long)consumed > remaining)
+        consumed = (size_t)remaining;
+      skip += (long)consumed;
+      remaining -= (long)consumed;
+      if (newline)
+        break;
+    }
+    if (ferror(fp)) {
+      fclose(fp);
+      SetWindowTextA(g_hEdit, "Log file cannot be read.");
+      return;
     }
   }
 
   /* Read content */
+  long readSize = fileSize - skip;
+  if (readSize < 0)
+    readSize = 0;
   char *content =
-      (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)(fileSize - skip + 1));
+      (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)readSize + 1);
   if (content) {
-    size_t read = fread(content, 1, (size_t)(fileSize - skip), fp);
+    size_t read = fread(content, 1, (size_t)readSize, fp);
     content[read] = '\0';
     SetWindowTextA(g_hEdit, content);
     /* Scroll to end */
@@ -106,7 +134,7 @@ HWND tray_log_viewer_show(HINSTANCE hInstance, const char *logPath) {
     return g_hLogViewer;
   }
 
-  strncpy(g_logPath, logPath, sizeof(g_logPath) - 1);
+  snprintf(g_logPath, sizeof(g_logPath), "%s", logPath ? logPath : "");
 
   /* Register window class */
   static BOOL registered = FALSE;

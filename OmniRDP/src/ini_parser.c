@@ -9,9 +9,15 @@
 #include "ini_parser.h"
 
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 /* ── Internal helpers ──────────────────────────────────────────── */
 
@@ -24,6 +30,15 @@ static IniEntry *ini_find(const IniFile *ini, const char *section,
     }
   }
   return NULL;
+}
+
+static size_t bounded_length(const char *s, size_t max_len) {
+  size_t len = 0;
+  if (!s)
+    return 0;
+  while ((len < max_len) && (s[len] != '\0'))
+    len++;
+  return len;
 }
 
 static int ini_push(IniFile *ini, char *section, char *key, char *value) {
@@ -63,7 +78,7 @@ static char *trim(char *s) {
     s++;
   if (*s == '\0')
     return s;
-  char *end = s + strlen(s) - 1;
+  char *end = s + bounded_length(s, 4096) - 1;
   while (end > s && isspace((unsigned char)*end))
     *end-- = '\0';
   return s;
@@ -72,7 +87,20 @@ static char *trim(char *s) {
 /* ── Public API ─────────────────────────────────────────────────── */
 
 IniFile *ini_parse(const char *filename) {
-  FILE *fp = fopen(filename, "r");
+  FILE *fp = NULL;
+#ifdef _WIN32
+  if (fopen_s(&fp, filename, "r") != 0)
+    fp = NULL;
+#else
+  {
+    int fd = open(filename, O_RDONLY);
+    if (fd >= 0) {
+      fp = fdopen(fd, "r");
+      if (!fp)
+        close(fd);
+    }
+  }
+#endif
   if (!fp)
     return NULL;
 
@@ -87,7 +115,7 @@ IniFile *ini_parse(const char *filename) {
 
   while (fgets(line, sizeof(line), fp)) {
     /* Strip trailing newline */
-    size_t len = strlen(line);
+    size_t len = bounded_length(line, sizeof(line));
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
       line[--len] = '\0';
 
@@ -106,8 +134,10 @@ IniFile *ini_parse(const char *filename) {
       if (end) {
         *end = '\0';
         char *name = trim(p + 1);
-        strncpy(current_section, name, sizeof(current_section) - 1);
-        current_section[sizeof(current_section) - 1] = '\0';
+        int written =
+            snprintf(current_section, sizeof(current_section), "%s", name);
+        if (written < 0)
+          current_section[0] = '\0';
       }
       continue;
     }
@@ -173,8 +203,10 @@ int ini_get_int(const IniFile *ini, const char *section, const char *key,
   if (!val)
     return default_val;
   char *end;
+  errno = 0;
   long result = strtol(val, &end, 10);
-  if (end == val || *end != '\0')
+  if ((errno != 0) || end == val || *end != '\0' || result < INT_MIN ||
+      result > INT_MAX)
     return default_val;
   return (int)result;
 }
@@ -185,8 +217,9 @@ unsigned int ini_get_uint(const IniFile *ini, const char *section,
   if (!val)
     return default_val;
   char *end;
+  errno = 0;
   unsigned long result = strtoul(val, &end, 10);
-  if (end == val || *end != '\0')
+  if ((errno != 0) || end == val || *end != '\0' || result > UINT_MAX)
     return default_val;
   return (unsigned int)result;
 }

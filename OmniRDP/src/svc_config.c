@@ -18,15 +18,13 @@
 
 static void svc_config_default_service(SvcServiceConfig *cfg) {
   memset(cfg, 0, sizeof(*cfg));
-  strncpy(cfg->log_level, "info", sizeof(cfg->log_level) - 1);
-  cfg->log_level[sizeof(cfg->log_level) - 1] = '\0';
-  strncpy(cfg->log_dir, "C:\\ProgramData\\OmniRDP\\logs",
-          sizeof(cfg->log_dir) - 1);
-  cfg->log_dir[sizeof(cfg->log_dir) - 1] = '\0';
+  snprintf(cfg->log_level, sizeof(cfg->log_level), "%s", "info");
+  snprintf(cfg->log_dir, sizeof(cfg->log_dir), "%s",
+           "C:\\ProgramData\\OmniRDP\\logs");
   cfg->log_max_size_mb = 10;
   cfg->log_max_files = 5;
-  strncpy(cfg->pipe_name, "OmniRDP_ServicePipe", sizeof(cfg->pipe_name) - 1);
-  cfg->pipe_name[sizeof(cfg->pipe_name) - 1] = '\0';
+  snprintf(cfg->pipe_name, sizeof(cfg->pipe_name), "%s",
+           "OmniRDP_ServicePipe");
   cfg->heartbeat_timeout_sec = 10;
   cfg->graceful_shutdown_sec = 10;
   cfg->health_poll_interval_sec = 2;
@@ -43,9 +41,8 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->reconnect_initial_delay_ms = 1000;
   cfg->reconnect_max_delay_ms = 60000;
   cfg->reconnect_backoff_multiplier = 2.0;
-  strncpy(cfg->viewer_bind_address, "127.0.0.1",
-          sizeof(cfg->viewer_bind_address) - 1);
-  cfg->viewer_bind_address[sizeof(cfg->viewer_bind_address) - 1] = '\0';
+  snprintf(cfg->viewer_bind_address, sizeof(cfg->viewer_bind_address), "%s",
+           "127.0.0.1");
   cfg->viewer_max_viewers = 10;
   cfg->viewer_slow_disconnect_enabled = 1;
   cfg->viewer_slow_lag_interval_ms = 5000;
@@ -57,9 +54,8 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->viewer_security_nla_enabled = 1;
   cfg->viewer_security_tls_enabled = 1;
   cfg->viewer_security_rdp_enabled = 1;
-  strncpy(cfg->viewer_auth_mode, "backend_credentials",
-          sizeof(cfg->viewer_auth_mode) - 1);
-  cfg->viewer_auth_mode[sizeof(cfg->viewer_auth_mode) - 1] = '\0';
+  snprintf(cfg->viewer_auth_mode, sizeof(cfg->viewer_auth_mode), "%s",
+           "backend_credentials");
   cfg->display_monitor_count = 1;
   cfg->display_monitor_width = 1920;
   cfg->display_monitor_height = 1080;
@@ -78,10 +74,8 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->backend_security_ignore_certificate = 0;
   cfg->security_tls_enabled = 1;
   cfg->security_nla_enabled = 1;
-  strncpy(cfg->security_tls_min_version, "1.2",
-          sizeof(cfg->security_tls_min_version) - 1);
-  cfg->security_tls_min_version[sizeof(cfg->security_tls_min_version) - 1] =
-      '\0';
+  snprintf(cfg->security_tls_min_version,
+           sizeof(cfg->security_tls_min_version), "%s", "1.2");
   cfg->security_server_authentication = 1;
   cfg->security_ignore_certificate = 0;
 }
@@ -91,9 +85,8 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
 static int strcpy_safe(char *dest, size_t dest_size, const char *src) {
   if (!dest || dest_size == 0 || !src)
     return 0;
-  strncpy(dest, src, dest_size - 1);
-  dest[dest_size - 1] = '\0';
-  if (strlen(src) >= dest_size) {
+  int ret = snprintf(dest, dest_size, "%s", src);
+  if (ret < 0 || (size_t)ret >= dest_size) {
     fprintf(stderr,
             "Warning: config value truncated: '%s' -> '%s' (max %zu chars)\n",
             src, dest, dest_size - 1);
@@ -378,6 +371,12 @@ SvcConfig *svc_config_load(const char *filename) {
   /* ── Parse [instances] section ─────────────────────────── */
   const char *names_str = ini_get(ini, "instances", "names", NULL);
   if (names_str && names_str[0] != '\0') {
+    size_t names_len = strnlen_s(names_str, 32768);
+    if (names_len >= 32768) {
+      svc_config_free(config);
+      return NULL;
+    }
+
     /* Duplicate so we can tokenize */
     char *names_copy = _strdup(names_str);
     if (!names_copy) {
@@ -415,9 +414,12 @@ SvcConfig *svc_config_load(const char *filename) {
       while (*token && isspace((unsigned char)*token))
         token++;
       /* Trim trailing whitespace in-place */
-      char *end = token + strlen(token) - 1;
-      while (end > token && isspace((unsigned char)*end))
-        *end-- = '\0';
+      size_t token_len = strnlen_s(token, names_len + 1);
+      if (token_len > 0) {
+        char *end = token + token_len - 1;
+        while (end > token && isspace((unsigned char)*end))
+          *end-- = '\0';
+      }
 
       if (token[0] != '\0') {
         config->instance_names[idx] = _strdup(token);

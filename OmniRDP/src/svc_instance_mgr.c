@@ -23,9 +23,18 @@
 #include <windows.h>
 
 #include <aclapi.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define INST_MGR_CS_SPIN_COUNT 4000U
+
+static InstanceManager *g_initialized_mgr = NULL;
+
+static BOOL inst_mgr_is_initialized(const InstanceManager *mgr) {
+  return mgr && g_initialized_mgr == mgr;
+}
 
 /* ── Internal helpers ──────────────────────────────────────────── */
 
@@ -35,8 +44,13 @@
  */
 static void build_heartbeat_pipe_name(const char *instanceName, char *buf,
                                       size_t bufSize) {
-  _snprintf(buf, bufSize, "\\\\.\\pipe\\OmniRDP_Instance_%s", instanceName);
-  buf[bufSize - 1] = '\0';
+  if (!buf || bufSize == 0)
+    return;
+  if (_snprintf(buf, bufSize, "\\\\.\\pipe\\OmniRDP_Instance_%s",
+                instanceName) < 0)
+    buf[0] = '\0';
+  else
+    buf[bufSize - 1] = '\0';
 }
 
 /**
@@ -95,16 +109,31 @@ int inst_mgr_init(InstanceManager *mgr, SvcConfig *config,
   mgr->exePath = exePath;
   mgr->shuttingDown = FALSE;
 
-  InitializeCriticalSection(&mgr->lock);
+  if (!InitializeCriticalSectionAndSpinCount(&mgr->lock,
+                                             INST_MGR_CS_SPIN_COUNT)) {
+    free(mgr->instances);
+    memset(mgr, 0, sizeof(*mgr));
+    return -1;
+  }
+  g_initialized_mgr = mgr;
 
   for (unsigned int i = 0; i < mgr->instanceCount; i++) {
     ManagedInstance *inst = &mgr->instances[i];
     memset(inst, 0, sizeof(*inst));
 
     /* Copy name and config */
-    strncpy(inst->name, config->instances[i].name, sizeof(inst->name) - 1);
-    inst->name[sizeof(inst->name) - 1] = '\0';
-    memcpy(&inst->config, &config->instances[i], sizeof(InstanceConfig));
+    if (snprintf(inst->name, sizeof(inst->name), "%s",
+                 config->instances[i].name) < 0 ||
+        strnlen_s(config->instances[i].name, sizeof(inst->name)) >=
+            sizeof(inst->name)) {
+      DeleteCriticalSection(&mgr->lock);
+      if (g_initialized_mgr == mgr)
+        g_initialized_mgr = NULL;
+      free(mgr->instances);
+      memset(mgr, 0, sizeof(*mgr));
+      return -1;
+    }
+    inst->config = config->instances[i];
 
     /* Default state */
     inst->state = INST_STOPPED;
@@ -438,7 +467,27 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
 
   /* ── Write password to pipe ─────────────────────────────────── */
   DWORD written = 0;
-  size_t pwd_len = strlen(decrypted_password);
+  size_t pwd_len = strnlen_s(decrypted_password, sizeof(decrypted_password));
+  if (pwd_len >= sizeof(decrypted_password)) {
+    LOG_E("svc_inst_mgr", "Start: decrypted password too long for '%s'",
+          instanceName);
+    TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(hJob);
+    CloseHandle(hPipeRead);
+    CloseHandle(hPipeWrite);
+    if (hStopEvent)
+      CloseHandle(hStopEvent);
+    if (pSD)
+      HeapFree(GetProcessHeap(), 0, pSD);
+    if (pACL)
+      LocalFree(pACL);
+    SecureZeroMemory(decrypted_password, sizeof(decrypted_password));
+    inst->state = INST_STOPPED;
+    LeaveCriticalSection(&mgr->lock);
+    return -1;
+  }
   if (!WriteFile(hPipeWrite, decrypted_password, (DWORD)pwd_len, &written,
                  NULL)) {
     LOG_E("svc_inst_mgr",
@@ -540,8 +589,7 @@ static void inst_mgr_wait_stopped_timeout(InstanceManager *mgr,
   DWORD pid = inst->pid;
   char name_copy[128];
 
-  strncpy(name_copy, inst->name, sizeof(name_copy) - 1);
-  name_copy[sizeof(name_copy) - 1] = '\0';
+  snprintf(name_copy, sizeof(name_copy), "%s", inst->name);
 
   inst->state = INST_STOPPED;
   inst->hProcess = NULL;
@@ -597,7 +645,7 @@ static void inst_mgr_wait_stopped(InstanceManager *mgr, ManagedInstance *inst) {
 /* ── inst_mgr_stop (single instance) ───────────────────────────── */
 
 int inst_mgr_stop(InstanceManager *mgr, const char *instanceName) {
-  if (!mgr || !instanceName)
+  if (!inst_mgr_is_initialized(mgr) || !instanceName)
     return -1;
 
   EnterCriticalSection(&mgr->lock);
@@ -645,7 +693,7 @@ int inst_mgr_restart(InstanceManager *mgr, const char *instanceName) {
 /* ── inst_mgr_start_all ────────────────────────────────────────── */
 
 void inst_mgr_start_all(InstanceManager *mgr) {
-  if (!mgr)
+  if (!inst_mgr_is_initialized(mgr))
     return;
 
   LOG_I("svc_inst_mgr", "Starting all enabled instances (%u total)...",
@@ -674,7 +722,7 @@ void inst_mgr_start_all(InstanceManager *mgr) {
 /* ── inst_mgr_stop_all ─────────────────────────────────────────── */
 
 void inst_mgr_stop_all(InstanceManager *mgr) {
-  if (!mgr)
+  if (!inst_mgr_is_initialized(mgr))
     return;
 
   EnterCriticalSection(&mgr->lock);
@@ -758,7 +806,10 @@ void inst_mgr_poll(InstanceManager *mgr) {
               char *lastColon = strrchr(buf, ':');
               if (lastColon) {
                 unsigned int vc = 0;
-                if (sscanf(lastColon + 1, "%u", &vc) == 1) {
+                char *end = NULL;
+                unsigned long parsed = strtoul(lastColon + 1, &end, 10);
+                if (end != lastColon + 1 && parsed <= UINT_MAX) {
+                  vc = (unsigned int)parsed;
                   inst->viewerCount = vc;
                 }
               }
@@ -892,15 +943,13 @@ int inst_mgr_get_info(InstanceManager *mgr, unsigned int index,
 
   ManagedInstance *inst = &mgr->instances[index];
 
-  strncpy(info->name, inst->name, sizeof(info->name) - 1);
-  info->name[sizeof(info->name) - 1] = '\0';
+  snprintf(info->name, sizeof(info->name), "%s", inst->name);
 
   info->state = map_state_to_pipe(inst->state);
   info->viewer_count = inst->viewerCount;
 
-  strncpy(info->backend_hostname, inst->config.backend_hostname,
-          sizeof(info->backend_hostname) - 1);
-  info->backend_hostname[sizeof(info->backend_hostname) - 1] = '\0';
+  snprintf(info->backend_hostname, sizeof(info->backend_hostname), "%s",
+           inst->config.backend_hostname);
 
   info->backend_port = inst->config.backend_port;
 
@@ -1122,7 +1171,7 @@ int inst_mgr_reload_config(InstanceManager *mgr, const char *configPath) {
 
   ManagedInstance *newInstances = (ManagedInstance *)calloc(
       newCfg->instance_count, sizeof(ManagedInstance));
-  if (!newInstances) {
+  if (!newInstances && newCfg->instance_count > 0) {
     LeaveCriticalSection(&mgr->lock);
     svc_config_free(newCfg);
     LOG_E("svc_inst_mgr", "Reload: out of memory for instances array");
@@ -1133,9 +1182,15 @@ int inst_mgr_reload_config(InstanceManager *mgr, const char *configPath) {
     InstanceConfig *nc = &newCfg->instances[i];
     ManagedInstance *ni = &newInstances[i];
 
-    strncpy(ni->name, nc->name, sizeof(ni->name) - 1);
-    ni->name[sizeof(ni->name) - 1] = '\0';
-    memcpy(&ni->config, nc, sizeof(InstanceConfig));
+    if (snprintf(ni->name, sizeof(ni->name), "%s", nc->name) < 0 ||
+        strnlen_s(nc->name, sizeof(ni->name)) >= sizeof(ni->name)) {
+      LeaveCriticalSection(&mgr->lock);
+      free(newInstances);
+      svc_config_free(newCfg);
+      LOG_E("svc_inst_mgr", "Reload: instance name too long");
+      return -1;
+    }
+    ni->config = *nc;
 
     /* Find in old instances to transfer state */
     ManagedInstance *oldInst = NULL;
@@ -1311,7 +1366,7 @@ int inst_mgr_reload_config(InstanceManager *mgr, const char *configPath) {
 /* ── inst_mgr_cleanup ──────────────────────────────────────────── */
 
 void inst_mgr_cleanup(InstanceManager *mgr) {
-  if (!mgr)
+  if (!inst_mgr_is_initialized(mgr))
     return;
 
   LOG_I("svc_inst_mgr", "Cleaning up instance manager...");
@@ -1353,6 +1408,9 @@ void inst_mgr_cleanup(InstanceManager *mgr) {
   LeaveCriticalSection(&mgr->lock);
 
   DeleteCriticalSection(&mgr->lock);
+  if (g_initialized_mgr == mgr)
+    g_initialized_mgr = NULL;
+  memset(mgr, 0, sizeof(*mgr));
 
   LOG_I("svc_inst_mgr", "Instance manager cleanup complete");
 }

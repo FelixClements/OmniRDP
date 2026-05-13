@@ -119,7 +119,7 @@ static void populate_listview(HWND hListView, const TrayAppCtx *ctx) {
 
       /* Viewer column */
       if (inst->state == INSTANCE_STOPPED)
-        strcpy(viewers, "-");
+        snprintf(viewers, sizeof(viewers), "-");
       else {
         _snprintf(viewers, sizeof(viewers), "%lu/10", inst->viewer_count);
         viewers[sizeof(viewers) - 1] = '\0';
@@ -183,8 +183,7 @@ static void update_button_states(HWND hwnd, TrayAppCtx *ctx) {
 
         canStart = (state == INSTANCE_STOPPED);
         canStop = (state == INSTANCE_RUNNING || state == INSTANCE_RECONNECTING);
-        canRestart =
-            (state == INSTANCE_RUNNING || state == INSTANCE_RECONNECTING);
+        canRestart = canStop;
       }
     }
   }
@@ -233,9 +232,8 @@ static void send_instance_command(HWND hwnd, TrayAppCtx *ctx, PipeCommand cmd) {
   /* Build the request */
   memset(&req, 0, sizeof(req));
   req.command = cmd;
-  strncpy(req.instance_name, ctx->services[si].instances[ii].name,
-          sizeof(req.instance_name) - 1);
-  req.instance_name[sizeof(req.instance_name) - 1] = '\0';
+  snprintf(req.instance_name, sizeof(req.instance_name), "%s",
+           ctx->services[si].instances[ii].name);
 
   memset(&resp, 0, sizeof(resp));
 

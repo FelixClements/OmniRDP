@@ -5,8 +5,8 @@
 #include <stdio.h>
 
 static int write_backend_port_config(const char *path) {
-  FILE *fp = fopen(path, "w");
-  if (!fp)
+  FILE *fp = NULL;
+  if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
   fprintf(fp, "[service]\n"
@@ -27,8 +27,8 @@ static int write_backend_port_config(const char *path) {
 }
 
 static int write_viewer_port_config(const char *path) {
-  FILE *fp = fopen(path, "w");
-  if (!fp)
+  FILE *fp = NULL;
+  if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
   fprintf(fp, "[instances]\n"
