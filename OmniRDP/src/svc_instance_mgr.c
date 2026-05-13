@@ -203,6 +203,18 @@ static BOOL run_netsh_in_user_session(const char *args) {
     return FALSE;
   }
 
+  /* Enable SeTcbPrivilege required for SetTokenInformation(TokenSessionId) */
+  {
+    TOKEN_PRIVILEGES tp;
+    LUID luid;
+    if (LookupPrivilegeValueA(NULL, "SeTcbPrivilege", &luid)) {
+      tp.PrivilegeCount = 1;
+      tp.Privileges[0].Luid = luid;
+      tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+      AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL);
+    }
+  }
+
   consoleSessionId = WTSGetActiveConsoleSessionId();
   if (!SetTokenInformation(hDupToken, TokenSessionId, &consoleSessionId,
                            sizeof(consoleSessionId))) {
