@@ -13,6 +13,7 @@
 #include "pipe_protocol.h"
 #include "svc_log.h"
 
+#include <share.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -851,8 +852,10 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
   logPath[sizeof(logPath) - 1] = '\0';
 
   /* ── Open the log file ───────────────────────────────────── */
-  FILE *f = NULL;
-  fopen_s(&f, logPath, "r");
+  /* Use _fsopen with _SH_DENYNO to allow concurrent reads.
+   * The service holds the file open with fopen_s("a") which uses
+   * restrictive sharing — a plain fopen_s("r") would be denied. */
+  FILE *f = _fsopen(logPath, "r", _SH_DENYNO);
   if (!f) {
     _snprintf(response, respSize,
               "{\"type\":\"response\",\"success\":0,"
