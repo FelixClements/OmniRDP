@@ -124,6 +124,20 @@ if (-not (Test-Path -LiteralPath $issPath -PathType Leaf)) {
 
 $artifactBin = Join-Path $repoRoot 'artifacts\windows-Release\bin'
 
+# ── Build OmniRDP Release ─────────────────────────────────────────
+$omniBuildDir = Join-Path $repoRoot 'OmniRDP\build'
+if (Test-Path -LiteralPath $omniBuildDir -PathType Container) {
+    Write-Host "Building OmniRDP Release..."
+    & cmake --build $omniBuildDir --config Release -j
+    if ($LASTEXITCODE -ne 0) {
+        throw "OmniRDP Release build failed with exit code $LASTEXITCODE."
+    }
+}
+else {
+    Write-Host "WARNING: OmniRDP build directory not found at '$omniBuildDir', skipping build." -ForegroundColor Yellow
+}
+
+# ── Stage artifacts ────────────────────────────────────────────────
 if ((Test-Path -LiteralPath $artifactBin) -and -not $SkipClean) {
     Remove-Item -LiteralPath $artifactBin -Recurse -Force
 }
