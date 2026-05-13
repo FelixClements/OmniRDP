@@ -141,7 +141,7 @@ static int build_service_sid_name(const char *serviceName, char *out,
 static int set_config_acl(const char *path, const char *serviceName,
                           BOOL isDirectory) {
   DWORD dwRes;
-  EXPLICIT_ACCESSA ea[3];
+  EXPLICIT_ACCESSA ea[4];
   PACL pACL = NULL;
   char serviceSidName[300];
 
@@ -162,12 +162,24 @@ static int set_config_acl(const char *path, const char *serviceName,
     return -1;
   }
 
+  /* Users SID (BUILTIN\Users) — read-only access for non-admin users */
+  PSID pUsersSid = NULL;
+  if (!AllocateAndInitializeSid(&ntAuth, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                DOMAIN_ALIAS_RID_USERS, 0, 0, 0, 0, 0, 0,
+                                &pUsersSid)) {
+    FreeSid(pSystemSid);
+    FreeSid(pAdminSid);
+    return -1;
+  }
+
   if (build_service_sid_name(serviceName, serviceSidName,
                              sizeof(serviceSidName)) != 0) {
     if (pSystemSid)
       FreeSid(pSystemSid);
     if (pAdminSid)
       FreeSid(pAdminSid);
+    if (pUsersSid)
+      FreeSid(pUsersSid);
     return -1;
   }
 
@@ -206,13 +218,25 @@ static int set_config_acl(const char *path, const char *serviceName,
   ea[2].Trustee.TrusteeType = TRUSTEE_IS_USER;
   ea[2].Trustee.ptstrName = serviceSidName;
 
+  /* BUILTIN\Users: Read-only */
+  ea[3].grfAccessPermissions = FILE_GENERIC_READ;
+  ea[3].grfAccessMode = SET_ACCESS;
+  ea[3].grfInheritance = isDirectory
+                             ? (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE)
+                             : NO_INHERITANCE;
+  ea[3].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  ea[3].Trustee.TrusteeType = TRUSTEE_IS_GROUP;
+  ea[3].Trustee.ptstrName = (LPSTR)pUsersSid;
+
   /* Create ACL */
-  dwRes = SetEntriesInAclA(3, ea, NULL, &pACL);
+  dwRes = SetEntriesInAclA(4, ea, NULL, &pACL);
   if (dwRes != ERROR_SUCCESS) {
     if (pSystemSid)
       FreeSid(pSystemSid);
     if (pAdminSid)
       FreeSid(pAdminSid);
+    if (pUsersSid)
+      FreeSid(pUsersSid);
     SetLastError(dwRes);
     return -1;
   }
@@ -230,6 +254,8 @@ static int set_config_acl(const char *path, const char *serviceName,
     FreeSid(pSystemSid);
   if (pAdminSid)
     FreeSid(pAdminSid);
+  if (pUsersSid)
+    FreeSid(pUsersSid);
 
   if (dwRes != ERROR_SUCCESS) {
     SetLastError(dwRes);
