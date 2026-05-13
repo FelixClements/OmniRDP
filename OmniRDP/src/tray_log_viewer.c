@@ -1,4 +1,5 @@
 #include "tray_log_viewer.h"
+#include "pipe_protocol.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -7,77 +8,140 @@
 
 static HWND g_hLogViewer = NULL;
 static HWND g_hEdit = NULL;
-static char g_logPath[MAX_PATH] = {0};
+static PipeClient *g_client = NULL;
 
 static void load_log_content(void) {
-  if (!g_hEdit || g_logPath[0] == '\0')
+  if (!g_hEdit || !g_client)
     return;
 
-  FILE *fp = NULL;
-  if (fopen_s(&fp, g_logPath, "r") != 0 || !fp) {
+  PipeRequest req;
+  memset(&req, 0, sizeof(req));
+  req.command = PIPE_CMD_GET_LOGS;
+
+  PipeResponse resp;
+  memset(&resp, 0, sizeof(resp));
+
+  if (pipe_client_send_request(g_client, &req, &resp, 5000) != 0 ||
+      !resp.success) {
     SetWindowTextA(g_hEdit, "Log file not found or cannot be opened.");
     return;
   }
 
-  /* Get file size */
-  if (fseek(fp, 0, SEEK_END) != 0) {
-    fclose(fp);
-    SetWindowTextA(g_hEdit, "Log file cannot be read.");
-    return;
-  }
-  long fileSize = ftell(fp);
-  if (fileSize < 0 || fseek(fp, 0, SEEK_SET) != 0) {
-    fclose(fp);
-    SetWindowTextA(g_hEdit, "Log file cannot be read.");
+  /* Parse the JSON payload to extract log lines */
+  const char *payload = resp.json_payload;
+  if (!payload || payload[0] == '\0') {
+    SetWindowTextA(g_hEdit, "(empty log)");
     return;
   }
 
-  /* Read last 64KB max */
-  long maxSize = 64 * 1024;
-  long skip = 0;
-  if (fileSize > maxSize) {
-    skip = fileSize - maxSize;
-    if (fseek(fp, skip, SEEK_SET) != 0) {
-      fclose(fp);
-      SetWindowTextA(g_hEdit, "Log file cannot be read.");
-      return;
-    }
-    /* Skip to next newline within the bounded 64KB window. */
-    long remaining = maxSize;
-    char lineBuf[512];
-    while (remaining > 0 && fgets(lineBuf, sizeof(lineBuf), fp) != NULL) {
-      size_t consumed = strnlen_s(lineBuf, sizeof(lineBuf));
-      const char *newline = strchr(lineBuf, '\n');
-      if ((long)consumed > remaining)
-        consumed = (size_t)remaining;
-      skip += (long)consumed;
-      remaining -= (long)consumed;
-      if (newline)
-        break;
-    }
-    if (ferror(fp)) {
-      fclose(fp);
-      SetWindowTextA(g_hEdit, "Log file cannot be read.");
-      return;
-    }
+  /* Build display text from the JSON logs array.
+   *
+   * The response json_payload contains the raw value from the
+   * "json_payload" JSON field.  For GET_LOGS this looks like:
+   *
+   *   "{\"logs\":[\"line1\",\"line2\",...]}"
+   *
+   * The outer quotes and internal backslash-escaping are present
+   * because the json_payload value is itself a JSON-encoded string.
+   * We handle both escaped (\"logs\":[) and unescaped ("logs":[)
+   * forms. */
+  char *displayBuf = (char *)HeapAlloc(GetProcessHeap(), 0, 64 * 1024);
+  if (!displayBuf) {
+    SetWindowTextA(g_hEdit, "Out of memory.");
+    return;
   }
 
-  /* Read content */
-  long readSize = fileSize - skip;
-  if (readSize < 0)
-    readSize = 0;
-  char *content = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)readSize + 1);
-  if (content) {
-    size_t read = fread(content, 1, (size_t)readSize, fp);
-    content[read] = '\0';
-    SetWindowTextA(g_hEdit, content);
-    /* Scroll to end */
-    SendMessage(g_hEdit, EM_SETSEL, (WPARAM)read, (LPARAM)read);
-    SendMessage(g_hEdit, EM_SCROLLCARET, 0, 0);
-    HeapFree(GetProcessHeap(), 0, content);
+  displayBuf[0] = '\0';
+  size_t outPos = 0;
+  size_t outMax = 64 * 1024 - 1;
+
+  /* Find the logs array — try escaped form first, then unescaped */
+  const char *arrStart = strstr(payload, "\\\"logs\\\":[");
+  if (!arrStart) {
+    arrStart = strstr(payload, "\"logs\":[");
   }
 
-  fclose(fp);
+  if (!arrStart) {
+    /* Fallback: show raw payload */
+    snprintf(displayBuf, outMax, "%s", payload);
+    SetWindowTextA(g_hEdit, displayBuf);
+    HeapFree(GetProcessHeap(), 0, displayBuf);
+    return;
+  }
+
+  /* Skip to content after the opening [ */
+  const char *p = arrStart;
+  while (*p && *p != '[')
+    p++;
+  if (*p == '[')
+    p++;
+
+  /* Parse array of JSON strings. Each element is "text" or \"text\" */
+  while (*p && outPos < outMax - 1) {
+    /* Skip whitespace */
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+      p++;
+    if (*p == ']' || *p == '\0')
+      break;
+
+    /* Skip optional backslash before opening quote */
+    if (*p == '\\')
+      p++;
+    if (*p != '"')
+      break;
+    p++; /* skip opening quote */
+
+    /* Copy string content until closing quote, handling JSON escapes */
+    while (*p && *p != '"' && outPos < outMax - 1) {
+      if (*p == '\\' && *(p + 1)) {
+        p++; /* skip backslash */
+        switch (*p) {
+        case '"':
+          displayBuf[outPos++] = '"';
+          break;
+        case '\\':
+          displayBuf[outPos++] = '\\';
+          break;
+        case 'n':
+          displayBuf[outPos++] = '\n';
+          break;
+        case 'r':
+          displayBuf[outPos++] = '\r';
+          break;
+        case 't':
+          displayBuf[outPos++] = '\t';
+          break;
+        default:
+          displayBuf[outPos++] = *p;
+          break;
+        }
+        p++;
+      } else {
+        displayBuf[outPos++] = *p;
+        p++;
+      }
+    }
+    if (*p == '"')
+      p++; /* skip closing quote */
+
+    /* Add CRLF line separator */
+    if (outPos + 2 <= outMax) {
+      displayBuf[outPos++] = '\r';
+      displayBuf[outPos++] = '\n';
+    }
+
+    /* Skip past comma, whitespace, and optional backslash (escaped form) */
+    while (*p && (*p == ',' || *p == ' ' || *p == '\t'))
+      p++;
+  }
+
+  displayBuf[outPos] = '\0';
+
+  SetWindowTextA(g_hEdit, displayBuf);
+  /* Scroll to end */
+  SendMessage(g_hEdit, EM_SETSEL, (WPARAM)outPos, (LPARAM)outPos);
+  SendMessage(g_hEdit, EM_SCROLLCARET, 0, 0);
+  HeapFree(GetProcessHeap(), 0, displayBuf);
 }
 
 static LRESULT CALLBACK log_viewer_wndproc(HWND hwnd, UINT msg, WPARAM wParam,
@@ -127,13 +191,13 @@ static LRESULT CALLBACK log_viewer_wndproc(HWND hwnd, UINT msg, WPARAM wParam,
   return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
-HWND tray_log_viewer_show(HINSTANCE hInstance, const char *logPath) {
+HWND tray_log_viewer_show(HINSTANCE hInstance, PipeClient *client) {
   if (g_hLogViewer) {
     SetForegroundWindow(g_hLogViewer);
     return g_hLogViewer;
   }
 
-  snprintf(g_logPath, sizeof(g_logPath), "%s", logPath ? logPath : "");
+  g_client = client;
 
   /* Register window class */
   static BOOL registered = FALSE;
