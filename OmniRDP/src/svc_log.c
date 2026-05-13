@@ -14,6 +14,7 @@
 
 #include "svc_log.h"
 
+#include <share.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -191,8 +192,8 @@ static void svc_log_rotate_internal(void) {
   _snprintf(newpath, sizeof(newpath), "%s\\%s.1", g_log_dir, LOG_FILE_NAME);
   MoveFileExA(g_log_path, newpath, MOVEFILE_REPLACE_EXISTING);
 
-  /* 5. Open a fresh file */
-  fopen_s(&g_logfile, g_log_path, "a");
+  /* 5. Open a fresh file — use _SH_DENYNO to allow concurrent reads */
+  g_logfile = _fsopen(g_log_path, "a", _SH_DENYNO);
 }
 
 /**
@@ -268,8 +269,8 @@ int svc_log_rotate_file(const char *filepath, FILE **logfile_ptr,
   _snprintf(newpath, sizeof(newpath), "%s\\%s.1", dir, filename);
   MoveFileExA(filepath, newpath, MOVEFILE_REPLACE_EXISTING);
 
-  /* 5. Open a fresh file */
-  fopen_s(logfile_ptr, filepath, "a");
+  /* 5. Open a fresh file — use _SH_DENYNO to allow concurrent reads */
+  *logfile_ptr = _fsopen(filepath, "a", _SH_DENYNO);
   return (*logfile_ptr != NULL) ? 0 : -1;
 }
 
@@ -314,9 +315,8 @@ int svc_log_init(const char *log_dir, SvcLogLevel log_level,
   /* Create log directory (recursively if needed) */
   svc_log_mkdir_recursive(log_dir);
 
-  /* Open the log file for appending */
-  FILE *f = NULL;
-  fopen_s(&f, g_log_path, "a");
+  /* Open the log file for appending — use _SH_DENYNO to allow concurrent reads */
+  FILE *f = _fsopen(g_log_path, "a", _SH_DENYNO);
   if (!f)
     return -1; /* directory creation may have failed */
 
