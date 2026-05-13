@@ -25,6 +25,7 @@
 #include <aclapi.h>
 #include <limits.h>
 #include <stdio.h>
+#include <wtsapi32.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -168,84 +169,91 @@ ManagedInstance *inst_mgr_find(InstanceManager *mgr, const char *name) {
 }
 
 /**
- * @brief Run a netsh command in the user's interactive session.
+ * @brief Run a netsh command in the interactive user's session.
  *
- * The service runs in session 0 as SYSTEM, which cannot access the
- * firewall.  This helper duplicates the process token, sets the
- * session ID to the active console session, and launches netsh in
- * that session with SYSTEM privileges.
+ * The service runs in Session 0 as SYSTEM, where the firewall COM API
+ * returns E_ACCESSDENIED.  WTSQueryUserToken gets the logged-on user's
+ * primary token (which already has the correct SessionId), then
+ * CreateProcessAsUserW launches netsh in the user's session where
+ * firewall operations work.
  */
 static BOOL run_netsh_in_user_session(const char *args) {
   BOOL ok = FALSE;
-  HANDLE hToken = NULL;
+  HANDLE hUserToken = NULL;
   HANDLE hDupToken = NULL;
-  DWORD consoleSessionId;
-  STARTUPINFOA si = {0};
+  DWORD activeSessionId;
+  STARTUPINFOW si = {0};
   PROCESS_INFORMATION pi = {0};
-  char cmdLine[512];
+  char cmdLineA[512];
+  WCHAR cmdLineW[512];
 
-  _snprintf(cmdLine, sizeof(cmdLine), "netsh %s", args);
-  cmdLine[sizeof(cmdLine) - 1] = '\0';
+  int n = _snprintf(cmdLineA, sizeof(cmdLineA), "netsh %s", args);
+  if (n < 0)
+    cmdLineA[0] = '\0';
+  cmdLineA[sizeof(cmdLineA) - 1] = '\0';
 
-  if (!OpenProcessToken(GetCurrentProcess(),
-                        TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_SESSIONID,
-                        &hToken)) {
-    LOG_W("svc_inst_mgr", "Firewall: OpenProcessToken failed (err=%lu)",
+  if (MultiByteToWideChar(CP_UTF8, 0, cmdLineA, -1, cmdLineW,
+                          (int)(sizeof(cmdLineW) / sizeof(WCHAR))) == 0) {
+    LOG_W("svc_inst_mgr", "Firewall: MultiByteToWideChar failed (err=%lu)",
           GetLastError());
     return FALSE;
   }
+  cmdLineW[(sizeof(cmdLineW) / sizeof(WCHAR)) - 1] = L'\0';
 
-  if (!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL, SecurityImpersonation,
-                        TokenPrimary, &hDupToken)) {
-    LOG_W("svc_inst_mgr", "Firewall: DuplicateTokenEx failed (err=%lu)",
-          GetLastError());
-    CloseHandle(hToken);
-    return FALSE;
-  }
-
-  /* Enable SeTcbPrivilege on the duplicated token (required for
-   * SetTokenInformation(TokenSessionId)) */
-  {
-    TOKEN_PRIVILEGES tp;
-    LUID luid;
-    if (LookupPrivilegeValueA(NULL, "SeTcbPrivilege", &luid)) {
-      tp.PrivilegeCount = 1;
-      tp.Privileges[0].Luid = luid;
-      tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-      AdjustTokenPrivileges(hDupToken, FALSE, &tp, sizeof(tp), NULL, NULL);
-    }
-  }
-
-  consoleSessionId = WTSGetActiveConsoleSessionId();
-  if (!SetTokenInformation(hDupToken, TokenSessionId, &consoleSessionId,
-                           sizeof(consoleSessionId))) {
+  activeSessionId = WTSGetActiveConsoleSessionId();
+  if (activeSessionId == 0xFFFFFFFF) {
     LOG_W("svc_inst_mgr",
-          "Firewall: SetTokenInformation(TokenSessionId=%lu) failed (err=%lu)",
-          consoleSessionId, GetLastError());
+          "Firewall: No active console session — cannot create rule");
+    return FALSE;
+  }
+
+  /* WTSQueryUserToken returns the user's primary token with correct
+   * SessionId already set. No SetTokenInformation needed. */
+  if (!WTSQueryUserToken(activeSessionId, &hUserToken)) {
+    LOG_W("svc_inst_mgr",
+          "Firewall: WTSQueryUserToken(session=%lu) failed (err=%lu)",
+          activeSessionId, GetLastError());
+    return FALSE;
+  }
+
+  if (!DuplicateTokenEx(hUserToken, MAXIMUM_ALLOWED, NULL,
+                        SecurityImpersonation, TokenPrimary, &hDupToken)) {
+    LOG_W("svc_inst_mgr",
+          "Firewall: DuplicateTokenEx(user token) failed (err=%lu)",
+          GetLastError());
+    CloseHandle(hUserToken);
+    return FALSE;
   }
 
   si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESHOWWINDOW;
+  si.wShowWindow = SW_HIDE;
 
-  if (CreateProcessAsUserA(hDupToken, NULL, cmdLine, NULL, NULL, FALSE,
-                           CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-    WaitForSingleObject(pi.hProcess, 10000);
-    DWORD exitCode = 0;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
+  if (CreateProcessAsUserW(hDupToken, NULL, cmdLineW, NULL, NULL, FALSE,
+                           CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                           NULL, NULL, &si, &pi)) {
+    DWORD waitResult = WaitForSingleObject(pi.hProcess, 10000);
+    DWORD exitCode = 1;
+    if (waitResult == WAIT_OBJECT_0) {
+      if (GetExitCodeProcess(pi.hProcess, &exitCode))
+        ok = (exitCode == 0);
+      if (!ok)
+        LOG_W("svc_inst_mgr", "Firewall: netsh exited with code %lu for: %s",
+              exitCode, args);
+    } else if (waitResult == WAIT_TIMEOUT) {
+      LOG_W("svc_inst_mgr", "Firewall: netsh timed out for: %s", args);
+      TerminateProcess(pi.hProcess, 1);
+    }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    ok = (exitCode == 0);
-    if (!ok) {
-      LOG_W("svc_inst_mgr", "Firewall: netsh exited with code %lu for: %s",
-            exitCode, args);
-    }
   } else {
     LOG_W("svc_inst_mgr",
-          "Firewall: CreateProcessAsUser failed (err=%lu) for: %s",
+          "Firewall: CreateProcessAsUserW failed (err=%lu) for: %s",
           GetLastError(), args);
   }
 
   CloseHandle(hDupToken);
-  CloseHandle(hToken);
+  CloseHandle(hUserToken);
   return ok;
 }
 
