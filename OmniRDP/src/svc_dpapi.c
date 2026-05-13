@@ -378,8 +378,7 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
             *se-- = '\0';
         }
 
-        if (_snprintf(current_section, sizeof(current_section), "%s", sp) <
-            0) {
+        if (_snprintf(current_section, sizeof(current_section), "%s", sp) < 0) {
           fclose(orig);
           fclose(tmp);
           remove(tmp_path);

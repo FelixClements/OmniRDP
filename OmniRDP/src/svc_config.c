@@ -23,8 +23,7 @@ static void svc_config_default_service(SvcServiceConfig *cfg) {
            "C:\\ProgramData\\OmniRDP\\logs");
   cfg->log_max_size_mb = 10;
   cfg->log_max_files = 5;
-  snprintf(cfg->pipe_name, sizeof(cfg->pipe_name), "%s",
-           "OmniRDP_ServicePipe");
+  snprintf(cfg->pipe_name, sizeof(cfg->pipe_name), "%s", "OmniRDP_ServicePipe");
   cfg->heartbeat_timeout_sec = 10;
   cfg->graceful_shutdown_sec = 10;
   cfg->health_poll_interval_sec = 2;
@@ -74,8 +73,8 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->backend_security_ignore_certificate = 0;
   cfg->security_tls_enabled = 1;
   cfg->security_nla_enabled = 1;
-  snprintf(cfg->security_tls_min_version,
-           sizeof(cfg->security_tls_min_version), "%s", "1.2");
+  snprintf(cfg->security_tls_min_version, sizeof(cfg->security_tls_min_version),
+           "%s", "1.2");
   cfg->security_server_authentication = 1;
   cfg->security_ignore_certificate = 0;
 }

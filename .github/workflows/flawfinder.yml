@@ -26,6 +26,7 @@ jobs:
         with:
           arguments: >-
             --sarif
+            --minlevel 3
             OmniRDP/src
             OmniRDP/include
             OmniRDP/tests

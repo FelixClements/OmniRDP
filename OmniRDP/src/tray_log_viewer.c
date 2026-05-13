@@ -66,8 +66,7 @@ static void load_log_content(void) {
   long readSize = fileSize - skip;
   if (readSize < 0)
     readSize = 0;
-  char *content =
-      (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)readSize + 1);
+  char *content = (char *)HeapAlloc(GetProcessHeap(), 0, (size_t)readSize + 1);
   if (content) {
     size_t read = fread(content, 1, (size_t)readSize, fp);
     content[read] = '\0';
