@@ -145,6 +145,15 @@ static void populate_listview(HWND hListView, const TrayAppCtx *ctx) {
       ListView_SetItemText(hListView, itemIndex, 2, stateText);
       ListView_SetItemText(hListView, itemIndex, 3, viewers);
       ListView_SetItemText(hListView, itemIndex, 4, backend);
+
+      /* Viewer Port column */
+      {
+        char cell[32];
+        if (inst->viewer_port > 0) {
+          snprintf(cell, sizeof(cell), "%u", inst->viewer_port);
+          ListView_SetItemText(hListView, itemIndex, 5, cell);
+        }
+      }
     }
   }
 }
@@ -319,6 +328,10 @@ static LRESULT CALLBACK status_dlg_proc(HWND hwnd, UINT msg, WPARAM wParam,
     col.cx = 150;
     col.pszText = "Backend";
     ListView_InsertColumn(hListView, 4, &col);
+
+    col.cx = 80;
+    col.pszText = "Viewer";
+    ListView_InsertColumn(hListView, 5, &col);
 
     /* ── Buttons ─────────────────────────────────────────── */
     CreateWindowExA(0, "BUTTON", "Start", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,

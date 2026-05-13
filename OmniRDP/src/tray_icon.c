@@ -1025,6 +1025,24 @@ void tray_icon_refresh_instances(TrayAppCtx *ctx) {
         }
       }
 
+      /* ── Parse "viewer_port" ────────────────────────────── */
+      {
+        const char *field = strstr(p, "\\\"viewer_port\\\":");
+        if (!field)
+          field = strstr(p, "\"viewer_port\":");
+        if (field) {
+          const char *val = field;
+          while (*val && *val != ':')
+            val++;
+          if (*val == ':') {
+            val++;
+            unsigned long vp = 0;
+            sscanf(val, "%lu", &vp); // Flawfinder: ignore
+            info->viewer_port = (uint16_t)vp;
+          }
+        }
+      }
+
       svc->instanceCount++;
 
       /* Advance past this object */

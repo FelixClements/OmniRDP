@@ -952,6 +952,7 @@ int inst_mgr_get_info(InstanceManager *mgr, unsigned int index,
            inst->config.backend_hostname);
 
   info->backend_port = inst->config.backend_port;
+  info->viewer_port = inst->config.viewer_port;
 
   LeaveCriticalSection(&mgr->lock);
   return 0;

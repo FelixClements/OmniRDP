@@ -205,6 +205,9 @@ typedef struct {
 
   /** Backend RDP server TCP port (typically 3389). */
   uint16_t backend_port;
+
+  /** Viewer listener port (e.g., 3390). */
+  uint16_t viewer_port;
 } PipeInstanceInfo;
 
 /* ════════════════════════════════════════════════════════════════ */

@@ -639,9 +639,11 @@ static void cmd_list_instances(PipeServer *server, char *response,
     int written = _snprintf(
         array + pos, sizeof(array) - pos,
         "%s{\"name\":\"%s\",\"state\":%d,\"viewer_count\":%lu,"
-        "\"backend_hostname\":\"%s\",\"backend_port\":%u}",
+        "\"backend_hostname\":\"%s\",\"backend_port\":%u,"
+        "\"viewer_port\":%u}",
         (pos > 0) ? "," : "", info.name, (int)info.state, info.viewer_count,
-        info.backend_hostname, (unsigned int)info.backend_port);
+        info.backend_hostname, (unsigned int)info.backend_port,
+        (unsigned int)info.viewer_port);
 
     if (written > 0 && (size_t)written < sizeof(array) - pos)
       pos += (size_t)written;
