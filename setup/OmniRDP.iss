@@ -169,7 +169,7 @@ Filename: "{app}\OmniRDP-svc.exe"; Parameters: "--install"
 ; Install tray
 Filename: "{app}\OmniRDP-tray.exe"; Parameters: "--install"; Flags: runasoriginaluser
 ; Launch tray after install
-Filename: "{app}\OmniRDP-tray.exe"; Description: "Launch OmniRDP Tray"; Flags: postinstall skipifsilent runasoriginaluser
+Filename: "{app}\OmniRDP-tray.exe"; Description: "Launch OmniRDP Tray"; Flags: postinstall skipifsilent runasoriginaluser nowait
 
 [UninstallRun]
 ; Uninstall tray

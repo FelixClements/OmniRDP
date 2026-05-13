@@ -9,10 +9,19 @@
 static HWND g_hLogViewer = NULL;
 static HWND g_hEdit = NULL;
 static PipeClient *g_client = NULL;
+static BOOL g_showingError = FALSE;
 
 static void load_log_content(void) {
-  if (!g_hEdit || !g_client)
+  if (!g_hEdit)
     return;
+
+  if (!g_client) {
+    if (!g_showingError) {
+      SetWindowTextA(g_hEdit, "No service connected.");
+      g_showingError = TRUE;
+    }
+    return;
+  }
 
   PipeRequest req;
   memset(&req, 0, sizeof(req));
@@ -21,9 +30,22 @@ static void load_log_content(void) {
   PipeResponse resp;
   memset(&resp, 0, sizeof(resp));
 
-  if (pipe_client_send_request(g_client, &req, &resp, 5000) != 0 ||
-      !resp.success) {
-    SetWindowTextA(g_hEdit, "Log file not found or cannot be opened.");
+  if (pipe_client_send_request(g_client, &req, &resp, 5000) != 0) {
+    if (!g_showingError) {
+      SetWindowTextA(g_hEdit,
+                     "Cannot retrieve logs \u2014 service may be busy. Try "
+                     "again in a few seconds.");
+      g_showingError = TRUE;
+    }
+    return;
+  }
+
+  if (!resp.success) {
+    if (!g_showingError) {
+      SetWindowTextA(g_hEdit,
+                     "Service returned an error retrieving logs.");
+      g_showingError = TRUE;
+    }
     return;
   }
 
@@ -31,6 +53,7 @@ static void load_log_content(void) {
   const char *payload = resp.json_payload;
   if (!payload || payload[0] == '\0') {
     SetWindowTextA(g_hEdit, "(empty log)");
+    g_showingError = FALSE;
     return;
   }
 
@@ -138,6 +161,7 @@ static void load_log_content(void) {
   displayBuf[outPos] = '\0';
 
   SetWindowTextA(g_hEdit, displayBuf);
+  g_showingError = FALSE;
   /* Scroll to end */
   SendMessage(g_hEdit, EM_SETSEL, (WPARAM)outPos, (LPARAM)outPos);
   SendMessage(g_hEdit, EM_SCROLLCARET, 0, 0);
@@ -162,6 +186,7 @@ static LRESULT CALLBACK log_viewer_wndproc(HWND hwnd, UINT msg, WPARAM wParam,
       if (hFont)
         SendMessage(g_hEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
     }
+    g_showingError = FALSE;
     load_log_content();
     SetTimer(hwnd, LOG_VIEWER_TIMER_ID, LOG_VIEWER_REFRESH_MS, NULL);
     return 0;
