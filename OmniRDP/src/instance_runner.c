@@ -7,6 +7,7 @@
  * pipe, and runs the backend+viewer multiplexer loop.
  */
 
+#include <share.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -481,7 +482,8 @@ int instance_runner_main(int argc, char *argv[]) {
     snprintf(g_viewer_log_path, sizeof(g_viewer_log_path), "%s\\viewer.log",
              instance_log_dir);
 #ifdef _WIN32
-    if (fopen_s(&g_viewer_logfile, g_viewer_log_path, "a") != 0)
+    g_viewer_logfile = _fsopen(g_viewer_log_path, "a", _SH_DENYNO);
+    if (!g_viewer_logfile)
       g_viewer_logfile = NULL;
 #else
     {

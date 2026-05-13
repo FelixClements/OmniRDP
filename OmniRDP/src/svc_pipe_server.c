@@ -853,8 +853,8 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
 
   /* ── Open the log file ───────────────────────────────────── */
   /* Use _fsopen with _SH_DENYNO to allow concurrent reads.
-   * The service holds the file open with fopen_s("a") which uses
-   * restrictive sharing — a plain fopen_s("r") would be denied. */
+   * Both svc_log.c and this function use _SH_DENYNO so the file
+   * can be read while the service is actively writing to it. */
   FILE *f = _fsopen(logPath, "r", _SH_DENYNO);
   if (!f) {
     _snprintf(response, respSize,
