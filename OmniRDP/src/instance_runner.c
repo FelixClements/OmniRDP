@@ -729,6 +729,8 @@ int instance_runner_main(int argc, char *argv[]) {
     return 1;
   }
 
+  /* Remove any existing rule first (handles port changes from config reload) */
+  remove_firewall_rule(inst->name);
   add_firewall_rule(inst->name, inst->viewer_port);
   LOG_I("instance_runner", "Viewer server started on %s:%u",
         inst->viewer_bind_address, inst->viewer_port);
