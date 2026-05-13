@@ -1,0 +1,72 @@
+name: Security Static Checks
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '17 5 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  banned-api:
+    name: Banned C API Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
+      - name: Reject banned APIs
+        run: |
+          set -euo pipefail
+          pattern='\b(strcpy|strncpy|strlen|memcpy|fopen|atoi|getenv|fgetc|InitializeCriticalSection)\s*\('
+          if rg --line-number --glob 'OmniRDP/**/*.{c,h}' "$pattern"; then
+            echo "::error::Direct calls to banned C APIs were found. Use the checked/bounded alternatives documented in AGENTS.md."
+            exit 1
+          fi
+
+  cppcheck:
+    name: Cppcheck Bug Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install Cppcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+
+      - name: Run Cppcheck report
+        run: |
+          cppcheck \
+            --enable=warning \
+            --inline-suppr \
+            --suppress=missingInclude \
+            --suppress=missingIncludeSystem \
+            --output-file=cppcheck-report.txt \
+            OmniRDP/src OmniRDP/include OmniRDP/tests
+
+      - name: Fail on Cppcheck errors
+        run: |
+          cppcheck \
+            --error-exitcode=1 \
+            --inline-suppr \
+            --suppress=missingInclude \
+            --suppress=missingIncludeSystem \
+            OmniRDP/src OmniRDP/include OmniRDP/tests
+
+      - name: Upload Cppcheck report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cppcheck-report
+          path: cppcheck-report.txt

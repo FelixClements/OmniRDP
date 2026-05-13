@@ -1,9 +1,4 @@
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
-name: flawfinder
+name: Flawfinder Security Scan
 
 on:
   push:
@@ -24,12 +19,16 @@ jobs:
       security-events: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: flawfinder_scan
+      - name: Run Flawfinder
         uses: david-a-wheeler/flawfinder@8e4a779ad59dbfaee5da586aa9210853b701959c
         with:
-          arguments: '--sarif ./'
+          arguments: >-
+            --sarif
+            OmniRDP/src
+            OmniRDP/include
+            OmniRDP/tests
           output: 'flawfinder_results.sarif'
 
       - name: Upload analysis results to GitHub Security tab
