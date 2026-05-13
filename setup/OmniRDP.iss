@@ -83,6 +83,57 @@ begin
   RunExistingUninstall('{app}\OmniRDP-svc.exe');
 end;
 
+procedure KillAllOmniRDPProcesses;
+var
+  Images: array[0..2] of String;
+  I: Integer;
+begin
+  Images[0] := 'OmniRDP-tray.exe';
+  Images[1] := 'OmniRDP-svc.exe';
+  Images[2] := 'OmniRDP.exe';
+  for I := 0 to 2 do
+    KillProcessByImage(Images[I]);
+end;
+
+function AppDirHasFiles: Boolean;
+var
+  FindRec: TFindRec;
+  AppDir: String;
+begin
+  Result := False;
+  AppDir := ExpandConstant('{app}');
+  if FindFirst(AppDir + '\*', FindRec) then
+  begin
+    try
+      repeat
+        if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+        begin
+          Result := True;
+          Exit;
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    if AppDirHasFiles then
+    begin
+      Log('Uninstall: files remain in {app}, killing OmniRDP processes');
+      KillAllOmniRDPProcesses;
+      { Give processes time to exit }
+      Sleep(2000);
+    end
+    else
+      Log('Uninstall: all files removed successfully');
+  end;
+end;
+
 [Files]
 ; Application files
 Source: "..\artifacts\windows-Release\bin\OmniRDP.exe"; DestDir: "{app}"; Flags: ignoreversion; BeforeInstall: PrepareForUpgrade
@@ -105,6 +156,8 @@ Source: "..\setup\license\*"; DestDir: "{app}\license"; Flags: ignoreversion rec
 Filename: "{app}\OmniRDP-svc.exe"; Parameters: "--install"
 ; Install tray
 Filename: "{app}\OmniRDP-tray.exe"; Parameters: "--install"; Flags: runasoriginaluser
+; Launch tray after install
+Filename: "{app}\OmniRDP-tray.exe"; Description: "Launch OmniRDP Tray"; Flags: postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
 ; Uninstall tray
