@@ -145,7 +145,7 @@ int main(int argc, char *argv[]) {
     } else {
       fprintf(stderr, "Failed to install service '%s'.\n", serviceName);
     }
-    return ret;
+    return ret < 0 ? 1 : ret;
   }
 
   /* ── Uninstall mode ─────────────────────────────────────────── */
@@ -157,7 +157,7 @@ int main(int argc, char *argv[]) {
     } else {
       fprintf(stderr, "Failed to uninstall service '%s'.\n", serviceName);
     }
-    return ret;
+    return ret < 0 ? 1 : ret;
   }
 
   /* ── Console mode (debugging) ──────────────────────────────── */

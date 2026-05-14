@@ -151,7 +151,10 @@ set(SVC_LIBS
     advapi32    # SCM, DPAPI, security
     crypt32     # DPAPI
     kernel32    # Job objects, processes
-    wtsapi32    # WTSQueryUserToken, WTSGetActiveConsoleSessionId
+    wtsapi32    # WTS APIs used by svc_pipe_server.c
+    ole32       # Windows Firewall COM API
+    oleaut32    # BSTR helpers for Firewall COM API
+    uuid        # COM GUID symbols for Firewall API
 )
 
 target_link_libraries(OmniRDP-svc ${SVC_LIBS})

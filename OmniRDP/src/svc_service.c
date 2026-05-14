@@ -575,11 +575,12 @@ int svc_service_install(const char *serviceName, const char *configPath) {
       NULL,                                             /* load order group */
       NULL,                                             /* tag identifier */
       NULL,                                             /* dependencies */
-      "NT AUTHORITY\\LocalSystem", /* service start account */
-      NULL);                          /* password */
+      NULL,                                             /* LocalSystem */
+      NULL);                                            /* password */
 
   if (!schService) {
     DWORD err = GetLastError();
+    DWORD createErr = err;
 
     if (err == ERROR_SERVICE_MARKED_FOR_DELETE) {
       /* Service is pending deletion — wait for it to complete */
@@ -589,17 +590,20 @@ int svc_service_install(const char *serviceName, const char *configPath) {
       for (int i = 0; i < 10; i++) {
         Sleep(1000);
         schSCManager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CREATE_SERVICE);
-        if (!schSCManager)
+        if (!schSCManager) {
+          createErr = GetLastError();
           break;
+        }
         schService = CreateServiceA(
             schSCManager, serviceName, serviceName,
             SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
                 SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG,
             SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-            binaryPath, NULL, NULL, NULL, "NT AUTHORITY\\LocalSystem", NULL);
+            binaryPath, NULL, NULL, NULL, NULL, NULL);
         if (schService)
           break;
         err = GetLastError();
+        createErr = err;
         CloseServiceHandle(schSCManager);
         if (err != ERROR_SERVICE_MARKED_FOR_DELETE)
           break;
@@ -617,12 +621,16 @@ int svc_service_install(const char *serviceName, const char *configPath) {
             SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
                 SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG,
             SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-            binaryPath, NULL, NULL, NULL, "NT AUTHORITY\\LocalSystem", NULL);
+            binaryPath, NULL, NULL, NULL, NULL, NULL);
+        if (!schService)
+          createErr = GetLastError();
+      } else {
+        createErr = GetLastError();
       }
     }
 
     if (!schService) {
-      fprintf(stderr, "CreateService failed: %lu\n", GetLastError());
+      fprintf(stderr, "CreateService failed: %lu\n", createErr);
       if (schSCManager)
         CloseServiceHandle(schSCManager);
       return -1;

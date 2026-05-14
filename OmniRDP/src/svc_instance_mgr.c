@@ -20,12 +20,20 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef COBJMACROS
+#define COBJMACROS
+#endif
+#ifndef CINTERFACE
+#define CINTERFACE
+#endif
 #include <windows.h>
 
 #include <aclapi.h>
 #include <limits.h>
+#include <netfw.h>
+#include <objbase.h>
+#include <oleauto.h>
 #include <stdio.h>
-#include <wtsapi32.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -168,133 +176,264 @@ ManagedInstance *inst_mgr_find(InstanceManager *mgr, const char *name) {
   return NULL;
 }
 
-/**
- * @brief Run a netsh command in the interactive user's session.
- *
- * The service runs in Session 0 as SYSTEM, where the firewall COM API
- * returns E_ACCESSDENIED.  WTSQueryUserToken gets the logged-on user's
- * primary token (which already has the correct SessionId), then
- * CreateProcessAsUserW launches netsh in the user's session where
- * firewall operations work.
- */
-static BOOL run_netsh_in_user_session(const char *args) {
-  BOOL ok = FALSE;
-  HANDLE hUserToken = NULL;
-  HANDLE hDupToken = NULL;
-  DWORD activeSessionId;
-  STARTUPINFOW si = {0};
-  PROCESS_INFORMATION pi = {0};
-  char cmdLineA[512];
-  WCHAR cmdLineW[512];
+static BOOL svc_firewall_com_begin(BOOL *shouldUninitialize) {
+  HRESULT hr;
 
-  int n = _snprintf(cmdLineA, sizeof(cmdLineA), "netsh %s", args);
-  if (n < 0)
-    cmdLineA[0] = '\0';
-  cmdLineA[sizeof(cmdLineA) - 1] = '\0';
-
-  if (MultiByteToWideChar(CP_UTF8, 0, cmdLineA, -1, cmdLineW,
-                          (int)(sizeof(cmdLineW) / sizeof(WCHAR))) == 0) {
-    LOG_W("svc_inst_mgr", "Firewall: MultiByteToWideChar failed (err=%lu)",
-          GetLastError());
+  if (!shouldUninitialize)
     return FALSE;
-  }
-  cmdLineW[(sizeof(cmdLineW) / sizeof(WCHAR)) - 1] = L'\0';
+  *shouldUninitialize = FALSE;
 
-  activeSessionId = WTSGetActiveConsoleSessionId();
-  if (activeSessionId == 0xFFFFFFFF) {
-    LOG_W("svc_inst_mgr",
-          "Firewall: No active console session — cannot create rule");
+  hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+  if (hr == S_OK || hr == S_FALSE) {
+    *shouldUninitialize = TRUE;
+  } else if (hr != RPC_E_CHANGED_MODE) {
+    LOG_W("svc_inst_mgr", "Firewall: CoInitializeEx failed (hr=0x%08lx)", hr);
     return FALSE;
   }
 
-  /* WTSQueryUserToken returns the user's primary token with correct
-   * SessionId already set. No SetTokenInformation needed. */
-  if (!WTSQueryUserToken(activeSessionId, &hUserToken)) {
-    LOG_W("svc_inst_mgr",
-          "Firewall: WTSQueryUserToken(session=%lu) failed (err=%lu)",
-          activeSessionId, GetLastError());
-    return FALSE;
-  }
-
-  if (!DuplicateTokenEx(hUserToken, MAXIMUM_ALLOWED, NULL,
-                        SecurityImpersonation, TokenPrimary, &hDupToken)) {
-    LOG_W("svc_inst_mgr",
-          "Firewall: DuplicateTokenEx(user token) failed (err=%lu)",
-          GetLastError());
-    CloseHandle(hUserToken);
-    return FALSE;
-  }
-
-  si.cb = sizeof(si);
-  si.dwFlags = STARTF_USESHOWWINDOW;
-  si.wShowWindow = SW_HIDE;
-
-  if (CreateProcessAsUserW(hDupToken, NULL, cmdLineW, NULL, NULL, FALSE,
-                           CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                           NULL, NULL, &si, &pi)) {
-    DWORD waitResult = WaitForSingleObject(pi.hProcess, 10000);
-    DWORD exitCode = 1;
-    if (waitResult == WAIT_OBJECT_0) {
-      if (GetExitCodeProcess(pi.hProcess, &exitCode))
-        ok = (exitCode == 0);
-      if (!ok)
-        LOG_W("svc_inst_mgr", "Firewall: netsh exited with code %lu for: %s",
-              exitCode, args);
-    } else if (waitResult == WAIT_TIMEOUT) {
-      LOG_W("svc_inst_mgr", "Firewall: netsh timed out for: %s", args);
-      TerminateProcess(pi.hProcess, 1);
+  hr = CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
+                            RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE, NULL);
+  if (FAILED(hr) && hr != RPC_E_TOO_LATE) {
+    LOG_W("svc_inst_mgr", "Firewall: CoInitializeSecurity failed (hr=0x%08lx)",
+          hr);
+    if (*shouldUninitialize) {
+      CoUninitialize();
+      *shouldUninitialize = FALSE;
     }
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-  } else {
-    LOG_W("svc_inst_mgr",
-          "Firewall: CreateProcessAsUserW failed (err=%lu) for: %s",
-          GetLastError(), args);
+    return FALSE;
   }
 
-  CloseHandle(hDupToken);
-  CloseHandle(hUserToken);
-  return ok;
+  return TRUE;
+}
+
+static void svc_firewall_com_end(BOOL shouldUninitialize) {
+  if (shouldUninitialize)
+    CoUninitialize();
+}
+
+static BSTR svc_firewall_utf8_to_bstr(const char *value, size_t maxBytes) {
+  int wideChars;
+  BSTR bstr;
+
+  if (!value || strnlen_s(value, maxBytes) >= maxBytes)
+    return NULL;
+
+  wideChars =
+      MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
+  if (wideChars <= 0) {
+    wideChars = MultiByteToWideChar(CP_ACP, 0, value, -1, NULL, 0);
+  }
+  if (wideChars <= 0)
+    return NULL;
+
+  bstr = SysAllocStringLen(NULL, (UINT)(wideChars - 1));
+  if (!bstr)
+    return NULL;
+
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, bstr,
+                          wideChars) == 0 &&
+      MultiByteToWideChar(CP_ACP, 0, value, -1, bstr, wideChars) == 0) {
+    SysFreeString(bstr);
+    return NULL;
+  }
+
+  return bstr;
+}
+
+static BOOL svc_build_firewall_rule_name(const char *instanceName,
+                                         char *ruleName, size_t ruleNameSize) {
+  int n;
+
+  if (!instanceName || !ruleName || ruleNameSize == 0)
+    return FALSE;
+
+  n = snprintf(ruleName, ruleNameSize, "OmniRDP Viewer - %s", instanceName);
+  if (n < 0 || (size_t)n >= ruleNameSize) {
+    ruleName[0] = '\0';
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static HRESULT svc_firewall_get_rules(INetFwPolicy2 **policy,
+                                      INetFwRules **rules) {
+  HRESULT hr;
+
+  if (!policy || !rules)
+    return E_INVALIDARG;
+  *policy = NULL;
+  *rules = NULL;
+
+  hr = CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_INPROC_SERVER,
+                        &IID_INetFwPolicy2, (void **)policy);
+  if (FAILED(hr)) {
+    hr = CoCreateInstance(&CLSID_NetFwPolicy2, NULL, CLSCTX_ALL,
+                          &IID_INetFwPolicy2, (void **)policy);
+  }
+  if (FAILED(hr))
+    return hr;
+
+  hr = INetFwPolicy2_get_Rules(*policy, rules);
+  if (FAILED(hr)) {
+    INetFwPolicy2_Release(*policy);
+    *policy = NULL;
+  }
+
+  return hr;
 }
 
 static void svc_remove_firewall_rule(const char *instanceName) {
   char ruleName[256];
-  char args[512];
+  BSTR ruleNameBstr = NULL;
+  BOOL shouldUninitialize = FALSE;
+  INetFwPolicy2 *policy = NULL;
+  INetFwRules *rules = NULL;
+  HRESULT hr;
 
-  _snprintf(ruleName, sizeof(ruleName), "OmniRDP Viewer - %s", instanceName);
-  ruleName[sizeof(ruleName) - 1] = '\0';
-
-  _snprintf(args, sizeof(args), "advfirewall firewall delete rule name=\"%s\"",
-            ruleName);
-  args[sizeof(args) - 1] = '\0';
-
-  if (run_netsh_in_user_session(args)) {
-    LOG_I("svc_inst_mgr", "Firewall rule '%s' removed", ruleName);
+  if (!svc_build_firewall_rule_name(instanceName, ruleName, sizeof(ruleName))) {
+    LOG_W("svc_inst_mgr", "Firewall: invalid rule name for instance '%s'",
+          instanceName ? instanceName : "(null)");
+    return;
   }
+
+  ruleNameBstr = svc_firewall_utf8_to_bstr(ruleName, sizeof(ruleName));
+  if (!ruleNameBstr) {
+    LOG_W("svc_inst_mgr", "Firewall: failed to convert rule name '%s'",
+          ruleName);
+    return;
+  }
+
+  if (!svc_firewall_com_begin(&shouldUninitialize)) {
+    SysFreeString(ruleNameBstr);
+    return;
+  }
+
+  hr = svc_firewall_get_rules(&policy, &rules);
+  if (SUCCEEDED(hr)) {
+    hr = INetFwRules_Remove(rules, ruleNameBstr);
+  }
+
+  if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) ||
+      hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) {
+    LOG_D("svc_inst_mgr", "Firewall rule '%s' was not present", ruleName);
+    hr = S_OK;
+  } else if (SUCCEEDED(hr)) {
+    LOG_I("svc_inst_mgr", "Firewall rule '%s' removed", ruleName);
+  } else {
+    LOG_W("svc_inst_mgr", "Failed to remove firewall rule '%s' (hr=0x%08lx)",
+          ruleName, hr);
+  }
+
+  if (rules)
+    INetFwRules_Release(rules);
+  if (policy)
+    INetFwPolicy2_Release(policy);
+  svc_firewall_com_end(shouldUninitialize);
+  SysFreeString(ruleNameBstr);
 }
 
 static void svc_add_firewall_rule(const char *instanceName, uint16_t port) {
   char ruleName[256];
-  char args[512];
+  WCHAR portW[16];
+  BSTR ruleNameBstr = NULL;
+  BSTR descriptionBstr = NULL;
+  BSTR groupingBstr = NULL;
+  BSTR portBstr = NULL;
+  BOOL shouldUninitialize = FALSE;
+  INetFwPolicy2 *policy = NULL;
+  INetFwRules *rules = NULL;
+  INetFwRule *rule = NULL;
+  HRESULT hr = S_OK;
 
-  _snprintf(ruleName, sizeof(ruleName), "OmniRDP Viewer - %s", instanceName);
-  ruleName[sizeof(ruleName) - 1] = '\0';
+  if (!svc_build_firewall_rule_name(instanceName, ruleName, sizeof(ruleName))) {
+    LOG_E("svc_inst_mgr", "Firewall: invalid rule name for instance '%s'",
+          instanceName ? instanceName : "(null)");
+    return;
+  }
 
   svc_remove_firewall_rule(instanceName);
 
-  _snprintf(args, sizeof(args),
-            "advfirewall firewall add rule name=\"%s\" dir=in "
-            "action=allow protocol=TCP localport=%u profile=domain,private",
-            ruleName, (unsigned)port);
-  args[sizeof(args) - 1] = '\0';
+  if (_snwprintf(portW, sizeof(portW) / sizeof(portW[0]), L"%u",
+                 (unsigned)port) < 0) {
+    LOG_E("svc_inst_mgr", "Firewall: failed to format port %u", (unsigned)port);
+    return;
+  }
+  portW[(sizeof(portW) / sizeof(portW[0])) - 1] = L'\0';
 
-  if (run_netsh_in_user_session(args)) {
+  ruleNameBstr = svc_firewall_utf8_to_bstr(ruleName, sizeof(ruleName));
+  descriptionBstr = SysAllocString(L"Allows inbound OmniRDP viewer traffic");
+  groupingBstr = SysAllocString(L"OmniRDP");
+  portBstr = SysAllocString(portW);
+  if (!ruleNameBstr || !descriptionBstr || !groupingBstr || !portBstr) {
+    LOG_E("svc_inst_mgr", "Firewall: failed to allocate rule strings");
+    hr = E_OUTOFMEMORY;
+    goto cleanup;
+  }
+
+  if (!svc_firewall_com_begin(&shouldUninitialize)) {
+    hr = E_FAIL;
+    goto cleanup;
+  }
+
+  hr = svc_firewall_get_rules(&policy, &rules);
+  if (FAILED(hr))
+    goto cleanup;
+
+  hr = CoCreateInstance(&CLSID_NetFwRule, NULL, CLSCTX_INPROC_SERVER,
+                        &IID_INetFwRule, (void **)&rule);
+  if (FAILED(hr)) {
+    hr = CoCreateInstance(&CLSID_NetFwRule, NULL, CLSCTX_ALL, &IID_INetFwRule,
+                          (void **)&rule);
+  }
+  if (FAILED(hr))
+    goto cleanup;
+
+  hr = INetFwRule_put_Name(rule, ruleNameBstr);
+  if (SUCCEEDED(hr))
+    hr = INetFwRule_put_Description(rule, descriptionBstr);
+  if (SUCCEEDED(hr))
+    hr = INetFwRule_put_Grouping(rule, groupingBstr);
+  if (SUCCEEDED(hr))
+    hr = INetFwRule_put_Protocol(rule, NET_FW_IP_PROTOCOL_TCP);
+  if (SUCCEEDED(hr))
+    hr = INetFwRule_put_LocalPorts(rule, portBstr);
+  if (SUCCEEDED(hr))
+    hr = INetFwRule_put_Direction(rule, NET_FW_RULE_DIR_IN);
+  if (SUCCEEDED(hr))
+    hr = INetFwRule_put_Profiles(rule, NET_FW_PROFILE2_DOMAIN |
+                                           NET_FW_PROFILE2_PRIVATE);
+  if (SUCCEEDED(hr))
+    hr = INetFwRule_put_Action(rule, NET_FW_ACTION_ALLOW);
+  if (SUCCEEDED(hr))
+    hr = INetFwRule_put_Enabled(rule, VARIANT_TRUE);
+  if (SUCCEEDED(hr))
+    hr = INetFwRules_Add(rules, rule);
+
+cleanup:
+  if (SUCCEEDED(hr)) {
     LOG_I("svc_inst_mgr", "Firewall rule '%s' added for port %u", ruleName,
           (unsigned)port);
   } else {
-    LOG_E("svc_inst_mgr", "Failed to add firewall rule '%s' for port %u",
-          ruleName, (unsigned)port);
+    LOG_E("svc_inst_mgr",
+          "Failed to add firewall rule '%s' for port %u (hr=0x%08lx)", ruleName,
+          (unsigned)port, hr);
   }
+
+  if (rule)
+    INetFwRule_Release(rule);
+  if (rules)
+    INetFwRules_Release(rules);
+  if (policy)
+    INetFwPolicy2_Release(policy);
+  svc_firewall_com_end(shouldUninitialize);
+  if (portBstr)
+    SysFreeString(portBstr);
+  if (groupingBstr)
+    SysFreeString(groupingBstr);
+  if (descriptionBstr)
+    SysFreeString(descriptionBstr);
+  if (ruleNameBstr)
+    SysFreeString(ruleNameBstr);
 }
 
 /* ── inst_mgr_start (single instance) ──────────────────────────── */
@@ -678,7 +817,6 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
         instanceName, inst->pid, (void *)inst->hJob, (void *)inst->hStopEvent);
 
   /* Add/update firewall rule for the viewer port */
-  svc_remove_firewall_rule(instanceName);
   svc_add_firewall_rule(instanceName, inst->config.viewer_port);
 
   LeaveCriticalSection(&mgr->lock);
