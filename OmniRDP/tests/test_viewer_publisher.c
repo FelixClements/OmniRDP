@@ -93,6 +93,8 @@ static int test_dirty_overflow_normalizes_full_frame(void) {
   ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
                            "overflow normalizes to one rect");
   ok = ok && expect_true(!snapshot.dirty_overflow, "overflow cleared");
+  /* Publisher dirty rectangles are inclusive left/top/right/bottom, so a 2x2
+   * framebuffer normalizes to right=1,bottom=1. */
   ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 0, "full left");
   ok = ok && expect_uint32(snapshot.dirty_rects[0].top, 0, "full top");
   ok = ok && expect_uint32(snapshot.dirty_rects[0].right, 1, "full right");
@@ -215,6 +217,98 @@ static int test_mark_consumed_allows_next_queue(void) {
   return ok;
 }
 
+static int test_duplicate_snapshot_after_consume_is_suppressed(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerPublisherMetrics metrics = {0};
+  UINT64 queued_bytes = 0;
+  UINT64 consumed_generation = 0;
+  BYTE pixels[16] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(setup_framebuffer(&fb, pixels, sizeof(pixels)),
+                         "framebuffer setup");
+  ok = ok && expect_true(viewer_publisher_snapshot(&publisher, &fb, &snapshot),
+                         "first snapshot");
+  consumed_generation = snapshot.generation;
+  viewer_framebuffer_snapshot_free(&snapshot);
+
+  viewer_publisher_mark_consumed(&publisher, consumed_generation);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  queued_bytes = metrics.queued_bytes;
+
+  ok = ok && expect_true(!viewer_publisher_snapshot(&publisher, &fb, &snapshot),
+                         "duplicate consumed generation suppressed");
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.queued_updates, 1,
+                           "duplicate does not queue update");
+  ok = ok && expect_uint64(metrics.coalesced_updates, 0,
+                           "duplicate does not coalesce");
+  ok = ok && expect_uint64(metrics.queued_bytes, queued_bytes,
+                           "duplicate does not add queued bytes");
+  ok = ok && expect_uint64(metrics.dropped_updates, 0,
+                           "duplicate is not counted as dropped");
+
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_stale_consumed_generation_ignored(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerPublisherMetrics metrics = {0};
+  BYTE pixels[16] = {0};
+  RECTANGLE_16 dirty = {0, 0, 0, 0};
+  UINT64 first_generation = 0;
+  UINT64 pending_generation = 0;
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(setup_framebuffer(&fb, pixels, sizeof(pixels)),
+                         "framebuffer setup");
+  ok = ok && expect_true(viewer_publisher_snapshot(&publisher, &fb, &snapshot),
+                         "first snapshot");
+  first_generation = snapshot.generation;
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_publisher_mark_consumed(&publisher, first_generation);
+
+  fill_pixels(pixels, sizeof(pixels), 80);
+  ok = ok &&
+       expect_true(viewer_framebuffer_update_pixels(&fb, pixels, 8, &dirty, 1),
+                   "next generation update");
+  ok = ok && expect_true(viewer_publisher_snapshot(&publisher, &fb, &snapshot),
+                         "next pending snapshot");
+  pending_generation = snapshot.generation;
+  viewer_framebuffer_snapshot_free(&snapshot);
+
+  viewer_publisher_mark_consumed(&publisher, first_generation - 1U);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.last_generation_sent, first_generation,
+                           "stale consumed generation ignored");
+
+  ok = ok && expect_true(viewer_publisher_snapshot(&publisher, &fb, &snapshot),
+                         "pending survives stale consume");
+  viewer_framebuffer_snapshot_free(&snapshot);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.queued_updates, 2,
+                           "stale consume did not clear pending");
+  ok = ok && expect_uint64(metrics.coalesced_updates, 0,
+                           "same pending generation not re-coalesced");
+
+  viewer_publisher_mark_consumed(&publisher, pending_generation);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.last_generation_sent, pending_generation,
+                           "newer consumed generation accepted");
+
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
 int main(void) {
   if (!test_generation_and_metrics())
     return 1;
@@ -225,6 +319,10 @@ int main(void) {
   if (!test_slow_consumer_coalescing())
     return 1;
   if (!test_mark_consumed_allows_next_queue())
+    return 1;
+  if (!test_duplicate_snapshot_after_consume_is_suppressed())
+    return 1;
+  if (!test_stale_consumed_generation_ignored())
     return 1;
   return 0;
 }

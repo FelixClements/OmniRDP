@@ -11,6 +11,8 @@ extern "C" {
 
 typedef struct {
   UINT64 queued_updates;
+  /* Cumulative bytes accepted as pending/coalesced snapshots, not current
+   * queue depth. */
   UINT64 queued_bytes;
   UINT64 coalesced_updates;
   UINT64 dropped_updates;
@@ -30,6 +32,10 @@ void viewer_publisher_uninit(ViewerPublisher *publisher);
 void viewer_publisher_reset_metrics(ViewerPublisher *publisher);
 void viewer_publisher_note_generation(ViewerPublisher *publisher,
                                       UINT64 generation);
+/* Returns FALSE without counting a drop when snapshot generation is already
+ * consumed (generation <= last_generation_sent). Dirty rectangles use inclusive
+ * left/top/right/bottom coordinates. Empty or overflow dirty lists normalize to
+ * one inclusive full-frame rectangle. */
 BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
                                ViewerFramebuffer *framebuffer,
                                ViewerFramebufferSnapshot *snapshot);

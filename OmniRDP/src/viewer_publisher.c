@@ -78,6 +78,11 @@ BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
   }
 
   publisher->metrics.latest_generation_available = snapshot->generation;
+  if (snapshot->generation <= publisher->metrics.last_generation_sent) {
+    viewer_framebuffer_snapshot_free(snapshot);
+    return FALSE;
+  }
+
   if (!publisher->has_pending_snapshot) {
     publisher->has_pending_snapshot = TRUE;
     publisher->pending_generation = snapshot->generation;
@@ -98,6 +103,9 @@ BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
 void viewer_publisher_mark_consumed(ViewerPublisher *publisher,
                                     UINT64 generation) {
   if (!publisher || !publisher->initialized)
+    return;
+
+  if (generation < publisher->metrics.last_generation_sent)
     return;
 
   publisher->metrics.last_generation_sent = generation;
