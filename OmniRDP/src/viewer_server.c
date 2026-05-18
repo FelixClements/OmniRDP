@@ -5045,6 +5045,53 @@ viewer_server_get_count(ViewerServer *server) {
   return count;
 }
 
+BOOL viewer_server_update_framebuffer_from_gdi(BackendClient *backend,
+                                               const BYTE *pixels, UINT32 width,
+                                               UINT32 height, UINT32 stride,
+                                               UINT32 pixel_format,
+                                               const RECTANGLE_16 *dirty_rects,
+                                               UINT32 dirty_rect_count) {
+  ViewerServer *server = g_viewer_server;
+  BOOL needs_resize = FALSE;
+  BOOL updated = FALSE;
+  UINT64 generation = 0;
+
+  if (!server || !backend || !pixels || (server->backend != backend))
+    return FALSE;
+
+  if ((width == 0) || (height == 0) || (stride == 0))
+    return FALSE;
+
+  if ((dirty_rect_count > 0) && !dirty_rects)
+    return FALSE;
+
+  if (!server->framebuffer.initialized || !server->publisher.initialized)
+    return FALSE;
+
+  EnterCriticalSection(&server->framebuffer.lock);
+  needs_resize = (server->framebuffer.width != width) ||
+                 (server->framebuffer.height != height) ||
+                 (server->framebuffer.stride != stride) ||
+                 (server->framebuffer.pixel_format != pixel_format) ||
+                 !server->framebuffer.pixels;
+  LeaveCriticalSection(&server->framebuffer.lock);
+
+  if (needs_resize && !viewer_framebuffer_resize(&server->framebuffer, width,
+                                                 height, stride, pixel_format))
+    return FALSE;
+
+  updated = viewer_framebuffer_update_pixels(
+      &server->framebuffer, pixels, stride, dirty_rects, dirty_rect_count);
+  if (!updated)
+    return FALSE;
+
+  EnterCriticalSection(&server->framebuffer.lock);
+  generation = server->framebuffer.generation;
+  LeaveCriticalSection(&server->framebuffer.lock);
+  viewer_publisher_note_generation(&server->publisher, generation);
+  return TRUE;
+}
+
 void viewer_server_notify_backend_layout_change(BackendClient *backend,
                                                 UINT32 width, UINT32 height,
                                                 UINT32 generation) {

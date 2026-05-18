@@ -1,0 +1,181 @@
+#include "viewer_framebuffer.h"
+
+#include <stdio.h>
+
+static int expect_true(BOOL value, const char *message) {
+  if (!value) {
+    (void)fprintf(stderr, "FAIL: %s\n", message);
+    return 0;
+  }
+  return 1;
+}
+
+static int expect_uint64(UINT64 actual, UINT64 expected, const char *message) {
+  if (actual != expected) {
+    (void)fprintf(stderr, "FAIL: %s actual=%llu expected=%llu\n", message,
+                  (unsigned long long)actual, (unsigned long long)expected);
+    return 0;
+  }
+  return 1;
+}
+
+static int expect_uint32(UINT32 actual, UINT32 expected, const char *message) {
+  if (actual != expected) {
+    (void)fprintf(stderr, "FAIL: %s actual=%u expected=%u\n", message, actual,
+                  expected);
+    return 0;
+  }
+  return 1;
+}
+
+static int test_init_uninit(void) {
+  ViewerFramebuffer fb = {0};
+
+  if (!expect_true(viewer_framebuffer_init(&fb), "init succeeds"))
+    return 0;
+  if (!expect_true(fb.initialized, "framebuffer marked initialized"))
+    return 0;
+
+  viewer_framebuffer_uninit(&fb);
+  return expect_true(!fb.initialized, "framebuffer uninitialized");
+}
+
+static int test_resize_generation_and_dirty(void) {
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_framebuffer_init(&fb), "init resize test");
+  ok = ok && expect_true(viewer_framebuffer_resize(&fb, 4, 3, 16, 32),
+                         "resize succeeds");
+  ok = ok && expect_uint64(fb.generation, 1, "resize increments generation");
+  ok = ok && expect_true(viewer_framebuffer_snapshot(&fb, &snapshot),
+                         "snapshot after resize succeeds");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "resize creates one dirty rect");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 0, "full rect left");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].top, 0, "full rect top");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].right, 3, "full rect right");
+  ok = ok &&
+       expect_uint32(snapshot.dirty_rects[0].bottom, 2, "full rect bottom");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  return ok;
+}
+
+static int test_update_snapshot_copy_and_dirty(void) {
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[16] = {0};
+  RECTANGLE_16 dirty[2] = {{1, 1, 2, 2}, {0, 0, 1, 1}};
+  int ok = 1;
+
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+
+  ok = ok && expect_true(viewer_framebuffer_init(&fb), "init update test");
+  ok = ok && expect_true(viewer_framebuffer_resize(&fb, 2, 2, 8, 32),
+                         "resize update test");
+  ok = ok &&
+       expect_true(viewer_framebuffer_update_pixels(&fb, pixels, 8, dirty, 2),
+                   "update pixels succeeds");
+  ok = ok && expect_uint64(fb.generation, 2, "update increments generation");
+  ok = ok && expect_true(viewer_framebuffer_snapshot(&fb, &snapshot),
+                         "snapshot after update succeeds");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 2,
+                           "explicit dirty rect count preserved");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 1,
+                           "first dirty rect preserved");
+  ok = ok && expect_uint32(snapshot.dirty_rects[1].bottom, 1,
+                           "second dirty rect preserved");
+  for (size_t i = 0; ok && (i < sizeof(pixels)); i++)
+    ok = expect_uint32(snapshot.pixels[i], pixels[i], "snapshot pixel copied");
+
+  pixels[0] = 0xFFU;
+  ok = ok && expect_uint32(snapshot.pixels[0], 1, "snapshot owns pixel copy");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  return ok;
+}
+
+static int test_dirty_overflow(void) {
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[4] = {1, 2, 3, 4};
+  RECTANGLE_16 dirty[VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS + 1U] = {0};
+  int ok = 1;
+
+  for (UINT32 i = 0; i < (VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS + 1U); i++) {
+    dirty[i].left = 0;
+    dirty[i].top = 0;
+    dirty[i].right = 0;
+    dirty[i].bottom = 0;
+  }
+
+  ok = ok && expect_true(viewer_framebuffer_init(&fb), "init overflow test");
+  ok = ok && expect_true(viewer_framebuffer_resize(&fb, 1, 1, 4, 32),
+                         "resize overflow test");
+  ok = ok && expect_true(viewer_framebuffer_update_pixels(
+                             &fb, pixels, 4, dirty,
+                             VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS + 1U),
+                         "overflow update succeeds");
+  ok = ok && expect_true(viewer_framebuffer_snapshot(&fb, &snapshot),
+                         "overflow snapshot succeeds");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count,
+                           VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS,
+                           "overflow caps dirty rect count");
+  ok = ok && expect_true(snapshot.dirty_overflow, "overflow flag set");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  return ok;
+}
+
+static int test_invalid_args(void) {
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[4] = {0};
+  RECTANGLE_16 dirty = {0, 0, 0, 0};
+  int ok = 1;
+
+  ok = ok && expect_true(!viewer_framebuffer_init(NULL), "null init fails");
+  ok = ok && expect_true(!viewer_framebuffer_resize(&fb, 1, 1, 4, 32),
+                         "resize before init fails");
+  ok = ok && expect_true(viewer_framebuffer_init(&fb), "init invalid test");
+  ok = ok && expect_true(!viewer_framebuffer_resize(&fb, 0, 1, 4, 32),
+                         "zero width resize fails");
+  ok = ok && expect_true(!viewer_framebuffer_snapshot(&fb, &snapshot),
+                         "snapshot without pixels fails");
+  ok = ok && expect_true(viewer_framebuffer_resize(&fb, 1, 1, 4, 32),
+                         "valid resize succeeds");
+  ok = ok &&
+       expect_true(!viewer_framebuffer_update_pixels(&fb, NULL, 4, &dirty, 1),
+                   "null pixel update fails");
+  ok = ok &&
+       expect_true(!viewer_framebuffer_update_pixels(&fb, pixels, 0, &dirty, 1),
+                   "zero source stride update fails");
+  ok = ok &&
+       expect_true(!viewer_framebuffer_update_pixels(&fb, pixels, 4, NULL, 1),
+                   "missing dirty rect array fails");
+  ok = ok && expect_true(!viewer_framebuffer_mark_dirty(&fb, NULL),
+                         "null dirty rect fails");
+
+  viewer_framebuffer_uninit(&fb);
+  return ok;
+}
+
+int main(void) {
+  if (!test_init_uninit())
+    return 1;
+  if (!test_resize_generation_and_dirty())
+    return 1;
+  if (!test_update_snapshot_copy_and_dirty())
+    return 1;
+  if (!test_dirty_overflow())
+    return 1;
+  if (!test_invalid_args())
+    return 1;
+  return 0;
+}

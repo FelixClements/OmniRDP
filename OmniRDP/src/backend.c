@@ -85,6 +85,10 @@ static void backend_normalize_domain_username(const char **domain,
                                               const char **username);
 static BOOL backend_forward_bitmap_update(BackendClient *client,
                                           const BITMAP_UPDATE *bitmap);
+static void backend_ingest_gdi_framebuffer(BackendClient *client,
+                                           rdpContext *context,
+                                           const RECTANGLE_16 *dirty_rects,
+                                           UINT32 dirty_rect_count);
 static BOOL on_begin_paint(rdpContext *context);
 static BOOL on_end_paint(rdpContext *context);
 static BOOL on_bitmap_update(rdpContext *context, const BITMAP_UPDATE *bitmap);
@@ -693,12 +697,27 @@ static UINT backend_rdpgfx_end_frame(RdpgfxClientContext *context,
 static UINT backend_rdpgfx_surface_command(RdpgfxClientContext *context,
                                            const RDPGFX_SURFACE_COMMAND *cmd) {
   BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  UINT gdi_rc = CHANNEL_RC_OK;
+  BOOL gdi_chained = FALSE;
+  RECTANGLE_16 dirty_rect = {0};
 
   if (!client || !cmd)
     return ERROR_INVALID_PARAMETER;
 
-  if (client->gdi_SurfaceCommand)
-    ((pcRdpgfxSurfaceCommand)client->gdi_SurfaceCommand)(context, cmd);
+  if (client->gdi_SurfaceCommand) {
+    gdi_rc = ((pcRdpgfxSurfaceCommand)client->gdi_SurfaceCommand)(context, cmd);
+    gdi_chained = TRUE;
+  }
+
+  if (gdi_chained && (gdi_rc == CHANNEL_RC_OK) && (cmd->left <= 0xFFFFU) &&
+      (cmd->top <= 0xFFFFU) && (cmd->right <= 0xFFFFU) &&
+      (cmd->bottom <= 0xFFFFU)) {
+    dirty_rect.left = (UINT16)cmd->left;
+    dirty_rect.top = (UINT16)cmd->top;
+    dirty_rect.right = (UINT16)cmd->right;
+    dirty_rect.bottom = (UINT16)cmd->bottom;
+    backend_ingest_gdi_framebuffer(client, client->context, &dirty_rect, 1);
+  }
 
   if (viewer_server_publish_gfx_surface_command(client, cmd))
     client->forwarded_gfx_surface_command_count++;
@@ -968,6 +987,39 @@ static BOOL on_end_paint(rdpContext *context) {
   return rc;
 }
 
+static BOOL backend_rect_from_bounds(UINT32 left, UINT32 top, UINT32 right,
+                                     UINT32 bottom, RECTANGLE_16 *rect) {
+  if (!rect)
+    return FALSE;
+
+  if ((left > 0xFFFFU) || (top > 0xFFFFU) || (right > 0xFFFFU) ||
+      (bottom > 0xFFFFU))
+    return FALSE;
+
+  rect->left = (UINT16)left;
+  rect->top = (UINT16)top;
+  rect->right = (UINT16)right;
+  rect->bottom = (UINT16)bottom;
+  return TRUE;
+}
+
+static void backend_ingest_gdi_framebuffer(BackendClient *client,
+                                           rdpContext *context,
+                                           const RECTANGLE_16 *dirty_rects,
+                                           UINT32 dirty_rect_count) {
+  rdpGdi *gdi = context ? context->gdi : NULL;
+
+  if (!client || !gdi || !gdi->primary_buffer)
+    return;
+
+  if ((gdi->width == 0) || (gdi->height == 0) || (gdi->stride == 0))
+    return;
+
+  (void)viewer_server_update_framebuffer_from_gdi(
+      client, gdi->primary_buffer, gdi->width, gdi->height, gdi->stride,
+      gdi->dstFormat, dirty_rects, dirty_rect_count);
+}
+
 static BOOL on_bitmap_update(rdpContext *context, const BITMAP_UPDATE *bitmap) {
   BackendClient *client = g_backend_client;
   BOOL rc = FALSE;
@@ -990,9 +1042,30 @@ static BOOL on_bitmap_update(rdpContext *context, const BITMAP_UPDATE *bitmap) {
     UINT64 total_bytes = 0;
     UINT32 i = 0;
     BOOL forwarded = FALSE;
+    RECTANGLE_16 *dirty_rects = NULL;
+    UINT32 dirty_rect_count = 0;
 
     for (i = 0; i < bitmap->number; i++)
       total_bytes += bitmap->rectangles[i].bitmapLength;
+
+    if (bitmap->number > 0) {
+      dirty_rects =
+          (RECTANGLE_16 *)calloc(bitmap->number, sizeof(*dirty_rects));
+      if (dirty_rects) {
+        for (i = 0; i < bitmap->number; i++) {
+          const BITMAP_DATA *rect = &bitmap->rectangles[i];
+          if (backend_rect_from_bounds(rect->destLeft, rect->destTop,
+                                       rect->destRight, rect->destBottom,
+                                       &dirty_rects[dirty_rect_count]))
+            dirty_rect_count++;
+        }
+      }
+    }
+
+    if ((bitmap->number == 0) || dirty_rects)
+      backend_ingest_gdi_framebuffer(client, context, dirty_rects,
+                                     dirty_rect_count);
+    free(dirty_rects);
 
     client->bitmap_update_count++;
 
@@ -1116,6 +1189,7 @@ static BOOL on_surface_bits(rdpContext *context,
                             const SURFACE_BITS_COMMAND *cmd) {
   BackendClient *client = g_backend_client;
   BOOL rc = FALSE;
+  RECTANGLE_16 dirty_rect = {0};
 
   if (!client || !client->orig_surface_bits)
     return FALSE;
@@ -1146,6 +1220,9 @@ static BOOL on_surface_bits(rdpContext *context,
             cmd->cmdType);
 
   backend_refresh_desktop_layout(client, context);
+  if (backend_rect_from_bounds(cmd->destLeft, cmd->destTop, cmd->destRight,
+                               cmd->destBottom, &dirty_rect))
+    backend_ingest_gdi_framebuffer(client, context, &dirty_rect, 1);
   (void)backend_forward_surface_bits(client, cmd);
   return TRUE;
 }

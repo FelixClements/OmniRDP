@@ -13,6 +13,11 @@ add_executable(test_pointer_shape
     ${CMAKE_SOURCE_DIR}/src/pointer_shape.c
 )
 
+add_executable(test_viewer_framebuffer
+    test_viewer_framebuffer.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_framebuffer.c
+)
+
 add_executable(test_svc_config
     test_svc_config.c
     ${CMAKE_SOURCE_DIR}/src/svc_config.c
@@ -62,6 +67,22 @@ set_target_properties(test_pointer_shape PROPERTIES
     C_STANDARD_REQUIRED ON
 )
 
+target_include_directories(test_viewer_framebuffer PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${FREERDP_ROOT}/include
+    ${FREERDP_ROOT}/winpr/include
+    ${FREERDP_BUILD}/include
+    ${FREERDP_BUILD}/winpr/include
+)
+
+target_link_libraries(test_viewer_framebuffer ${WINPR_LIB})
+
+set_target_properties(test_viewer_framebuffer PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+)
+
 target_include_directories(test_svc_config PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
@@ -95,6 +116,14 @@ add_test(NAME test_pointer_shape
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_pointer_shape PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_viewer_framebuffer
+    COMMAND ${CMAKE_COMMAND}
+        -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DTEST_EXECUTABLE_NAME=test_viewer_framebuffer${CMAKE_EXECUTABLE_SUFFIX}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
+)
+set_tests_properties(test_viewer_framebuffer PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_svc_config
     COMMAND ${CMAKE_COMMAND}

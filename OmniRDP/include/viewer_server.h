@@ -315,6 +315,13 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
 BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
                                          const BITMAP_UPDATE *bitmap);
 
+BOOL viewer_server_update_framebuffer_from_gdi(BackendClient *backend,
+                                               const BYTE *pixels, UINT32 width,
+                                               UINT32 height, UINT32 stride,
+                                               UINT32 pixel_format,
+                                               const RECTANGLE_16 *dirty_rects,
+                                               UINT32 dirty_rect_count);
+
 BOOL viewer_server_publish_frame_marker(BackendClient *backend,
                                         const SURFACE_FRAME_MARKER *marker);
 
