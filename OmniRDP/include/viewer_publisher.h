@@ -1,6 +1,8 @@
 #ifndef VIEWER_PUBLISHER_H
 #define VIEWER_PUBLISHER_H
 
+#include "viewer_framebuffer.h"
+
 #include <winpr/wtypes.h>
 
 #ifdef __cplusplus
@@ -18,6 +20,8 @@ typedef struct {
 
 typedef struct {
   BOOL initialized;
+  BOOL has_pending_snapshot;
+  UINT64 pending_generation;
   ViewerPublisherMetrics metrics;
 } ViewerPublisher;
 
@@ -26,6 +30,13 @@ void viewer_publisher_uninit(ViewerPublisher *publisher);
 void viewer_publisher_reset_metrics(ViewerPublisher *publisher);
 void viewer_publisher_note_generation(ViewerPublisher *publisher,
                                       UINT64 generation);
+BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
+                               ViewerFramebuffer *framebuffer,
+                               ViewerFramebufferSnapshot *snapshot);
+void viewer_publisher_mark_consumed(ViewerPublisher *publisher,
+                                    UINT64 generation);
+ViewerPublisherMetrics
+viewer_publisher_get_metrics(const ViewerPublisher *publisher);
 
 #ifdef __cplusplus
 }
