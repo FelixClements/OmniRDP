@@ -36,6 +36,10 @@ set(SOURCES
     src/main.c
     src/backend.c
     src/viewer_internal.c
+    src/viewer_framebuffer.c
+    src/viewer_publisher.c
+    src/viewer_gfx_pipeline.c
+    src/viewer_gfx_codec_uncompressed.c
     src/viewer_server.c
     src/platform_compat.c
     src/pointer_shape.c
@@ -50,6 +54,10 @@ set(SOURCES
 set(HEADERS
     include/backend.h
     include/viewer_server.h
+    include/viewer_framebuffer.h
+    include/viewer_publisher.h
+    include/viewer_gfx_pipeline.h
+    include/viewer_gfx_codec_uncompressed.h
     include/platform_compat.h
     src/pointer_shape.h
     src/viewer_internal.h

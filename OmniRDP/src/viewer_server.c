@@ -2,6 +2,7 @@
 #include "backend.h"
 #include "platform_compat.h"
 #include "svc_log.h"
+#include "viewer_gfx_pipeline.h"
 #include "viewer_internal.h"
 
 #include <freerdp/channels/drdynvc.h>
@@ -3060,6 +3061,7 @@ static void viewer_cleanup_slot(ViewerServer *server, Viewer *viewer) {
   viewer_wait_for_publish_refs(server, viewer);
 
   viewer_send_state_uninit(viewer);
+  viewer_gfx_pipeline_uninit(viewer);
   viewer_graphics_context_uninit(&viewer->gfx);
 
   if (server) {
@@ -4482,7 +4484,18 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
         viewer = NULL;
         break;
       }
+      if (!viewer_gfx_pipeline_init(viewer)) {
+        viewer_graphics_context_uninit(&viewer->gfx);
+        viewer->peer = NULL;
+        viewer->context = NULL;
+        viewer->counted_in_viewer_count = FALSE;
+        viewer->cleanup_in_progress = FALSE;
+        viewer->publish_ref_count = 0;
+        viewer = NULL;
+        break;
+      }
       if (!viewer_send_state_init(viewer)) {
+        viewer_gfx_pipeline_uninit(viewer);
         viewer_graphics_context_uninit(&viewer->gfx);
         viewer->peer = NULL;
         viewer->context = NULL;
@@ -4906,6 +4919,27 @@ ViewerServer *viewer_server_init_ex(const char *bind_address, UINT16 port,
     free(server);
     return NULL;
   }
+  if (!viewer_framebuffer_init(&server->framebuffer)) {
+    viewer_gfx_publisher_state_uninit(&server->gfx);
+    DeleteCriticalSection(&server->lock);
+    free(server->cert_path);
+    free(server->key_path);
+    free(server->bind_address);
+    freerdp_listener_free(server->listener);
+    free(server);
+    return NULL;
+  }
+  if (!viewer_publisher_init(&server->publisher)) {
+    viewer_framebuffer_uninit(&server->framebuffer);
+    viewer_gfx_publisher_state_uninit(&server->gfx);
+    DeleteCriticalSection(&server->lock);
+    free(server->cert_path);
+    free(server->key_path);
+    free(server->bind_address);
+    freerdp_listener_free(server->listener);
+    free(server);
+    return NULL;
+  }
   g_viewer_server = server;
   return server;
 }
@@ -4992,6 +5026,8 @@ void viewer_server_free(ViewerServer *server) {
   if (server->listener)
     freerdp_listener_free(server->listener);
   free(server->bind_address);
+  viewer_publisher_uninit(&server->publisher);
+  viewer_framebuffer_uninit(&server->framebuffer);
   viewer_gfx_publisher_state_uninit(&server->gfx);
   DeleteCriticalSection(&server->lock);
   free(server);

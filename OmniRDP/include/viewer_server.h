@@ -10,6 +10,9 @@
 #include <winpr/wtsapi.h>
 #include <winpr/wtypes.h>
 
+#include "viewer_framebuffer.h"
+#include "viewer_publisher.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -275,6 +278,8 @@ typedef struct {
   MonitorLayout monitor_layout; /* shared monitor layout */
   BackendClient *backend;
   ViewerGfxPublisherState gfx;
+  ViewerFramebuffer framebuffer;
+  ViewerPublisher publisher;
   char *cert_path; /* TLS certificate path (config or NULL for default) */
   char *key_path;  /* TLS key path (config or NULL for default) */
   ViewerSecurityConfig security;
