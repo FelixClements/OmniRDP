@@ -24,6 +24,19 @@ add_executable(test_viewer_publisher
     ${CMAKE_SOURCE_DIR}/src/viewer_framebuffer.c
 )
 
+add_executable(test_viewer_gfx_pipeline
+    test_viewer_gfx_pipeline.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_gfx_pipeline.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_internal.c
+    ${CMAKE_SOURCE_DIR}/src/platform_compat.c
+)
+
+if(MSVC)
+    set_source_files_properties(test_viewer_gfx_pipeline.c PROPERTIES
+        COMPILE_OPTIONS /wd4273
+    )
+endif()
+
 add_executable(test_svc_config
     test_svc_config.c
     ${CMAKE_SOURCE_DIR}/src/svc_config.c
@@ -105,6 +118,26 @@ set_target_properties(test_viewer_publisher PROPERTIES
     C_STANDARD_REQUIRED ON
 )
 
+target_include_directories(test_viewer_gfx_pipeline PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${FREERDP_ROOT}/include
+    ${FREERDP_ROOT}/winpr/include
+    ${FREERDP_BUILD}/include
+    ${FREERDP_BUILD}/winpr/include
+)
+
+target_link_libraries(test_viewer_gfx_pipeline ${WINPR_LIB})
+
+if(MSVC)
+    target_link_options(test_viewer_gfx_pipeline PRIVATE /ignore:4217)
+endif()
+
+set_target_properties(test_viewer_gfx_pipeline PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+)
+
 target_include_directories(test_svc_config PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/src
@@ -154,6 +187,15 @@ add_test(NAME test_viewer_publisher
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_viewer_publisher PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_viewer_gfx_pipeline
+    COMMAND ${CMAKE_COMMAND}
+        -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DTEST_EXECUTABLE_NAME=test_viewer_gfx_pipeline${CMAKE_EXECUTABLE_SUFFIX}
+        -DTEST_DLL_DIR=${CMAKE_BINARY_DIR}/Release
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
+)
+set_tests_properties(test_viewer_gfx_pipeline PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_svc_config
     COMMAND ${CMAKE_COMMAND}

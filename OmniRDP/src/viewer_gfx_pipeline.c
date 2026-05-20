@@ -1,4 +1,5 @@
 #include "viewer_gfx_pipeline.h"
+#include "platform_compat.h"
 #include "viewer_internal.h"
 
 #include <freerdp/channels/drdynvc.h>
@@ -299,13 +300,64 @@ BOOL viewer_gfx_pipeline_handle_messages_locked(
 }
 
 BOOL viewer_gfx_pipeline_activate(ViewerServer *server, Viewer *viewer) {
-  (void)server;
-  return viewer != NULL;
+  ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
+  BOOL already_activated = FALSE;
+
+  if (!server || !viewer || !gfx || !gfx->initialized)
+    return FALSE;
+
+  EnterCriticalSection(&gfx->lock);
+  already_activated = gfx->last_activated_ts != 0;
+
+  /* Dormant activation bookkeeping only. This intentionally does not send
+   * ResetGraphics/CreateSurface/MapSurfaceToOutput or enable RDPEGFX when the
+   * viewer is still on the disabled/classic fallback path. */
+  gfx->next_frame_id = 1;
+  gfx->last_sent_frame_id = 0;
+  gfx->last_ack_frame_id = 0;
+  gfx->active_surface_id = 0;
+  gfx->surface_width = gfx->negotiated_width;
+  gfx->surface_height = gfx->negotiated_height;
+  gfx->surface_created = FALSE;
+  gfx->force_full_present = TRUE;
+
+  if (gfx->negotiation_outcome == VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK) {
+    gfx->use_rdpgfx = FALSE;
+  } else if (gfx->rdpgfx_temporarily_disabled) {
+    gfx->use_rdpgfx = FALSE;
+    gfx->negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
+  } else if (!gfx->caps_ready) {
+    gfx->use_rdpgfx = FALSE;
+    gfx->negotiation_outcome = VIEWER_GFX_NEGOTIATION_PENDING;
+  }
+
+  if (!already_activated)
+    gfx->last_activated_ts = platform_get_timestamp_ms();
+  if (gfx->last_activated_ts == 0)
+    gfx->last_activated_ts = 1;
+
+  LeaveCriticalSection(&gfx->lock);
+  return TRUE;
 }
 
 BOOL viewer_gfx_pipeline_send_snapshot(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot) {
-  (void)server;
-  return (viewer != NULL) && (snapshot != NULL) && (snapshot->pixels != NULL);
+  ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
+
+  if (!server || !viewer || !gfx || !gfx->initialized || !snapshot ||
+      !snapshot->pixels || (snapshot->width == 0) || (snapshot->height == 0) ||
+      (snapshot->stride == 0) || (snapshot->pixel_bytes == 0))
+    return FALSE;
+
+  EnterCriticalSection(&gfx->lock);
+  /* Placeholder intent only: remember the desired surface dimensions and that
+   * a full present would be required later. No encoding or RDPEGFX PDUs are
+   * emitted in this story. */
+  gfx->surface_width = snapshot->width;
+  gfx->surface_height = snapshot->height;
+  gfx->force_full_present = TRUE;
+  LeaveCriticalSection(&gfx->lock);
+
+  return TRUE;
 }

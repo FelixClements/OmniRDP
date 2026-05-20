@@ -68,6 +68,15 @@ Primary rule: continue RDPEGFX work from `RDPEGFX_Implementation_Plan.md`, but e
     - `git diff --check`
     - `cmake --build "OmniRDP/build" --config Debug -j`
     - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
+- `US-008` is completed/accepted.
+  - Scope completed: dormant RDPEGFX activation placeholder state/API in `viewer_gfx_pipeline_activate` and `viewer_gfx_pipeline_send_snapshot`. The pipeline validates inputs and records local frame, ACK, active-surface, surface-dimension, full-present, fallback-disabled, negotiation, `use_rdpgfx`, and activation timestamp bookkeeping only.
+  - Boundary check: no ResetGraphics/CreateSurface/MapSurfaceToOutput/full-frame PDU sends, codec work, FrameAcknowledge migration, backend GFX enablement, viewer RDPEGFX default enablement, or backend PDU replay authority changes were added. Tests cover null/invalid input, activation placeholders, repeated activation idempotence, fallback-disabled behavior, and snapshot validation/no-send behavior.
+  - Validation completed:
+    - `clang-format -i "OmniRDP/include/viewer_gfx_pipeline.h" "OmniRDP/src/viewer_gfx_pipeline.c" "OmniRDP/tests/test_viewer_gfx_pipeline.c"`
+    - `python -m json.tool "prd.json" > $null`
+    - `git diff --check`
+    - `cmake --build "OmniRDP/build" --config Debug -j`
+    - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
 - Skeleton modules are present and wired:
   - `OmniRDP/include/viewer_framebuffer.h`
   - `OmniRDP/src/viewer_framebuffer.c`
@@ -124,7 +133,7 @@ Recommended next stories:
 5. `US-005` — completed/accepted; classic late join attempts a framebuffer-backed full-frame baseline.
 6. `US-006` — completed/accepted; classic queue observability/scaffolding only.
 7. `US-007` — completed/accepted; gated/default-off classic latest-state replacement policy.
-8. `US-008` — add viewer RDPEGFX activation state placeholders.
+8. `US-008` — completed/accepted; dormant viewer RDPEGFX activation state placeholders.
 9. `US-009` — build uncompressed RDPEGFX surface command from snapshot.
 10. `US-010` — send disabled-by-default RDPEGFX full-frame activation baseline. Risk: split reset/surface setup, encode, and send/fallback if needed.
 11. `US-011` — add RDPEGFX dirty-region incremental updates with ack pacing.

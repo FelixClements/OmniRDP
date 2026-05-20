@@ -161,8 +161,8 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 8,
-      "passes": false,
-      "notes": "Do not move the FrameAcknowledge callback, frame queues, join strategy internals, backend activation, or reset/create/map/full-frame behavior beyond placeholders. Frame ACK migration is not allowed until a separate reviewed story explicitly scopes it."
+      "passes": true,
+      "notes": "Completed: viewer_gfx_pipeline_activate and viewer_gfx_pipeline_send_snapshot now validate inputs and update dormant placeholder bookkeeping for local frame IDs, ack state, active surface dimensions, surface-created intent, full-present intent, fallback-disabled state, negotiation outcome, use_rdpgfx, and activation timestamp. Repeated activation is safe/idempotent. Tests cover null/invalid inputs, activation/reset placeholders, repeated activation, fallback-disabled behavior, and snapshot validation/no-send behavior. No ResetGraphics/CreateSurface/MapSurfaceToOutput/full-frame PDU sends, codec work, FrameAcknowledge migration, backend GFX enablement, viewer RDPEGFX default enablement, or backend PDU replay authority changes were added."
     },
     {
       "id": "US-009",
