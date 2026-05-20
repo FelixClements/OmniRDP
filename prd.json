@@ -39,8 +39,8 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Keep this as a bounded correctness/testing story. Do not change viewer delivery behavior."
+      "passes": true,
+      "notes": "Completed: framebuffer invariants documented; mark-dirty accumulation/overflow, snapshot_free reset behavior, and generation non-increment on mark_dirty are covered by tests. Debug build, ctest, clang-format, and git diff --check passed. Do not change viewer delivery behavior in this story."
     },
     {
       "id": "US-003",

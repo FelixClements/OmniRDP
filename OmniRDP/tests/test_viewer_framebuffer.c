@@ -1,6 +1,7 @@
 #include "viewer_framebuffer.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 
 static int expect_true(BOOL value, const char *message) {
   if (!value) {
@@ -133,6 +134,103 @@ static int test_dirty_overflow(void) {
   return ok;
 }
 
+static int test_mark_dirty_accumulation_and_generation(void) {
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  RECTANGLE_16 dirty_a = {0, 0, 1, 1};
+  RECTANGLE_16 dirty_b = {2, 1, 3, 2};
+  UINT64 generation_after_resize = 0;
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_framebuffer_init(&fb), "init mark dirty test");
+  ok = ok && expect_true(viewer_framebuffer_resize(&fb, 4, 3, 16, 32),
+                         "resize mark dirty test");
+  generation_after_resize = fb.generation;
+
+  ok = ok && expect_true(viewer_framebuffer_mark_dirty(&fb, &dirty_a),
+                         "first mark dirty succeeds");
+  ok = ok && expect_true(viewer_framebuffer_mark_dirty(&fb, &dirty_b),
+                         "second mark dirty succeeds");
+  ok = ok && expect_uint64(fb.generation, generation_after_resize,
+                           "mark dirty does not increment generation");
+  ok = ok && expect_true(viewer_framebuffer_snapshot(&fb, &snapshot),
+                         "snapshot after mark dirty succeeds");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 3,
+                           "mark dirty accumulates with resize dirty rect");
+  ok = ok && expect_uint32(snapshot.dirty_rects[1].left, dirty_a.left,
+                           "first marked dirty rect preserved");
+  ok = ok && expect_uint32(snapshot.dirty_rects[2].right, dirty_b.right,
+                           "second marked dirty rect preserved");
+  ok = ok && expect_true(!snapshot.dirty_overflow,
+                         "mark dirty accumulation has no overflow");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  return ok;
+}
+
+static int test_mark_dirty_overflow(void) {
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  RECTANGLE_16 dirty = {0, 0, 0, 0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_framebuffer_init(&fb),
+                         "init mark dirty overflow test");
+  ok = ok && expect_true(viewer_framebuffer_resize(&fb, 1, 1, 4, 32),
+                         "resize mark dirty overflow test");
+
+  for (UINT32 i = 0; ok && (i < VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS); i++)
+    ok = expect_true(viewer_framebuffer_mark_dirty(&fb, &dirty),
+                     "mark dirty overflow add succeeds");
+
+  ok = ok && expect_true(viewer_framebuffer_snapshot(&fb, &snapshot),
+                         "mark dirty overflow snapshot succeeds");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count,
+                           VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS,
+                           "mark dirty overflow caps dirty rect count");
+  ok = ok &&
+       expect_true(snapshot.dirty_overflow, "mark dirty overflow flag set");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  return ok;
+}
+
+static int test_snapshot_free_resets_snapshot(void) {
+  ViewerFramebufferSnapshot snapshot = {0};
+  int ok = 1;
+
+  snapshot.width = 10;
+  snapshot.height = 11;
+  snapshot.stride = 40;
+  snapshot.pixel_format = 32;
+  snapshot.generation = 7;
+  snapshot.pixels = (BYTE *)calloc(1, 4);
+  snapshot.pixel_bytes = 4;
+  snapshot.dirty_rect_count = 1;
+  snapshot.dirty_overflow = TRUE;
+  if (!snapshot.pixels)
+    return 0;
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  ok = ok && expect_uint32(snapshot.width, 0, "snapshot free resets width");
+  ok = ok && expect_uint32(snapshot.height, 0, "snapshot free resets height");
+  ok = ok && expect_uint32(snapshot.stride, 0, "snapshot free resets stride");
+  ok = ok &&
+       expect_uint64(snapshot.generation, 0, "snapshot free resets generation");
+  ok = ok && expect_true(snapshot.pixels == NULL,
+                         "snapshot free clears pixel pointer");
+  ok = ok && expect_uint32((UINT32)snapshot.pixel_bytes, 0,
+                           "snapshot free resets pixel byte count");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 0,
+                           "snapshot free resets dirty rect count");
+  ok = ok && expect_true(!snapshot.dirty_overflow,
+                         "snapshot free resets overflow flag");
+
+  return ok;
+}
+
 static int test_invalid_args(void) {
   ViewerFramebuffer fb = {0};
   ViewerFramebufferSnapshot snapshot = {0};
@@ -174,6 +272,12 @@ int main(void) {
   if (!test_update_snapshot_copy_and_dirty())
     return 1;
   if (!test_dirty_overflow())
+    return 1;
+  if (!test_mark_dirty_accumulation_and_generation())
+    return 1;
+  if (!test_mark_dirty_overflow())
+    return 1;
+  if (!test_snapshot_free_resets_snapshot())
     return 1;
   if (!test_invalid_args())
     return 1;

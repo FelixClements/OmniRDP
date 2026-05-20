@@ -15,6 +15,14 @@ Primary rule: continue RDPEGFX work from `RDPEGFX_Implementation_Plan.md`, but e
     - `cmake --build "OmniRDP/build" --config Debug -j`
     - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
     - `git diff --check`
+- `US-002` is completed/accepted.
+  - Scope completed: documented canonical framebuffer pixel-format, stride, orientation, alpha, and ownership invariants; added missing tests for mark-dirty accumulation, mark-dirty overflow, snapshot-free reset behavior, and generation non-increment on mark-dirty.
+  - Boundary check: no live viewer traffic was routed through the framebuffer; framebuffer remains independent from FreeRDP send paths and RDPEGFX protocol context ownership.
+  - Validation completed:
+    - `clang-format -i "OmniRDP/include/viewer_framebuffer.h" "OmniRDP/tests/test_viewer_framebuffer.c"`
+    - `cmake --build "OmniRDP/build" --config Debug -j`
+    - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
+    - `git diff --check`
 - Skeleton modules are present and wired:
   - `OmniRDP/include/viewer_framebuffer.h`
   - `OmniRDP/src/viewer_framebuffer.c`
@@ -65,7 +73,7 @@ The Ralph-ready story backlog is in repository root `prd.json` because no Ralph-
 Recommended next stories:
 
 1. `US-001` — completed/accepted; current commit target.
-2. `US-002` — document/test framebuffer format invariants.
+2. `US-002` — completed/accepted; framebuffer invariants documented and tested.
 3. `US-003` — feed canonical framebuffer from decoded GDI pixels.
 4. `US-004` — add publisher generation metrics without changing delivery.
 5. `US-005` — publish classic full-frame baseline from framebuffer for late join.

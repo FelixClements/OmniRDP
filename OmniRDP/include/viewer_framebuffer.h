@@ -12,6 +12,21 @@ extern "C" {
 
 #define VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS 256U
 
+/* Canonical framebuffer contract:
+ * - Pixels are stored top-down, row-major, with row 0 at the top of the
+ *   desktop. Bottom-up DIB sources must be converted by the caller before
+ *   update_pixels.
+ * - stride is the byte distance between successive rows and may be larger than
+ *   width * bytes_per_pixel. update_pixels copies exactly framebuffer->stride
+ *   bytes per row from a source whose stride is at least that large.
+ * - pixel_format is the FreeRDP pixel-format value associated with the stored
+ *   bytes. The initial RDPEGFX plan expects a 32-bit BGRX/XRGB-style format;
+ *   alpha is not authoritative and should be treated as ignored/opaque by
+ *   publishers/codecs unless a later story explicitly changes that contract.
+ * - This module owns canonical pixels, generations, and dirty rectangles only.
+ *   It must not call FreeRDP send APIs or own RDPEGFX protocol context state.
+ */
+
 typedef struct {
   UINT32 width;
   UINT32 height;
