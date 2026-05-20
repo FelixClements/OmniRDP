@@ -106,7 +106,28 @@
     {
       "id": "US-006",
       "dependsOn": ["US-005"],
-      "title": "Coalesce classic delivery to latest framebuffer state",
+      "title": "Add classic queue observability scaffolding",
+      "description": "As a maintainer, I want publisher-owned classic queue observability metrics without changing delivery behavior so that a later coalescing policy can be designed and validated safely.",
+      "acceptanceCriteria": [
+        "Publisher metrics record current classic queue depth and approximate queued bytes.",
+        "Publisher metrics record dropped classic events and max observed queue depth/bytes.",
+        "viewer_server.c only calls narrow publisher observation APIs at existing enqueue/drop/dequeue points.",
+        "Existing FIFO/drop-oldest/full-refresh behavior is unchanged.",
+        "Tests cover queue state metrics, drop metric increment, max depth/bytes tracking, and reset clearing metrics.",
+        "No RDPEGFX send behavior is introduced.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Completed: added publisher-owned classic queue observability metrics and narrow observation APIs. viewer_server.c reports state/drop observations at existing queue mutation points only. No FIFO/drop-oldest/full-refresh behavior, coalescing, byte-limit enforcement, RDPEGFX, or delivery policy changed."
+    },
+    {
+      "id": "US-007",
+      "dependsOn": ["US-006"],
+      "title": "Implement classic latest-state coalescing policy",
       "description": "As an operator, I want slow classic viewers to receive coalesced latest framebuffer state instead of stale historical updates so that busy-screen lag improves without enabling RDPEGFX.",
       "acceptanceCriteria": [
         "Slow viewer backlog is bounded by update count and/or queued bytes.",
@@ -119,13 +140,13 @@
         "Debug build passes, or missing local dependency blocker is documented.",
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
-      "priority": 6,
+      "priority": 7,
       "passes": false,
-      "notes": "Policy belongs in viewer_publisher. viewer_server.c should only invoke narrow publisher APIs. This may be larger than one iteration; split into metrics-driven queue limits and dirty-region coalescing sub-stories if implementation scope expands."
+      "notes": "Policy belongs in viewer_publisher. viewer_server.c should only invoke narrow publisher APIs. Do not replace FIFO semantics until this reviewed story explicitly scopes the behavior change."
     },
     {
-      "id": "US-007",
-      "dependsOn": ["US-006"],
+      "id": "US-008",
+      "dependsOn": ["US-007"],
       "title": "Add RDPEGFX activation state placeholders",
       "description": "As a developer, I want dormant per-viewer RDPEGFX activation state and APIs for reset, surface, frame, ack, and fallback bookkeeping so that the later GFX baseline story can remain small and module-bounded.",
       "acceptanceCriteria": [
@@ -139,13 +160,13 @@
         "Debug build passes, or missing local dependency blocker is documented.",
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
-      "priority": 7,
+      "priority": 8,
       "passes": false,
       "notes": "Do not move the FrameAcknowledge callback, frame queues, join strategy internals, backend activation, or reset/create/map/full-frame behavior beyond placeholders. Frame ACK migration is not allowed until a separate reviewed story explicitly scopes it."
     },
     {
-      "id": "US-008",
-      "dependsOn": ["US-007"],
+      "id": "US-009",
+      "dependsOn": ["US-008"],
       "title": "Build uncompressed RDPEGFX payloads from snapshots",
       "description": "As a developer, I want viewer_gfx_codec_uncompressed to build RDPGFX_CODECID_UNCOMPRESSED surface payloads from framebuffer snapshots so that protocol sequencing can send a simple correctness-first GFX baseline later.",
       "acceptanceCriteria": [
@@ -158,13 +179,13 @@
         "Debug build passes, or missing local dependency blocker is documented.",
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
-      "priority": 8,
+      "priority": 9,
       "passes": false,
       "notes": "Codec-specific construction only. RDPEGFX session/protocol sequencing stays in viewer_gfx_pipeline."
     },
     {
-      "id": "US-009",
-      "dependsOn": ["US-008"],
+      "id": "US-010",
+      "dependsOn": ["US-009"],
       "title": "Send disabled-by-default RDPEGFX full-frame baseline",
       "description": "As a tester, I want an explicit experimental gate that sends a per-viewer RDPEGFX reset, surface setup, and uncompressed full-frame baseline from the canonical framebuffer so that the viewer GFX MVP can be validated without changing defaults.",
       "acceptanceCriteria": [
@@ -179,13 +200,13 @@
         "Debug build passes, or missing local dependency blocker is documented.",
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
-      "priority": 9,
+      "priority": 10,
       "passes": false,
       "notes": "First story allowed to emit new viewer RDPEGFX PDUs. Do not enable backend GFX or add incremental dirty updates here. This is a higher-risk story; split reset/surface setup, full-frame encode, and send/fallback into separate Ralph iterations if review shows it is too large."
     },
     {
-      "id": "US-010",
-      "dependsOn": ["US-009"],
+      "id": "US-011",
+      "dependsOn": ["US-010"],
       "title": "Add RDPEGFX dirty updates with ack pacing",
       "description": "As an operator, I want activated GFX viewers to receive bounded dirty-region incremental updates paced by acknowledgements so that GFX output remains responsive and one slow viewer cannot cause stale backlog growth.",
       "acceptanceCriteria": [
@@ -200,12 +221,12 @@
         "Debug build passes, or missing local dependency blocker is documented.",
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
-      "priority": 10,
+      "priority": 11,
       "passes": false,
       "notes": "Keep backend GFX independent. Fallback is per viewer only. Use existing ACK state/callback ownership unless a separate reviewed story explicitly migrates FrameAcknowledge handling into viewer_gfx_pipeline."
     },
     {
-      "id": "US-011",
+      "id": "US-012",
       "dependsOn": ["US-006"],
       "title": "Add experimental backend GFX decode-only gate",
       "description": "As a maintainer, I want backend RDPEGFX available only as an explicit decode-only experiment so that backend GFX can be evaluated without controlling viewer GFX negotiation or changing defaults.",
@@ -219,7 +240,7 @@
         "Debug build passes, or missing local dependency blocker is documented.",
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
-      "priority": 11,
+      "priority": 12,
       "passes": false,
       "notes": "Intentionally deferred later than the original implementation-plan order to prioritize the canonical framebuffer/viewer MVP and avoid mixing backend PDU replay with the new publisher path. Do not make backend PDU replay authoritative for viewer output."
     }

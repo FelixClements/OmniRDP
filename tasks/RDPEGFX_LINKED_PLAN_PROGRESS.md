@@ -50,6 +50,15 @@ Primary rule: continue RDPEGFX work from `RDPEGFX_Implementation_Plan.md`, but e
     - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
     - `python -m json.tool "prd.json" > $null`
     - `git diff --check`
+- `US-006` is completed/accepted.
+  - Scope completed: classic queue observability/scaffolding only. Publisher metrics now track current classic queue depth, approximate queued bytes, dropped classic events, and max observed depth/bytes through narrow observation APIs.
+  - Boundary check: `viewer_server.c` reports observations at existing classic queue mutation points only. FIFO/drop-oldest/full-refresh behavior, byte-limit enforcement, latest-state coalescing, RDPEGFX sends, and delivery policy remain unchanged.
+  - Validation completed:
+    - `clang-format -i "OmniRDP/include/viewer_publisher.h" "OmniRDP/src/viewer_publisher.c" "OmniRDP/src/viewer_server.c" "OmniRDP/tests/test_viewer_publisher.c"`
+    - `python -m json.tool "prd.json" > $null`
+    - `git diff --check`
+    - `cmake --build "OmniRDP/build" --config Debug -j`
+    - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
 - Skeleton modules are present and wired:
   - `OmniRDP/include/viewer_framebuffer.h`
   - `OmniRDP/src/viewer_framebuffer.c`
@@ -104,14 +113,15 @@ Recommended next stories:
 3. `US-003` — completed/accepted; decoded GDI framebuffer dirty rects are validated before canonical framebuffer update.
 4. `US-004` — completed/accepted; publisher generation and dirty metadata metrics are thread-safe and observability-only.
 5. `US-005` — completed/accepted; classic late join attempts a framebuffer-backed full-frame baseline.
-6. `US-006` — add classic latest-state coalescing policy. Risk: split queue limits and dirty-region coalescing if it becomes too large.
-7. `US-007` — add viewer RDPEGFX activation state placeholders.
-8. `US-008` — build uncompressed RDPEGFX surface command from snapshot.
-9. `US-009` — send disabled-by-default RDPEGFX full-frame activation baseline. Risk: split reset/surface setup, encode, and send/fallback if needed.
-10. `US-010` — add RDPEGFX dirty-region incremental updates with ack pacing.
-11. `US-011` — add experimental backend GFX decode-only gate.
+6. `US-006` — completed/accepted; classic queue observability/scaffolding only.
+7. `US-007` — future `passes:false`; implement actual classic latest-state coalescing policy. Risk: split queue limits and dirty-region coalescing if it becomes too large.
+8. `US-008` — add viewer RDPEGFX activation state placeholders.
+9. `US-009` — build uncompressed RDPEGFX surface command from snapshot.
+10. `US-010` — send disabled-by-default RDPEGFX full-frame activation baseline. Risk: split reset/surface setup, encode, and send/fallback if needed.
+11. `US-011` — add RDPEGFX dirty-region incremental updates with ack pacing.
+12. `US-012` — add experimental backend GFX decode-only gate.
 
-Backend GFX (`US-011`) is intentionally deferred later than the original implementation-plan order. The current sequence prioritizes the canonical framebuffer/viewer MVP and avoids mixing backend PDU replay with the new publisher path.
+Backend GFX (`US-012`) is intentionally deferred later than the original implementation-plan order. The current sequence prioritizes the canonical framebuffer/viewer MVP and avoids mixing backend PDU replay with the new publisher path.
 
 ## Per-story validation checklist
 

@@ -113,6 +113,31 @@ void viewer_publisher_note_framebuffer_update(ViewerPublisher *publisher,
   LeaveCriticalSection(&publisher->lock);
 }
 
+void viewer_publisher_note_classic_queue_state(ViewerPublisher *publisher,
+                                               UINT32 queue_depth,
+                                               UINT64 queued_bytes) {
+  if (!publisher || !publisher->initialized)
+    return;
+
+  EnterCriticalSection(&publisher->lock);
+  publisher->metrics.classic_queue_depth = queue_depth;
+  publisher->metrics.classic_queue_bytes = queued_bytes;
+  if (queue_depth > publisher->metrics.classic_queue_max_depth)
+    publisher->metrics.classic_queue_max_depth = queue_depth;
+  if (queued_bytes > publisher->metrics.classic_queue_max_bytes)
+    publisher->metrics.classic_queue_max_bytes = queued_bytes;
+  LeaveCriticalSection(&publisher->lock);
+}
+
+void viewer_publisher_note_classic_drop(ViewerPublisher *publisher) {
+  if (!publisher || !publisher->initialized)
+    return;
+
+  EnterCriticalSection(&publisher->lock);
+  publisher->metrics.classic_queue_dropped_events++;
+  LeaveCriticalSection(&publisher->lock);
+}
+
 BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
                                ViewerFramebuffer *framebuffer,
                                ViewerFramebufferSnapshot *snapshot) {

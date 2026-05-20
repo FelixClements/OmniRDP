@@ -20,7 +20,12 @@ typedef struct {
   UINT64 latest_generation_available;
   UINT64 observed_framebuffer_updates;
   UINT64 observed_dirty_rects;
+  UINT64 classic_queue_bytes;
+  UINT64 classic_queue_dropped_events;
+  UINT64 classic_queue_max_bytes;
   UINT32 latest_dirty_rect_count;
+  UINT32 classic_queue_depth;
+  UINT32 classic_queue_max_depth;
   BOOL latest_dirty_overflow;
 } ViewerPublisherMetrics;
 
@@ -42,6 +47,10 @@ void viewer_publisher_note_framebuffer_update(ViewerPublisher *publisher,
                                               UINT64 generation,
                                               UINT32 dirty_rect_count,
                                               BOOL dirty_overflow);
+void viewer_publisher_note_classic_queue_state(ViewerPublisher *publisher,
+                                               UINT32 queue_depth,
+                                               UINT64 queued_bytes);
+void viewer_publisher_note_classic_drop(ViewerPublisher *publisher);
 /* Returns FALSE without counting a drop when snapshot generation is already
  * consumed (generation <= last_generation_sent). Dirty rectangles use inclusive
  * left/top/right/bottom coordinates. Empty or overflow dirty lists normalize to

@@ -114,6 +114,7 @@ static BOOL viewer_classic_enqueue_event_locked(Viewer *viewer,
 static BOOL
 viewer_enqueue_classic_baseline_from_framebuffer(ViewerServer *server,
                                                  Viewer *viewer);
+static void viewer_note_classic_queue_state_locked(const Viewer *viewer);
 
 static void viewer_gfx_apply_caps_result_locked(
     ViewerServer *server, Viewer *viewer,
@@ -681,6 +682,44 @@ static void viewer_classic_event_free(ViewerClassicEvent *event) {
   free(event);
 }
 
+static UINT64
+viewer_classic_event_payload_bytes(const ViewerClassicEvent *event) {
+  UINT64 bytes = 0;
+
+  if (!event || !event->bitmap || !event->bitmap->rectangles)
+    return 0;
+
+  for (UINT32 i = 0; i < event->bitmap->number; i++)
+    bytes += event->bitmap->rectangles[i].bitmapLength;
+  return bytes;
+}
+
+static UINT64 viewer_classic_queue_payload_bytes_locked(const Viewer *viewer) {
+  UINT64 bytes = 0;
+  UINT32 index = 0;
+
+  if (!viewer)
+    return 0;
+
+  index = viewer->classic_queue_head;
+  for (UINT32 i = 0; i < viewer->classic_queue_count; i++) {
+    bytes += viewer_classic_event_payload_bytes(viewer->classic_queue[index]);
+    index = (index + 1U) % VIEWER_CLASSIC_QUEUE_CAPACITY;
+  }
+  return bytes;
+}
+
+static void viewer_note_classic_queue_state_locked(const Viewer *viewer) {
+  ViewerServer *server = g_viewer_server;
+
+  if (!server || !viewer)
+    return;
+
+  viewer_publisher_note_classic_queue_state(
+      &server->publisher, viewer->classic_queue_count,
+      viewer_classic_queue_payload_bytes_locked(viewer));
+}
+
 static ViewerClassicEvent *
 viewer_classic_event_from_snapshot(const ViewerFramebufferSnapshot *snapshot) {
   ViewerClassicEvent *event = NULL;
@@ -823,6 +862,9 @@ static void viewer_classic_queue_drop_oldest_locked(Viewer *viewer) {
 
   viewer_classic_event_free(oldest);
   viewer->bitmap_queue_dropped++;
+  if (g_viewer_server)
+    viewer_publisher_note_classic_drop(&g_viewer_server->publisher);
+  viewer_note_classic_queue_state_locked(viewer);
 }
 
 static void viewer_classic_queue_clear_locked(Viewer *viewer) {
@@ -863,6 +905,7 @@ static BOOL viewer_classic_enqueue_locked(Viewer *viewer,
       (viewer->classic_queue_tail + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
   viewer->classic_queue_count++;
   viewer->bitmap_updates_queued++;
+  viewer_note_classic_queue_state_locked(viewer);
 
   /* Signal the viewer thread that a new event is available */
   if (viewer->classic_event)
@@ -896,6 +939,7 @@ static BOOL viewer_classic_enqueue_event_locked(Viewer *viewer,
       (viewer->classic_queue_tail + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
   viewer->classic_queue_count++;
   viewer->bitmap_updates_queued++;
+  viewer_note_classic_queue_state_locked(viewer);
 
   /* Signal the viewer thread that a new event is available */
   if (viewer->classic_event)
@@ -917,6 +961,7 @@ static ViewerClassicEvent *viewer_classic_dequeue_locked(Viewer *viewer) {
   viewer->classic_queue_head =
       (viewer->classic_queue_head + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
   viewer->classic_queue_count--;
+  viewer_note_classic_queue_state_locked(viewer);
 
   return event;
 }

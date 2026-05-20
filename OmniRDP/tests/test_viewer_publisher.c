@@ -105,6 +105,62 @@ static int test_framebuffer_update_observation_metrics(void) {
   return ok;
 }
 
+static int test_classic_queue_observation_metrics(void) {
+  ViewerPublisher publisher = {0};
+  ViewerPublisherMetrics metrics = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+
+  viewer_publisher_note_classic_queue_state(&publisher, 2, 1000);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint32(metrics.classic_queue_depth, 2,
+                           "classic queue depth observed");
+  ok = ok && expect_uint64(metrics.classic_queue_bytes, 1000,
+                           "classic queue bytes observed");
+  ok = ok && expect_uint32(metrics.classic_queue_max_depth, 2,
+                           "classic queue max depth observed");
+  ok = ok && expect_uint64(metrics.classic_queue_max_bytes, 1000,
+                           "classic queue max bytes observed");
+
+  viewer_publisher_note_classic_queue_state(&publisher, 1, 500);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint32(metrics.classic_queue_depth, 1,
+                           "classic queue depth decreases");
+  ok = ok && expect_uint64(metrics.classic_queue_bytes, 500,
+                           "classic queue bytes decrease");
+  ok = ok && expect_uint32(metrics.classic_queue_max_depth, 2,
+                           "classic queue max depth retained");
+  ok = ok && expect_uint64(metrics.classic_queue_max_bytes, 1000,
+                           "classic queue max bytes retained");
+
+  viewer_publisher_note_classic_queue_state(&publisher, 3, 1500);
+  viewer_publisher_note_classic_drop(&publisher);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint32(metrics.classic_queue_max_depth, 3,
+                           "classic queue max depth advances");
+  ok = ok && expect_uint64(metrics.classic_queue_max_bytes, 1500,
+                           "classic queue max bytes advances");
+  ok = ok && expect_uint64(metrics.classic_queue_dropped_events, 1,
+                           "classic drop counted");
+
+  viewer_publisher_reset_metrics(&publisher);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint32(metrics.classic_queue_depth, 0,
+                           "reset clears queue depth");
+  ok = ok && expect_uint64(metrics.classic_queue_bytes, 0,
+                           "reset clears queue bytes");
+  ok = ok && expect_uint64(metrics.classic_queue_dropped_events, 0,
+                           "reset clears drop count");
+  ok = ok && expect_uint32(metrics.classic_queue_max_depth, 0,
+                           "reset clears max queue depth");
+  ok = ok && expect_uint64(metrics.classic_queue_max_bytes, 0,
+                           "reset clears max queue bytes");
+
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
 static int test_generation_and_metrics(void) {
   ViewerPublisher publisher = {0};
   ViewerFramebuffer fb = {0};
@@ -454,6 +510,8 @@ int main(void) {
   if (!test_init_uninit_lock_state())
     return 1;
   if (!test_framebuffer_update_observation_metrics())
+    return 1;
+  if (!test_classic_queue_observation_metrics())
     return 1;
   if (!test_generation_and_metrics())
     return 1;
