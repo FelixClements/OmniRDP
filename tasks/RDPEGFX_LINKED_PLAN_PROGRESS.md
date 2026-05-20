@@ -32,6 +32,15 @@ Primary rule: continue RDPEGFX work from `RDPEGFX_Implementation_Plan.md`, but e
     - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
     - `python -m json.tool "prd.json" > $null`
     - `git diff --check`
+- `US-004` is completed/accepted.
+  - Scope completed: publisher metrics updates/reads are guarded by a publisher lock; added a narrow framebuffer-update observation API for latest generation, latest dirty rect count, dirty overflow, observed framebuffer update count, and cumulative observed dirty rect count.
+  - Boundary check: `viewer_server.c` only calls the narrow publisher observation API after GDI framebuffer update; no classic delivery behavior, coalescing/latest-state policy, backend/viewer RDPEGFX enablement, protocol state, frame ACK, activation, or codec behavior changed.
+  - Validation completed:
+    - `clang-format -i "OmniRDP/include/viewer_publisher.h" "OmniRDP/src/viewer_publisher.c" "OmniRDP/src/viewer_server.c" "OmniRDP/tests/test_viewer_publisher.c"`
+    - `cmake --build "OmniRDP/build" --config Debug -j`
+    - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
+    - `python -m json.tool "prd.json" > $null`
+    - `git diff --check`
 - Skeleton modules are present and wired:
   - `OmniRDP/include/viewer_framebuffer.h`
   - `OmniRDP/src/viewer_framebuffer.c`
@@ -84,7 +93,7 @@ Recommended next stories:
 1. `US-001` — completed/accepted; current commit target.
 2. `US-002` — completed/accepted; framebuffer invariants documented and tested.
 3. `US-003` — completed/accepted; decoded GDI framebuffer dirty rects are validated before canonical framebuffer update.
-4. `US-004` — add publisher generation metrics without changing delivery.
+4. `US-004` — completed/accepted; publisher generation and dirty metadata metrics are thread-safe and observability-only.
 5. `US-005` — publish classic full-frame baseline from framebuffer for late join.
 6. `US-006` — add classic latest-state coalescing policy. Risk: split queue limits and dirty-region coalescing if it becomes too large.
 7. `US-007` — add viewer RDPEGFX activation state placeholders.

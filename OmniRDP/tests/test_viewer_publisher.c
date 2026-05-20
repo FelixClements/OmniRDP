@@ -43,6 +43,68 @@ static BOOL setup_framebuffer(ViewerFramebuffer *fb, BYTE *pixels,
   return viewer_framebuffer_update_pixels(fb, pixels, 8, NULL, 0);
 }
 
+static int test_init_uninit_lock_state(void) {
+  ViewerPublisher publisher = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(publisher.initialized, "publisher initialized flag");
+  ok = ok && expect_true(publisher.lock_initialized,
+                         "publisher lock initialized flag");
+
+  viewer_publisher_uninit(&publisher);
+  ok = ok && expect_true(!publisher.initialized, "publisher initialized reset");
+  ok = ok && expect_true(!publisher.lock_initialized,
+                         "publisher lock initialized reset");
+  return ok;
+}
+
+static int test_framebuffer_update_observation_metrics(void) {
+  ViewerPublisher publisher = {0};
+  ViewerPublisherMetrics metrics = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+
+  viewer_publisher_note_framebuffer_update(&publisher, 42, 3, FALSE);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.latest_generation_available, 42,
+                           "observed generation recorded");
+  ok = ok && expect_uint64(metrics.observed_framebuffer_updates, 1,
+                           "observed framebuffer update counted");
+  ok = ok && expect_uint64(metrics.observed_dirty_rects, 3,
+                           "observed dirty rects counted");
+  ok = ok && expect_uint32(metrics.latest_dirty_rect_count, 3,
+                           "latest dirty rect count recorded");
+  ok = ok && expect_true(!metrics.latest_dirty_overflow,
+                         "latest dirty overflow false recorded");
+
+  viewer_publisher_note_framebuffer_update(&publisher, 43, 5, TRUE);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.latest_generation_available, 43,
+                           "second observed generation recorded");
+  ok = ok && expect_uint64(metrics.observed_framebuffer_updates, 2,
+                           "second observed framebuffer update counted");
+  ok = ok && expect_uint64(metrics.observed_dirty_rects, 8,
+                           "cumulative observed dirty rects counted");
+  ok = ok && expect_uint32(metrics.latest_dirty_rect_count, 5,
+                           "second latest dirty rect count recorded");
+  ok = ok && expect_true(metrics.latest_dirty_overflow,
+                         "latest dirty overflow true recorded");
+
+  viewer_publisher_reset_metrics(&publisher);
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.observed_framebuffer_updates, 0,
+                           "reset clears observed update count");
+  ok = ok && expect_uint32(metrics.latest_dirty_rect_count, 0,
+                           "reset clears latest dirty count");
+  ok = ok && expect_true(!metrics.latest_dirty_overflow,
+                         "reset clears latest dirty overflow");
+
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
 static int test_generation_and_metrics(void) {
   ViewerPublisher publisher = {0};
   ViewerFramebuffer fb = {0};
@@ -310,6 +372,10 @@ static int test_stale_consumed_generation_ignored(void) {
 }
 
 int main(void) {
+  if (!test_init_uninit_lock_state())
+    return 1;
+  if (!test_framebuffer_update_observation_metrics())
+    return 1;
   if (!test_generation_and_metrics())
     return 1;
   if (!test_dirty_overflow_normalizes_full_frame())

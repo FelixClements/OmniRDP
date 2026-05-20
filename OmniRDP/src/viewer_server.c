@@ -4975,7 +4975,9 @@ BOOL viewer_server_update_framebuffer_from_gdi(BackendClient *backend,
   EnterCriticalSection(&server->framebuffer.lock);
   generation = server->framebuffer.generation;
   LeaveCriticalSection(&server->framebuffer.lock);
-  viewer_publisher_note_generation(&server->publisher, generation);
+  viewer_publisher_note_framebuffer_update(
+      &server->publisher, generation, update_dirty_rect_count,
+      update_dirty_rect_count > VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS);
   return TRUE;
 }
 

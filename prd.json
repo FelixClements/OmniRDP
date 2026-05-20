@@ -79,8 +79,8 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 4,
-      "passes": false,
-      "notes": "Observability only. Do not implement coalescing or latest-state delivery policy yet."
+      "passes": true,
+      "notes": "Completed: publisher metrics are guarded by a publisher lock; added framebuffer-update observation metrics for latest dirty rect count, dirty overflow, observed update count, and cumulative observed dirty rects. viewer_server.c calls the narrow observation API after GDI framebuffer update. Debug build, ctest, clang-format, JSON validation, and git diff --check passed. Observability only; no coalescing or latest-state delivery policy was implemented."
     },
     {
       "id": "US-005",
