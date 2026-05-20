@@ -1,0 +1,227 @@
+{
+  "project": "OmniRDP",
+  "name": "OmniRDP",
+  "branchName": "ralph/rdpegfx-framebuffer-publisher",
+  "description": "Continue RDPEGFX implementation from RDPEGFX_Implementation_Plan.md while obeying VIEWER_SERVER_REFACTOR_PLAN.md module boundaries. viewer_server.c must remain a high-level coordinator; canonical pixels belong in viewer_framebuffer, publishing/coalescing in viewer_publisher, RDPEGFX session/protocol sequencing in viewer_gfx_pipeline, and uncompressed payload construction in viewer_gfx_codec_uncompressed. GFX remains disabled by default until explicitly gated in a later story.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "dependsOn": [],
+      "title": "Finalize RDPEGFX lifecycle and caps seam",
+      "description": "As a maintainer, I want the existing RDPEGFX lifecycle and capability negotiation extraction verified and kept behind narrow pipeline APIs so that viewer_server.c remains a high-level coordinator without hidden singleton orchestration callbacks.",
+      "acceptanceCriteria": [
+        "viewer_gfx_pipeline owns RdpgfxServerContext create/free/init/uninit/open and CapsAdvertise/CapsConfirm mechanics.",
+        "viewer_server.c does not construct CapsConfirm PDUs or choose caps directly, and explicitly performs server-owned fallback/join orchestration from pipeline result flags.",
+        "Frame acknowledgement remains in viewer_server.c for this story.",
+        "Viewer and backend GFX remain disabled by default.",
+        "clang-format is run on modified C/H files if any.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Re-verification/finalization completed: Debug build and ctest passed, and oracle review accepted the lifecycle/caps seam. Do not broaden into reset/create/map/full-frame activation, frame ACK migration, framebuffer routing, publisher policy, or codec behavior. Orchestrator coordinates stories/progress; the bounded fixer/Ralph implementation agent may edit code/tests/CMake for future stories."
+    },
+    {
+      "id": "US-002",
+      "dependsOn": ["US-001"],
+      "title": "Document and test framebuffer invariants",
+      "description": "As a developer, I want canonical framebuffer format, stride, generation, dirty-region, and snapshot ownership invariants documented and tested so that later publisher and GFX stories have a reliable pixel source.",
+      "acceptanceCriteria": [
+        "Tests cover resize, pixel update, dirty rect accumulation, overflow behavior, snapshot/free ownership, and generation increments.",
+        "The canonical pixel format and stride/orientation assumptions are documented in code comments or Markdown.",
+        "viewer_framebuffer.c/.h contains no FreeRDP send calls and no RdpgfxServerContext references.",
+        "No live viewer traffic is routed through the framebuffer in this story.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Keep this as a bounded correctness/testing story. Do not change viewer delivery behavior."
+    },
+    {
+      "id": "US-003",
+      "dependsOn": ["US-002"],
+      "title": "Feed framebuffer from decoded GDI pixels",
+      "description": "As a developer, I want backend decoded FreeRDP/GDI pixels copied into the canonical framebuffer after updates are processed so that both classic and future GFX viewers can publish from the same latest-state pixel source.",
+      "acceptanceCriteria": [
+        "Backend classic updates result in canonical framebuffer pixel and generation changes.",
+        "Dirty rectangles are bounded and validated before framebuffer update.",
+        "viewer_framebuffer remains independent from FreeRDP send APIs and RDPEGFX session state.",
+        "Backend RDPEGFX PDU payload replay is not made authoritative for canonical pixels.",
+        "Viewer and backend GFX remain disabled by default.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "If decoded GDI damage is unavailable, document the blocker and keep behavior unchanged. Do not enable backend GFX in this story. Existing backend-PDU replay/ring code remains transitional in viewer_server.c and must not be mixed into the canonical framebuffer/publisher source of truth."
+    },
+    {
+      "id": "US-004",
+      "dependsOn": ["US-003"],
+      "title": "Add publisher generation metrics",
+      "description": "As a maintainer, I want viewer_publisher to observe framebuffer generation, dirty-region, queue, byte, coalesced, and dropped-update metrics without changing delivery so that classic lag can be measured before policy changes.",
+      "acceptanceCriteria": [
+        "Metrics are stored in bounded, thread-safe publisher-owned structures.",
+        "viewer_server.c only calls narrow publisher APIs and does not gain dirty-region or backlog algorithms.",
+        "viewer_publisher contains no RdpgfxServerContext ownership or direct RDPEGFX session state.",
+        "Tests cover basic publisher metric state transitions where practical.",
+        "Existing classic delivery behavior is unchanged.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "Observability only. Do not implement coalescing or latest-state delivery policy yet."
+    },
+    {
+      "id": "US-005",
+      "dependsOn": ["US-004"],
+      "title": "Send classic late-join baseline from framebuffer",
+      "description": "As an operator, I want late-joining classic viewers to receive a current full-frame baseline from the canonical framebuffer so that late join validates the framebuffer model before RDPEGFX output is enabled.",
+      "acceptanceCriteria": [
+        "Late classic viewer receives a current full-frame baseline from framebuffer before incremental updates.",
+        "Framebuffer snapshot is taken under framebuffer lock and sent without holding framebuffer lock.",
+        "Pixel/snapshot details remain in viewer_framebuffer and scheduling state remains in viewer_publisher.",
+        "viewer_server.c remains a coordinator and does not gain pixel manipulation logic.",
+        "Existing first viewer, late viewer, reconnect, and resize classic behavior remain working.",
+        "Viewer RDPEGFX output remains disabled by default.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "Do not emit viewer RDPEGFX PDUs in this story. Keep classic SurfaceBits compatibility path."
+    },
+    {
+      "id": "US-006",
+      "dependsOn": ["US-005"],
+      "title": "Coalesce classic delivery to latest framebuffer state",
+      "description": "As an operator, I want slow classic viewers to receive coalesced latest framebuffer state instead of stale historical updates so that busy-screen lag improves without enabling RDPEGFX.",
+      "acceptanceCriteria": [
+        "Slow viewer backlog is bounded by update count and/or queued bytes.",
+        "Coalesced dirty regions converge each viewer to the latest framebuffer generation.",
+        "One slow viewer does not block backend decode or other viewers.",
+        "Tests cover generation advancement, stale drop/coalesce behavior, and queue limits.",
+        "No RDPEGFX send behavior is introduced.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Policy belongs in viewer_publisher. viewer_server.c should only invoke narrow publisher APIs. This may be larger than one iteration; split into metrics-driven queue limits and dirty-region coalescing sub-stories if implementation scope expands."
+    },
+    {
+      "id": "US-007",
+      "dependsOn": ["US-006"],
+      "title": "Add RDPEGFX activation state placeholders",
+      "description": "As a developer, I want dormant per-viewer RDPEGFX activation state and APIs for reset, surface, frame, ack, and fallback bookkeeping so that the later GFX baseline story can remain small and module-bounded.",
+      "acceptanceCriteria": [
+        "viewer_gfx_pipeline owns placeholder state/API for ResetGraphics, CreateSurface, MapSurfaceToOutput, local frame IDs, ack state, and fallback-disabled state.",
+        "viewer_server.c invokes only high-level activation APIs and does not own protocol sequencing details.",
+        "No pixel encoding or new viewer RDPEGFX PDU sends are implemented.",
+        "Viewer and backend GFX remain disabled by default.",
+        "Tests or assertions cover initial/reset state transitions where practical.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Do not move the FrameAcknowledge callback, frame queues, join strategy internals, backend activation, or reset/create/map/full-frame behavior beyond placeholders. Frame ACK migration is not allowed until a separate reviewed story explicitly scopes it."
+    },
+    {
+      "id": "US-008",
+      "dependsOn": ["US-007"],
+      "title": "Build uncompressed RDPEGFX payloads from snapshots",
+      "description": "As a developer, I want viewer_gfx_codec_uncompressed to build RDPGFX_CODECID_UNCOMPRESSED surface payloads from framebuffer snapshots so that protocol sequencing can send a simple correctness-first GFX baseline later.",
+      "acceptanceCriteria": [
+        "Codec validates supported pixel format, dimensions, stride, dirty rect bounds, and output buffer sizing.",
+        "viewer_gfx_codec_uncompressed contains no RdpgfxServerContext references and performs no send calls.",
+        "Unit tests cover full-frame payload construction, dirty-rect payload construction, and invalid inputs.",
+        "No RFX, ClearCodec, H.264, AVC, or progressive codec behavior is added.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Codec-specific construction only. RDPEGFX session/protocol sequencing stays in viewer_gfx_pipeline."
+    },
+    {
+      "id": "US-009",
+      "dependsOn": ["US-008"],
+      "title": "Send disabled-by-default RDPEGFX full-frame baseline",
+      "description": "As a tester, I want an explicit experimental gate that sends a per-viewer RDPEGFX reset, surface setup, and uncompressed full-frame baseline from the canonical framebuffer so that the viewer GFX MVP can be validated without changing defaults.",
+      "acceptanceCriteria": [
+        "Viewer GFX remains off by default and only runs behind an explicit experimental/config gate.",
+        "Activation sends CapsConfirm, ResetGraphics, CreateSurface, MapSurfaceToOutput, StartFrame, uncompressed full-frame SurfaceCommand, and EndFrame in viewer_gfx_pipeline.",
+        "Frame IDs and surfaces are viewer-local and never copied from backend frame IDs.",
+        "FreeRDP send calls occur in viewer_gfx_pipeline, not framebuffer, publisher, or codec modules.",
+        "Framebuffer lock is not held while encoding or sending.",
+        "Failure before activation falls back per viewer without affecting other viewers.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "First story allowed to emit new viewer RDPEGFX PDUs. Do not enable backend GFX or add incremental dirty updates here. This is a higher-risk story; split reset/surface setup, full-frame encode, and send/fallback into separate Ralph iterations if review shows it is too large."
+    },
+    {
+      "id": "US-010",
+      "dependsOn": ["US-009"],
+      "title": "Add RDPEGFX dirty updates with ack pacing",
+      "description": "As an operator, I want activated GFX viewers to receive bounded dirty-region incremental updates paced by acknowledgements so that GFX output remains responsive and one slow viewer cannot cause stale backlog growth.",
+      "acceptanceCriteria": [
+        "Max in-flight frames per viewer is bounded and documented.",
+        "Stale dirty updates coalesce to the latest framebuffer generation.",
+        "Suspend/no-ack behavior is handled without unbounded queues.",
+        "One slow GFX viewer does not block backend decode or other viewers.",
+        "Resize/reset generation boundaries prevent stale sends and stale acknowledgements.",
+        "Backend GFX caps or frame IDs are not mirrored to viewers.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Keep backend GFX independent. Fallback is per viewer only. Use existing ACK state/callback ownership unless a separate reviewed story explicitly migrates FrameAcknowledge handling into viewer_gfx_pipeline."
+    },
+    {
+      "id": "US-011",
+      "dependsOn": ["US-006"],
+      "title": "Add experimental backend GFX decode-only gate",
+      "description": "As a maintainer, I want backend RDPEGFX available only as an explicit decode-only experiment so that backend GFX can be evaluated without controlling viewer GFX negotiation or changing defaults.",
+      "acceptanceCriteria": [
+        "Backend GFX is disabled by default and controlled by an explicit experimental/config gate.",
+        "Backend GFX is treated only as a decode optimization that still feeds canonical framebuffer pixels.",
+        "Viewer GFX capabilities are not derived from backend GFX capabilities.",
+        "If backend GFX produces no decoded framebuffer damage, the feature can be disabled without breaking the classic path.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "Intentionally deferred later than the original implementation-plan order to prioritize the canonical framebuffer/viewer MVP and avoid mixing backend PDU replay with the new publisher path. Do not make backend PDU replay authoritative for viewer output."
+    }
+  ]
+}

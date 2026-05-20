@@ -97,6 +97,9 @@ static BOOL viewer_gfx_bootstrap_direct_live(ViewerServer *server,
                                              Viewer *viewer, UINT64 now,
                                              const char *reason);
 static void viewer_gfx_queue_clear_locked(ViewerGraphicsContext *gfx);
+static void viewer_disable_rdpgfx_locked(Viewer *viewer);
+static void viewer_gfx_begin_join_locked(Viewer *viewer, UINT64 now,
+                                         const char *reason);
 static UINT64 viewer_perf_now_us(void);
 static BOOL viewer_should_log_bitmap_perf(UINT64 batch_count, UINT64 publish_us,
                                           UINT32 send_failed_count);
@@ -106,6 +109,33 @@ static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
                                              const BITMAP_UPDATE *bitmap);
 static BOOL viewer_send_surface_bits(Viewer *viewer,
                                      const SURFACE_BITS_COMMAND *cmd);
+
+static void viewer_gfx_apply_caps_result_locked(
+    ViewerServer *server, Viewer *viewer,
+    const ViewerGfxPipelineCapsResult *caps_result, UINT64 now,
+    BOOL *enter_classic_fallback, const char **classic_fallback_reason) {
+  if (!viewer || !caps_result)
+    return;
+
+  if (caps_result->actions & VIEWER_GFX_PIPELINE_CAPS_ACTION_DISABLE_RDPEGFX)
+    viewer_disable_rdpgfx_locked(viewer);
+
+  if (caps_result->actions & VIEWER_GFX_PIPELINE_CAPS_ACTION_BEGIN_JOIN) {
+    viewer_gfx_begin_join_locked(viewer, now,
+                                 caps_result->begin_join_reason
+                                     ? caps_result->begin_join_reason
+                                     : "RDPEGFX caps confirmed");
+  }
+
+  if ((caps_result->actions &
+       VIEWER_GFX_PIPELINE_CAPS_ACTION_ENTER_CLASSIC_FALLBACK) &&
+      server && enter_classic_fallback && classic_fallback_reason) {
+    *enter_classic_fallback = TRUE;
+    *classic_fallback_reason = caps_result->classic_fallback_reason
+                                   ? caps_result->classic_fallback_reason
+                                   : "RDPEGFX caps negotiation fallback";
+  }
+}
 
 static BOOL viewer_update_ready(const Viewer *viewer, const char *operation) {
   freerdp_peer *peer = viewer ? viewer->peer : NULL;
@@ -1926,35 +1956,6 @@ static void viewer_gfx_remove_surface_locked(ViewerGfxPublisherState *gfx,
     memset(surface, 0, sizeof(*surface));
 }
 
-static const RDPGFX_CAPSET *
-viewer_gfx_choose_caps(const ViewerGfxPublisherState *server_gfx,
-                       const RDPGFX_CAPS_ADVERTISE_PDU *caps_advertise) {
-  UINT16 i = 0;
-  const RDPGFX_CAPSET *best = NULL;
-
-  if (!caps_advertise)
-    return NULL;
-
-  if (server_gfx && server_gfx->canonical_caps_valid) {
-    for (i = 0; i < caps_advertise->capsSetCount; i++) {
-      const RDPGFX_CAPSET *caps = &caps_advertise->capsSets[i];
-      if ((caps->version == server_gfx->canonical_caps.version) &&
-          (caps->flags == server_gfx->canonical_caps.flags))
-        return caps;
-    }
-
-    return NULL;
-  }
-
-  for (i = 0; i < caps_advertise->capsSetCount; i++) {
-    const RDPGFX_CAPSET *caps = &caps_advertise->capsSets[i];
-    if (!best || (caps->version > best->version))
-      best = caps;
-  }
-
-  return best;
-}
-
 static BOOL
 viewer_gfx_try_schedule_late_join_replay_locked(ViewerServer *server,
                                                 Viewer *viewer, UINT64 now) {
@@ -2331,111 +2332,6 @@ cleanup:
   }
 
   return ok;
-}
-
-static UINT
-viewer_rdpgfx_caps_advertise(RdpgfxServerContext *context,
-                             const RDPGFX_CAPS_ADVERTISE_PDU *caps_advertise) {
-  Viewer *viewer = context ? (Viewer *)context->custom : NULL;
-  ViewerServer *server = g_viewer_server;
-  RDPGFX_CAPSET caps = {0};
-  RDPGFX_CAPS_CONFIRM_PDU confirm = {0};
-  const RDPGFX_CAPSET *selected = NULL;
-  UINT rc = CHANNEL_RC_OK;
-  BOOL caps_ready_was = FALSE;
-  BOOL use_rdpgfx_was = FALSE;
-  ViewerGfxNegotiationOutcome outcome_was = VIEWER_GFX_NEGOTIATION_PENDING;
-
-  if (!viewer || !server || !caps_advertise || !context->CapsConfirm)
-    return ERROR_INVALID_PARAMETER;
-
-  EnterCriticalSection(&server->gfx.lock);
-  selected = viewer_gfx_choose_caps(&server->gfx, caps_advertise);
-  if (selected) {
-    caps = *selected;
-    if (!server->gfx.canonical_caps_valid) {
-      server->gfx.canonical_caps = caps;
-      server->gfx.canonical_caps_valid = TRUE;
-    }
-  }
-  LeaveCriticalSection(&server->gfx.lock);
-
-  if (!selected) {
-    WLog_WARN(TAG,
-              "Viewer %u advertised incompatible RDPEGFX caps; staying on "
-              "classic path",
-              viewer->id);
-    EnterCriticalSection(&viewer->gfx.lock);
-    if (viewer->gfx.negotiation_outcome ==
-        VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK) {
-      LeaveCriticalSection(&viewer->gfx.lock);
-      return CHANNEL_RC_OK;
-    }
-    viewer_disable_rdpgfx_locked(viewer);
-    LeaveCriticalSection(&viewer->gfx.lock);
-    if (viewer->activated)
-      (void)viewer_gfx_enter_classic_fallback(server, viewer,
-                                              platform_get_timestamp_ms(),
-                                              "incompatible RDPEGFX caps");
-    return CHANNEL_RC_OK;
-  }
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  caps_ready_was = viewer->gfx.caps_ready;
-  use_rdpgfx_was = viewer->gfx.use_rdpgfx;
-  outcome_was = viewer->gfx.negotiation_outcome;
-
-  /* If caps were already confirmed, suppress duplicate caps confirm before
-   * sending anything on the wire. A duplicate CapsConfirm resets the active
-   * cap set and can trigger a re-negotiation cycle that breaks the channel. */
-  if (caps_ready_was && use_rdpgfx_was) {
-    WLog_DBG(TAG,
-             "Viewer %u suppressing duplicate caps confirm (join_state=%s "
-             "caps_ready=%d)",
-             viewer->id, viewer_join_state_name(viewer->gfx.join_state),
-             caps_ready_was);
-    LeaveCriticalSection(&viewer->gfx.lock);
-    return CHANNEL_RC_OK;
-  }
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  confirm.capsSet = &caps;
-  rc = context->CapsConfirm(context, &confirm);
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  if (rc == CHANNEL_RC_OK) {
-    viewer->gfx.confirmed_caps = caps;
-    viewer->gfx.caps_ready = TRUE;
-    viewer->gfx.use_rdpgfx = TRUE;
-    viewer->gfx.rdpgfx_temporarily_disabled = FALSE;
-    viewer->gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_RDPEGFX_READY;
-
-    if (!caps_ready_was || !use_rdpgfx_was ||
-        (outcome_was != VIEWER_GFX_NEGOTIATION_RDPEGFX_READY)) {
-      WLog_INFO(TAG, "Viewer %u RDPEGFX caps confirm progressed negotiation",
-                viewer->id);
-    }
-
-    if (viewer->activated &&
-        viewer_gfx_pending_activation_begins_rdpgfx_join(&viewer->gfx)) {
-      viewer_gfx_begin_join_locked(viewer, platform_get_timestamp_ms(),
-                                   "RDPEGFX caps confirmed after activation");
-      WLog_INFO(TAG,
-                "Viewer %u RDPEGFX caps confirmed after activation; gating "
-                "live stream until replay/full refresh",
-                viewer->id);
-    }
-  } else {
-    viewer_disable_rdpgfx_locked(viewer);
-  }
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  if ((rc != CHANNEL_RC_OK) && viewer->activated)
-    (void)viewer_gfx_enter_classic_fallback(server, viewer,
-                                            platform_get_timestamp_ms(),
-                                            "RDPEGFX caps confirm failed");
-
-  return rc;
 }
 
 static UINT viewer_rdpgfx_frame_acknowledge(
@@ -2926,16 +2822,6 @@ static void viewer_graphics_context_uninit(ViewerGraphicsContext *gfx) {
 
   EnterCriticalSection(&gfx->lock);
   viewer_gfx_queue_clear_locked(gfx);
-  if (gfx->rdpgfx) {
-    if (gfx->channel_opened && gfx->rdpgfx->Close)
-      (void)gfx->rdpgfx->Close(gfx->rdpgfx);
-    rdpgfx_server_context_free(gfx->rdpgfx);
-    gfx->rdpgfx = NULL;
-  }
-  if (gfx->vcm) {
-    WTSCloseServer(gfx->vcm);
-    gfx->vcm = NULL;
-  }
   LeaveCriticalSection(&gfx->lock);
 
   DeleteCriticalSection(&gfx->lock);
@@ -3985,6 +3871,9 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
     HANDLE wait_objects[MAXIMUM_WAIT_OBJECTS] = {0};
     DWORD wait_count = 0;
     DWORD wait_status = WAIT_FAILED;
+    ViewerGfxPipelineCapsResult caps_result = {0};
+    BOOL caps_enter_classic_fallback = FALSE;
+    const char *caps_classic_fallback_reason = NULL;
 
     EnterCriticalSection(&viewer->send_lock);
     if (viewer->needs_full_refresh && (viewer->full_refresh_deadline_ts > 0) &&
@@ -4118,25 +4007,17 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
                   (unsigned)drdynvc_state);
       }
 
-      if ((drdynvc_state == DRDYNVC_STATE_READY) && viewer->gfx.rdpgfx &&
-          !viewer->gfx.channel_opened &&
-          !viewer->gfx.rdpgfx_temporarily_disabled) {
-        WLog_INFO(TAG, "Viewer %u attempting RDPEGFX Open", viewer->id);
-        if (!viewer->gfx.rdpgfx->Open(viewer->gfx.rdpgfx)) {
+      if (drdynvc_state == DRDYNVC_STATE_READY) {
+        if (!viewer_gfx_pipeline_open_if_ready_locked(viewer)) {
           viewer_disable_rdpgfx_locked(viewer);
           LeaveCriticalSection(&viewer->gfx.lock);
-          WLog_WARN(TAG, "Viewer %u RDPEGFX Open failed", viewer->id);
           (void)viewer_gfx_enter_classic_fallback(
               g_viewer_server, viewer, now, "RDPEGFX channel open failed");
           continue;
         }
-        viewer->gfx.channel_opened = TRUE;
-        WLog_INFO(TAG, "Viewer %u RDPEGFX Open succeeded", viewer->id);
       }
 
-      gfx_event = viewer->gfx.rdpgfx
-                      ? rdpgfx_server_get_event_handle(viewer->gfx.rdpgfx)
-                      : NULL;
+      gfx_event = viewer_gfx_pipeline_get_event_handle_locked(viewer);
     } else {
       gfx_event = NULL;
     }
@@ -4144,8 +4025,7 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
 
     if (gfx_event && (WaitForSingleObject(gfx_event, 0) == WAIT_OBJECT_0)) {
       EnterCriticalSection(&viewer->gfx.lock);
-      if (viewer->gfx.rdpgfx && (rdpgfx_server_handle_messages(
-                                     viewer->gfx.rdpgfx) != CHANNEL_RC_OK)) {
+      if (!viewer_gfx_pipeline_handle_messages_locked(viewer, &caps_result)) {
         viewer_disable_rdpgfx_locked(viewer);
         LeaveCriticalSection(&viewer->gfx.lock);
         WLog_WARN(TAG,
@@ -4156,7 +4036,15 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
             g_viewer_server, viewer, now, "RDPEGFX message handling failed");
         continue;
       }
+      viewer_gfx_apply_caps_result_locked(g_viewer_server, viewer, &caps_result,
+                                          now, &caps_enter_classic_fallback,
+                                          &caps_classic_fallback_reason);
       LeaveCriticalSection(&viewer->gfx.lock);
+      if (caps_enter_classic_fallback) {
+        (void)viewer_gfx_enter_classic_fallback(g_viewer_server, viewer, now,
+                                                caps_classic_fallback_reason);
+        continue;
+      }
     }
 
     if (g_viewer_server && !viewer_gfx_step_join(g_viewer_server, viewer, now))
@@ -4212,7 +4100,6 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
 
 static BOOL peer_post_connect(freerdp_peer *peer) {
   Viewer *viewer = find_viewer_by_peer(peer);
-  RdpgfxServerContext *rdpgfx = NULL;
   BOOL gfx_enabled = FALSE;
 
   if (!viewer)
@@ -4247,44 +4134,12 @@ static BOOL peer_post_connect(freerdp_peer *peer) {
   viewer_graphics_context_reset(
       &viewer->gfx, g_viewer_server ? g_viewer_server->backend : NULL);
 
-  /* Create VCM here after peer->Initialize has populated context->rdp */
-  viewer->gfx.vcm = WTSOpenServerA((LPSTR)peer->context);
-  if (!viewer->gfx.vcm || (viewer->gfx.vcm == INVALID_HANDLE_VALUE)) {
-    LeaveCriticalSection(&viewer->gfx.lock);
-    WLog_ERR(TAG, "Viewer %u WTSOpenServerA failed in post_connect",
-             viewer->id);
-    return FALSE;
-  }
-
-  if (!gfx_enabled) {
-    WLog_INFO(TAG,
-              "Viewer %u RDPEGFX disabled; using classic SurfaceBits path only",
-              viewer->id);
-    viewer->gfx.rdpgfx = NULL;
-    viewer->gfx.post_connect_complete = TRUE;
-    viewer->gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
-    LeaveCriticalSection(&viewer->gfx.lock);
-    return TRUE;
-  }
-
-  rdpgfx = rdpgfx_server_context_new(viewer->gfx.vcm);
-  if (!rdpgfx) {
+  if (!viewer_gfx_pipeline_post_connect_locked(
+          g_viewer_server, viewer, peer, gfx_enabled,
+          viewer_rdpgfx_frame_acknowledge)) {
     LeaveCriticalSection(&viewer->gfx.lock);
     return FALSE;
   }
-
-  rdpgfx->custom = viewer;
-  rdpgfx->rdpcontext = peer->context;
-  rdpgfx->CapsAdvertise = viewer_rdpgfx_caps_advertise;
-  rdpgfx->FrameAcknowledge = viewer_rdpgfx_frame_acknowledge;
-  if (!rdpgfx->Initialize(rdpgfx, TRUE)) {
-    rdpgfx_server_context_free(rdpgfx);
-    LeaveCriticalSection(&viewer->gfx.lock);
-    return FALSE;
-  }
-
-  viewer->gfx.rdpgfx = rdpgfx;
-  viewer->gfx.post_connect_complete = TRUE;
   LeaveCriticalSection(&viewer->gfx.lock);
   return TRUE;
 }

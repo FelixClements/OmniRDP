@@ -37,6 +37,7 @@ typedef struct {
 
 struct BackendClient;
 typedef struct BackendClient BackendClient;
+typedef struct ViewerServer ViewerServer;
 
 typedef enum {
   VIEWER_GFX_EVENT_RESET_GRAPHICS = 0,
@@ -195,6 +196,11 @@ typedef struct {
   UINT32 queue_tail;
   UINT32 queue_count;
   UINT32 pending_frame_count;
+  ViewerServer *pipeline_server;
+  UINT32 pending_caps_actions;
+  UINT pending_caps_channel_rc;
+  const char *pending_caps_classic_fallback_reason;
+  const char *pending_caps_begin_join_reason;
   CRITICAL_SECTION lock;
 } ViewerGraphicsContext;
 
@@ -262,7 +268,7 @@ typedef struct {
   ViewerGraphicsContext gfx;
 } Viewer;
 
-typedef struct {
+struct ViewerServer {
   freerdp_listener *listener;
   Viewer viewers[MAX_VIEWERS];
   UINT32 viewer_count;
@@ -283,7 +289,7 @@ typedef struct {
   char *cert_path; /* TLS certificate path (config or NULL for default) */
   char *key_path;  /* TLS key path (config or NULL for default) */
   ViewerSecurityConfig security;
-} ViewerServer;
+};
 
 ViewerServer *viewer_server_init(const char *bind_address, UINT16 port,
                                  BackendClient *backend, const char *cert_path,
