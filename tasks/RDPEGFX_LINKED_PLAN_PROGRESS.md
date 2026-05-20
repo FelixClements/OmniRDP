@@ -23,6 +23,15 @@ Primary rule: continue RDPEGFX work from `RDPEGFX_Implementation_Plan.md`, but e
     - `cmake --build "OmniRDP/build" --config Debug -j`
     - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
     - `git diff --check`
+- `US-003` is completed/accepted.
+  - Scope completed: decoded GDI framebuffer ingestion validates dirty rectangles before canonical framebuffer update. Invalid/out-of-bounds rectangles are dropped; if no valid dirty rectangles remain, the update falls back to a full-frame dirty update for correctness and to preserve delivery semantics.
+  - Boundary check: no classic viewer delivery behavior, backend/viewer RDPEGFX enablement, publisher/coalescing policy, backend PDU replay authority, or FreeRDP send calls in `viewer_framebuffer` were added.
+  - Validation completed:
+    - `clang-format -i "OmniRDP/include/viewer_framebuffer.h" "OmniRDP/src/viewer_framebuffer.c" "OmniRDP/src/viewer_server.c" "OmniRDP/tests/test_viewer_framebuffer.c"`
+    - `cmake --build "OmniRDP/build" --config Debug -j`
+    - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
+    - `python -m json.tool "prd.json" > $null`
+    - `git diff --check`
 - Skeleton modules are present and wired:
   - `OmniRDP/include/viewer_framebuffer.h`
   - `OmniRDP/src/viewer_framebuffer.c`
@@ -74,7 +83,7 @@ Recommended next stories:
 
 1. `US-001` — completed/accepted; current commit target.
 2. `US-002` — completed/accepted; framebuffer invariants documented and tested.
-3. `US-003` — feed canonical framebuffer from decoded GDI pixels.
+3. `US-003` — completed/accepted; decoded GDI framebuffer dirty rects are validated before canonical framebuffer update.
 4. `US-004` — add publisher generation metrics without changing delivery.
 5. `US-005` — publish classic full-frame baseline from framebuffer for late join.
 6. `US-006` — add classic latest-state coalescing policy. Risk: split queue limits and dirty-region coalescing if it becomes too large.

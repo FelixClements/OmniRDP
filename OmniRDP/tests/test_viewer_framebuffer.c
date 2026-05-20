@@ -101,6 +101,38 @@ static int test_update_snapshot_copy_and_dirty(void) {
   return ok;
 }
 
+static int test_dirty_rect_validation(void) {
+  RECTANGLE_16 valid = {1, 1, 2, 2};
+  RECTANGLE_16 reversed_x = {2, 1, 1, 2};
+  RECTANGLE_16 reversed_y = {1, 2, 2, 1};
+  RECTANGLE_16 out_of_bounds_x = {1, 1, 4, 2};
+  RECTANGLE_16 out_of_bounds_y = {1, 1, 2, 3};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_framebuffer_dirty_rect_valid(4, 3, &valid),
+                         "valid dirty rect accepted");
+  ok = ok && expect_true(!viewer_framebuffer_dirty_rect_valid(4, 3, NULL),
+                         "null dirty rect rejected");
+  ok = ok && expect_true(!viewer_framebuffer_dirty_rect_valid(0, 3, &valid),
+                         "zero width dirty rect rejected");
+  ok = ok && expect_true(!viewer_framebuffer_dirty_rect_valid(4, 0, &valid),
+                         "zero height dirty rect rejected");
+  ok =
+      ok && expect_true(!viewer_framebuffer_dirty_rect_valid(4, 3, &reversed_x),
+                        "reversed x dirty rect rejected");
+  ok =
+      ok && expect_true(!viewer_framebuffer_dirty_rect_valid(4, 3, &reversed_y),
+                        "reversed y dirty rect rejected");
+  ok = ok &&
+       expect_true(!viewer_framebuffer_dirty_rect_valid(4, 3, &out_of_bounds_x),
+                   "out of bounds x dirty rect rejected");
+  ok = ok &&
+       expect_true(!viewer_framebuffer_dirty_rect_valid(4, 3, &out_of_bounds_y),
+                   "out of bounds y dirty rect rejected");
+
+  return ok;
+}
+
 static int test_dirty_overflow(void) {
   ViewerFramebuffer fb = {0};
   ViewerFramebufferSnapshot snapshot = {0};
@@ -270,6 +302,8 @@ int main(void) {
   if (!test_resize_generation_and_dirty())
     return 1;
   if (!test_update_snapshot_copy_and_dirty())
+    return 1;
+  if (!test_dirty_rect_validation())
     return 1;
   if (!test_dirty_overflow())
     return 1;

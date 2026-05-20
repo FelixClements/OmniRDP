@@ -66,6 +66,8 @@ BOOL viewer_framebuffer_update_pixels(ViewerFramebuffer *framebuffer,
                                       const BYTE *pixels, UINT32 source_stride,
                                       const RECTANGLE_16 *dirty_rects,
                                       UINT32 dirty_rect_count);
+BOOL viewer_framebuffer_dirty_rect_valid(UINT32 width, UINT32 height,
+                                         const RECTANGLE_16 *rect);
 BOOL viewer_framebuffer_mark_dirty(ViewerFramebuffer *framebuffer,
                                    const RECTANGLE_16 *rect);
 BOOL viewer_framebuffer_snapshot(ViewerFramebuffer *framebuffer,

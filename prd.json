@@ -59,8 +59,8 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "If decoded GDI damage is unavailable, document the blocker and keep behavior unchanged. Do not enable backend GFX in this story. Existing backend-PDU replay/ring code remains transitional in viewer_server.c and must not be mixed into the canonical framebuffer/publisher source of truth."
+      "passes": true,
+      "notes": "Completed: decoded GDI framebuffer ingestion now validates dirty rectangles before canonical framebuffer update; invalid/out-of-bounds dirty rects are dropped, and if none remain the update falls back to full-frame dirty for correctness. Debug build, ctest, clang-format, JSON validation, and git diff --check passed. Do not enable backend GFX in this story. Existing backend-PDU replay/ring code remains transitional in viewer_server.c and must not be mixed into the canonical framebuffer/publisher source of truth."
     },
     {
       "id": "US-004",

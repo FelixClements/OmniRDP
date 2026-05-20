@@ -4907,9 +4907,13 @@ BOOL viewer_server_update_framebuffer_from_gdi(BackendClient *backend,
                                                const RECTANGLE_16 *dirty_rects,
                                                UINT32 dirty_rect_count) {
   ViewerServer *server = g_viewer_server;
+  RECTANGLE_16 *valid_dirty_rects = NULL;
+  const RECTANGLE_16 *update_dirty_rects = dirty_rects;
+  UINT32 update_dirty_rect_count = dirty_rect_count;
   BOOL needs_resize = FALSE;
   BOOL updated = FALSE;
   UINT64 generation = 0;
+  UINT32 i = 0;
 
   if (!server || !backend || !pixels || (server->backend != backend))
     return FALSE;
@@ -4917,6 +4921,7 @@ BOOL viewer_server_update_framebuffer_from_gdi(BackendClient *backend,
   if ((width == 0) || (height == 0) || (stride == 0))
     return FALSE;
 
+  /* Preserve invalid-argument behavior for malformed backend callbacks. */
   if ((dirty_rect_count > 0) && !dirty_rects)
     return FALSE;
 
@@ -4935,8 +4940,35 @@ BOOL viewer_server_update_framebuffer_from_gdi(BackendClient *backend,
                                                  height, stride, pixel_format))
     return FALSE;
 
-  updated = viewer_framebuffer_update_pixels(
-      &server->framebuffer, pixels, stride, dirty_rects, dirty_rect_count);
+  /* Backend dirty rectangles are advisory damage from decoded GDI output.
+   *
+   * Validate them against the current desktop before handing them to the
+   *
+   * canonical framebuffer. Invalid/out-of-bounds rectangles are dropped; if
+   * all
+   * provided rectangles are invalid, fall back to a full-frame dirty
+   * update to
+   * preserve correctness and existing delivery semantics. */
+  if (dirty_rect_count > 0) {
+    valid_dirty_rects =
+        (RECTANGLE_16 *)calloc(dirty_rect_count, sizeof(*valid_dirty_rects));
+    if (!valid_dirty_rects)
+      return FALSE;
+
+    update_dirty_rect_count = 0;
+    for (i = 0; i < dirty_rect_count; i++) {
+      if (viewer_framebuffer_dirty_rect_valid(width, height, &dirty_rects[i]))
+        valid_dirty_rects[update_dirty_rect_count++] = dirty_rects[i];
+    }
+
+    update_dirty_rects =
+        (update_dirty_rect_count > 0) ? valid_dirty_rects : NULL;
+  }
+
+  updated = viewer_framebuffer_update_pixels(&server->framebuffer, pixels,
+                                             stride, update_dirty_rects,
+                                             update_dirty_rect_count);
+  free(valid_dirty_rects);
   if (!updated)
     return FALSE;
 

@@ -45,6 +45,20 @@ static BOOL viewer_framebuffer_add_dirty_locked(ViewerFramebuffer *framebuffer,
   return TRUE;
 }
 
+BOOL viewer_framebuffer_dirty_rect_valid(UINT32 width, UINT32 height,
+                                         const RECTANGLE_16 *rect) {
+  if ((width == 0) || (height == 0) || !rect)
+    return FALSE;
+
+  if ((rect->left > rect->right) || (rect->top > rect->bottom))
+    return FALSE;
+
+  if (((UINT32)rect->right >= width) || ((UINT32)rect->bottom >= height))
+    return FALSE;
+
+  return TRUE;
+}
+
 BOOL viewer_framebuffer_init(ViewerFramebuffer *framebuffer) {
   if (!framebuffer)
     return FALSE;
