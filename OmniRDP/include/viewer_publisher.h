@@ -49,6 +49,9 @@ void viewer_publisher_note_framebuffer_update(ViewerPublisher *publisher,
 BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
                                ViewerFramebuffer *framebuffer,
                                ViewerFramebufferSnapshot *snapshot);
+BOOL viewer_publisher_classic_baseline_snapshot(
+    ViewerPublisher *publisher, ViewerFramebuffer *framebuffer,
+    ViewerFramebufferSnapshot *snapshot);
 void viewer_publisher_mark_consumed(ViewerPublisher *publisher,
                                     UINT64 generation);
 ViewerPublisherMetrics

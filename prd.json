@@ -100,8 +100,8 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 5,
-      "passes": false,
-      "notes": "Do not emit viewer RDPEGFX PDUs in this story. Keep classic SurfaceBits compatibility path."
+      "passes": true,
+      "notes": "Completed: late classic activation now attempts a per-viewer full-frame classic baseline from the canonical framebuffer before existing backend refresh flow continues. The publisher provides a baseline snapshot normalized to a full-frame dirty rect and bypasses global consumed-generation suppression. Empty framebuffer snapshots fail cleanly and preserve existing backend refresh behavior. Debug build, ctest, clang-format, JSON validation, and git diff --check passed. No viewer RDPEGFX PDUs were emitted; classic SurfaceBits compatibility path remains."
     },
     {
       "id": "US-006",

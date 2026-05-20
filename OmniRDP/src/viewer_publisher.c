@@ -22,6 +22,23 @@ viewer_publisher_normalize_dirty_rects(ViewerFramebufferSnapshot *snapshot) {
   return TRUE;
 }
 
+static BOOL
+viewer_publisher_make_full_frame_dirty(ViewerFramebufferSnapshot *snapshot) {
+  RECTANGLE_16 full_rect = {0};
+
+  if (!snapshot || (snapshot->width == 0) || (snapshot->height == 0))
+    return FALSE;
+
+  full_rect.left = 0;
+  full_rect.top = 0;
+  full_rect.right = (UINT16)(snapshot->width - 1U);
+  full_rect.bottom = (UINT16)(snapshot->height - 1U);
+  snapshot->dirty_rects[0] = full_rect;
+  snapshot->dirty_rect_count = 1;
+  snapshot->dirty_overflow = FALSE;
+  return TRUE;
+}
+
 static void viewer_publisher_count_drop(ViewerPublisher *publisher) {
   if (!publisher || !publisher->initialized || !publisher->lock_initialized)
     return;
@@ -140,6 +157,36 @@ BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
   if (accepted)
     publisher->metrics.queued_bytes += (UINT64)snapshot->pixel_bytes;
 
+  LeaveCriticalSection(&publisher->lock);
+  return TRUE;
+}
+
+BOOL viewer_publisher_classic_baseline_snapshot(
+    ViewerPublisher *publisher, ViewerFramebuffer *framebuffer,
+    ViewerFramebufferSnapshot *snapshot) {
+  if (!publisher || !publisher->initialized || !framebuffer || !snapshot)
+    return FALSE;
+
+  /* This late-join baseline is per viewer, so it intentionally bypasses the
+   * publisher's global last_generation_sent suppression. Do not hold the
+   * publisher lock while taking/copying framebuffer pixels. */
+  if (!viewer_framebuffer_snapshot(framebuffer, snapshot)) {
+    viewer_publisher_count_drop(publisher);
+    return FALSE;
+  }
+
+  if (!viewer_publisher_make_full_frame_dirty(snapshot)) {
+    viewer_framebuffer_snapshot_free(snapshot);
+    viewer_publisher_count_drop(publisher);
+    return FALSE;
+  }
+
+  EnterCriticalSection(&publisher->lock);
+  publisher->metrics.latest_generation_available = snapshot->generation;
+  publisher->metrics.latest_dirty_rect_count = snapshot->dirty_rect_count;
+  publisher->metrics.latest_dirty_overflow = snapshot->dirty_overflow;
+  publisher->metrics.queued_updates++;
+  publisher->metrics.queued_bytes += (UINT64)snapshot->pixel_bytes;
   LeaveCriticalSection(&publisher->lock);
   return TRUE;
 }

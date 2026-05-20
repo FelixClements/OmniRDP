@@ -109,6 +109,11 @@ static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
                                              const BITMAP_UPDATE *bitmap);
 static BOOL viewer_send_surface_bits(Viewer *viewer,
                                      const SURFACE_BITS_COMMAND *cmd);
+static BOOL viewer_classic_enqueue_event_locked(Viewer *viewer,
+                                                ViewerClassicEvent *event);
+static BOOL
+viewer_enqueue_classic_baseline_from_framebuffer(ViewerServer *server,
+                                                 Viewer *viewer);
 
 static void viewer_gfx_apply_caps_result_locked(
     ViewerServer *server, Viewer *viewer,
@@ -674,6 +679,90 @@ static void viewer_classic_event_free(ViewerClassicEvent *event) {
     free(event->bitmap);
   }
   free(event);
+}
+
+static ViewerClassicEvent *
+viewer_classic_event_from_snapshot(const ViewerFramebufferSnapshot *snapshot) {
+  ViewerClassicEvent *event = NULL;
+  BITMAP_DATA *rect = NULL;
+
+  if (!snapshot || !snapshot->pixels || (snapshot->width == 0) ||
+      (snapshot->height == 0) || (snapshot->stride == 0) ||
+      (snapshot->pixel_bytes == 0) || (snapshot->width > UINT16_MAX) ||
+      (snapshot->height > UINT16_MAX) || (snapshot->pixel_bytes > UINT32_MAX))
+    return NULL;
+
+  event = (ViewerClassicEvent *)calloc(1, sizeof(*event));
+  if (!event)
+    return NULL;
+
+  event->bitmap = (BITMAP_UPDATE *)calloc(1, sizeof(*event->bitmap));
+  if (!event->bitmap) {
+    free(event);
+    return NULL;
+  }
+
+  event->bitmap->rectangles = (BITMAP_DATA *)calloc(1, sizeof(BITMAP_DATA));
+  if (!event->bitmap->rectangles) {
+    viewer_classic_event_free(event);
+    return NULL;
+  }
+
+  event->bitmap->number = 1;
+  event->bitmap->skipCompression = TRUE;
+  rect = &event->bitmap->rectangles[0];
+  rect->destLeft = 0;
+  rect->destTop = 0;
+  rect->destRight = snapshot->width - 1U;
+  rect->destBottom = snapshot->height - 1U;
+  rect->width = snapshot->width;
+  rect->height = snapshot->height;
+  rect->bitsPerPixel = 32;
+  rect->flags = 0;
+  rect->bitmapLength = (UINT32)snapshot->pixel_bytes;
+  rect->cbScanWidth = snapshot->stride;
+  rect->cbUncompressedSize = (UINT32)snapshot->pixel_bytes;
+  rect->compressed = FALSE;
+  rect->bitmapDataStream = (BYTE *)malloc(snapshot->pixel_bytes);
+  if (!rect->bitmapDataStream) {
+    viewer_classic_event_free(event);
+    return NULL;
+  }
+
+  memmove(rect->bitmapDataStream, snapshot->pixels, snapshot->pixel_bytes);
+  return event;
+}
+
+static BOOL
+viewer_enqueue_classic_baseline_from_framebuffer(ViewerServer *server,
+                                                 Viewer *viewer) {
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerClassicEvent *event = NULL;
+  BOOL queued = FALSE;
+
+  if (!server || !viewer)
+    return FALSE;
+
+  if (!viewer_publisher_classic_baseline_snapshot(
+          &server->publisher, &server->framebuffer, &snapshot))
+    return FALSE;
+
+  event = viewer_classic_event_from_snapshot(&snapshot);
+  viewer_framebuffer_snapshot_free(&snapshot);
+  if (!event)
+    return FALSE;
+
+  EnterCriticalSection(&viewer->send_lock);
+  queued = viewer_classic_enqueue_event_locked(viewer, event);
+  LeaveCriticalSection(&viewer->send_lock);
+
+  if (!queued) {
+    viewer_classic_event_free(event);
+    return FALSE;
+  }
+
+  WLog_INFO(TAG, "Viewer %u queued classic framebuffer baseline", viewer->id);
+  return TRUE;
 }
 
 /* ---- SurfaceBits event: deep-copy and free ---- */
@@ -4246,6 +4335,7 @@ static BOOL peer_activate(freerdp_peer *peer) {
   UINT64 now = platform_get_timestamp_ms();
   ViewerGfxNegotiationOutcome negotiation_outcome =
       VIEWER_GFX_NEGOTIATION_PENDING;
+  BOOL classic_activation = FALSE;
 
   if (!viewer)
     return FALSE;
@@ -4277,8 +4367,15 @@ static BOOL peer_activate(freerdp_peer *peer) {
      * immediately. */
     viewer->needs_full_refresh = FALSE;
     viewer->full_refresh_deadline_ts = 0;
+    classic_activation = TRUE;
   }
   LeaveCriticalSection(&viewer->gfx.lock);
+  if (classic_activation && g_viewer_server &&
+      viewer_enqueue_classic_baseline_from_framebuffer(g_viewer_server,
+                                                       viewer)) {
+    WLog_INFO(TAG, "Viewer %u queued framebuffer baseline for classic join",
+              viewer->id);
+  }
   viewer->last_pointer_position_generation = 0;
   viewer->last_pointer_shape_generation = 0;
 

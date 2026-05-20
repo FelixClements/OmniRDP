@@ -41,6 +41,15 @@ Primary rule: continue RDPEGFX work from `RDPEGFX_Implementation_Plan.md`, but e
     - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
     - `python -m json.tool "prd.json" > $null`
     - `git diff --check`
+- `US-005` is completed/accepted.
+  - Scope completed: eligible classic activation attempts to enqueue a full-frame classic baseline from a canonical framebuffer snapshot before existing incremental/refresh flow continues. Publisher baseline snapshots normalize dirty metadata to one full-frame rectangle and are not suppressed by global consumed generation.
+  - Boundary check: snapshot selection/normalization stays in `viewer_publisher`; canonical pixels stay in `viewer_framebuffer`; `viewer_server.c` coordinates enqueue only. No coalescing/latest-state policy, backend/viewer RDPEGFX enablement, RDPEGFX protocol state, or backend PDU replay authority was added.
+  - Validation completed:
+    - `clang-format -i "OmniRDP/include/viewer_publisher.h" "OmniRDP/src/viewer_publisher.c" "OmniRDP/src/viewer_server.c" "OmniRDP/tests/test_viewer_publisher.c"`
+    - `cmake --build "OmniRDP/build" --config Debug -j`
+    - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
+    - `python -m json.tool "prd.json" > $null`
+    - `git diff --check`
 - Skeleton modules are present and wired:
   - `OmniRDP/include/viewer_framebuffer.h`
   - `OmniRDP/src/viewer_framebuffer.c`
@@ -94,7 +103,7 @@ Recommended next stories:
 2. `US-002` — completed/accepted; framebuffer invariants documented and tested.
 3. `US-003` — completed/accepted; decoded GDI framebuffer dirty rects are validated before canonical framebuffer update.
 4. `US-004` — completed/accepted; publisher generation and dirty metadata metrics are thread-safe and observability-only.
-5. `US-005` — publish classic full-frame baseline from framebuffer for late join.
+5. `US-005` — completed/accepted; classic late join attempts a framebuffer-backed full-frame baseline.
 6. `US-006` — add classic latest-state coalescing policy. Risk: split queue limits and dirty-region coalescing if it becomes too large.
 7. `US-007` — add viewer RDPEGFX activation state placeholders.
 8. `US-008` — build uncompressed RDPEGFX surface command from snapshot.

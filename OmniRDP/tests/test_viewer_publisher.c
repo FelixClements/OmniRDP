@@ -197,6 +197,85 @@ static int test_empty_dirty_normalizes_full_frame(void) {
   return ok;
 }
 
+static int test_classic_baseline_snapshot_full_frame(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerPublisherMetrics metrics = {0};
+  BYTE pixels[16] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(setup_framebuffer(&fb, pixels, sizeof(pixels)),
+                         "framebuffer setup");
+
+  EnterCriticalSection(&fb.lock);
+  fb.dirty_rect_count = 0;
+  fb.dirty_overflow = FALSE;
+  LeaveCriticalSection(&fb.lock);
+
+  ok = ok && expect_true(viewer_publisher_classic_baseline_snapshot(
+                             &publisher, &fb, &snapshot),
+                         "classic baseline snapshot succeeds");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "baseline normalizes to one full rect");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 0, "baseline left");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].top, 0, "baseline top");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].right, 1, "baseline right");
+  ok =
+      ok && expect_uint32(snapshot.dirty_rects[0].bottom, 1, "baseline bottom");
+  ok = ok &&
+       expect_true(!snapshot.dirty_overflow, "baseline clears dirty overflow");
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.queued_updates, 1,
+                           "baseline counted as queued observation");
+  ok = ok && expect_uint64(metrics.queued_bytes, snapshot.pixel_bytes,
+                           "baseline bytes observed");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_classic_baseline_not_suppressed_by_consumed_generation(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[16] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(setup_framebuffer(&fb, pixels, sizeof(pixels)),
+                         "framebuffer setup");
+  viewer_publisher_mark_consumed(&publisher, 9999ULL);
+  ok = ok && expect_true(viewer_publisher_classic_baseline_snapshot(
+                             &publisher, &fb, &snapshot),
+                         "baseline ignores consumed generation");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_classic_baseline_empty_framebuffer_fails(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(viewer_framebuffer_init(&fb), "framebuffer init");
+  ok = ok && expect_true(!viewer_publisher_classic_baseline_snapshot(
+                             &publisher, &fb, &snapshot),
+                         "empty framebuffer baseline fails");
+
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
 static int test_slow_consumer_coalescing(void) {
   ViewerPublisher publisher = {0};
   ViewerFramebuffer fb = {0};
@@ -381,6 +460,12 @@ int main(void) {
   if (!test_dirty_overflow_normalizes_full_frame())
     return 1;
   if (!test_empty_dirty_normalizes_full_frame())
+    return 1;
+  if (!test_classic_baseline_snapshot_full_frame())
+    return 1;
+  if (!test_classic_baseline_not_suppressed_by_consumed_generation())
+    return 1;
+  if (!test_classic_baseline_empty_framebuffer_fails())
     return 1;
   if (!test_slow_consumer_coalescing())
     return 1;
