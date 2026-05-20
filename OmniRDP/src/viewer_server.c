@@ -115,6 +115,10 @@ static BOOL
 viewer_enqueue_classic_baseline_from_framebuffer(ViewerServer *server,
                                                  Viewer *viewer);
 static void viewer_note_classic_queue_state_locked(const Viewer *viewer);
+static void viewer_classic_apply_latest_policy_locked(Viewer *viewer);
+static ViewerClassicEvent *
+viewer_classic_event_from_snapshot(const ViewerFramebufferSnapshot *snapshot);
+static void viewer_classic_queue_clear_locked(Viewer *viewer);
 
 static void viewer_gfx_apply_caps_result_locked(
     ViewerServer *server, Viewer *viewer,
@@ -720,6 +724,57 @@ static void viewer_note_classic_queue_state_locked(const Viewer *viewer) {
       viewer_classic_queue_payload_bytes_locked(viewer));
 }
 
+static void
+viewer_classic_enqueue_event_direct_locked(Viewer *viewer,
+                                           ViewerClassicEvent *event) {
+  if (!viewer || !event ||
+      (viewer->classic_queue_count >= VIEWER_CLASSIC_QUEUE_CAPACITY))
+    return;
+
+  viewer->classic_queue[viewer->classic_queue_tail] = event;
+  viewer->classic_queue_tail =
+      (viewer->classic_queue_tail + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
+  viewer->classic_queue_count++;
+  viewer->bitmap_updates_queued++;
+  viewer_note_classic_queue_state_locked(viewer);
+}
+
+static void viewer_classic_apply_latest_policy_locked(Viewer *viewer) {
+  ViewerServer *server = g_viewer_server;
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerClassicEvent *event = NULL;
+  UINT64 queued_bytes = 0;
+
+  if (!server || !viewer)
+    return;
+
+  queued_bytes = viewer_classic_queue_payload_bytes_locked(viewer);
+  if (viewer_publisher_classic_queue_decision(
+          &server->publisher, viewer->classic_queue_count, queued_bytes) !=
+      VIEWER_PUBLISHER_CLASSIC_DECISION_REPLACE_WITH_BASELINE)
+    return;
+
+  if (!viewer_publisher_classic_latest_snapshot(
+          &server->publisher, &server->framebuffer,
+          viewer->classic_last_generation_sent, &snapshot))
+    return;
+
+  event = viewer_classic_event_from_snapshot(&snapshot);
+  viewer_framebuffer_snapshot_free(&snapshot);
+  if (!event)
+    return;
+
+  WLog_INFO(TAG,
+            "Viewer %u classic latest-state policy replacing %" PRIu32
+            " queued events with framebuffer generation %" PRIu64,
+            viewer->id, viewer->classic_queue_count, event->generation);
+  viewer_classic_queue_clear_locked(viewer);
+  viewer_classic_enqueue_event_direct_locked(viewer, event);
+
+  if (viewer->classic_event)
+    SetEvent(viewer->classic_event);
+}
+
 static ViewerClassicEvent *
 viewer_classic_event_from_snapshot(const ViewerFramebufferSnapshot *snapshot) {
   ViewerClassicEvent *event = NULL;
@@ -769,6 +824,7 @@ viewer_classic_event_from_snapshot(const ViewerFramebufferSnapshot *snapshot) {
   }
 
   memmove(rect->bitmapDataStream, snapshot->pixels, snapshot->pixel_bytes);
+  event->generation = snapshot->generation;
   return event;
 }
 
@@ -906,6 +962,7 @@ static BOOL viewer_classic_enqueue_locked(Viewer *viewer,
   viewer->classic_queue_count++;
   viewer->bitmap_updates_queued++;
   viewer_note_classic_queue_state_locked(viewer);
+  viewer_classic_apply_latest_policy_locked(viewer);
 
   /* Signal the viewer thread that a new event is available */
   if (viewer->classic_event)
@@ -940,6 +997,7 @@ static BOOL viewer_classic_enqueue_event_locked(Viewer *viewer,
   viewer->classic_queue_count++;
   viewer->bitmap_updates_queued++;
   viewer_note_classic_queue_state_locked(viewer);
+  viewer_classic_apply_latest_policy_locked(viewer);
 
   /* Signal the viewer thread that a new event is available */
   if (viewer->classic_event)
@@ -2713,6 +2771,8 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
     }
 
     pumped++;
+    if (event->generation > viewer->classic_last_generation_sent)
+      viewer->classic_last_generation_sent = event->generation;
     viewer_classic_event_free(event);
   }
 
@@ -2982,6 +3042,7 @@ static BOOL viewer_send_state_init(Viewer *viewer) {
   viewer->bitmap_updates_skipped_throttle = 0;
   viewer->bitmap_updates_queued = 0;
   viewer->bitmap_queue_dropped = 0;
+  viewer->classic_last_generation_sent = 0;
   viewer->consecutive_lag_intervals = 0;
   viewer->sustained_lag_start_ts = 0;
   viewer->last_pointer_position_generation = 0;
@@ -3019,6 +3080,7 @@ static void viewer_send_state_uninit(Viewer *viewer) {
   EnterCriticalSection(&viewer->send_lock);
   viewer_classic_queue_clear_locked(viewer);
   viewer_surface_bits_queue_clear_locked(viewer);
+  viewer->classic_last_generation_sent = 0;
   LeaveCriticalSection(&viewer->send_lock);
 
   if (viewer->classic_event) {
@@ -3054,6 +3116,7 @@ static void viewer_cleanup_slot_finish_locked(Viewer *viewer) {
   viewer->full_refresh_deadline_ts = 0;
   viewer->last_pointer_position_generation = 0;
   viewer->last_pointer_shape_generation = 0;
+  viewer->classic_last_generation_sent = 0;
 }
 
 static void viewer_wait_for_publish_refs(ViewerServer *server, Viewer *viewer) {
@@ -4974,6 +5037,15 @@ void viewer_server_set_slow_disconnect(ViewerServer *server, BOOL enabled,
 
   server->slow_viewer_disconnect_enabled = enabled;
   server->slow_viewer_disconnect_ms = disconnect_after_ms;
+}
+
+void viewer_server_set_classic_policy(
+    ViewerServer *server,
+    const ViewerPublisherClassicPolicyConfig *classic_policy) {
+  if (!server)
+    return;
+
+  viewer_publisher_set_classic_policy(&server->publisher, classic_policy);
 }
 
 void viewer_server_stop(ViewerServer *server) {

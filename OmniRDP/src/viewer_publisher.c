@@ -138,6 +138,89 @@ void viewer_publisher_note_classic_drop(ViewerPublisher *publisher) {
   LeaveCriticalSection(&publisher->lock);
 }
 
+void viewer_publisher_set_classic_policy(
+    ViewerPublisher *publisher,
+    const ViewerPublisherClassicPolicyConfig *config) {
+  ViewerPublisherClassicPolicyConfig next = {0};
+
+  if (!publisher || !publisher->initialized)
+    return;
+
+  if (config && config->enabled &&
+      (config->policy == VIEWER_PUBLISHER_CLASSIC_POLICY_LATEST_STATE)) {
+    next = *config;
+  } else {
+    next.enabled = FALSE;
+    next.policy = VIEWER_PUBLISHER_CLASSIC_POLICY_FIFO;
+  }
+
+  EnterCriticalSection(&publisher->lock);
+  publisher->classic_policy = next;
+  LeaveCriticalSection(&publisher->lock);
+}
+
+ViewerPublisherClassicDecision viewer_publisher_classic_queue_decision(
+    ViewerPublisher *publisher, UINT32 queue_depth, UINT64 queued_bytes) {
+  ViewerPublisherClassicDecision decision =
+      VIEWER_PUBLISHER_CLASSIC_DECISION_KEEP_FIFO;
+
+  if (!publisher || !publisher->initialized)
+    return decision;
+
+  EnterCriticalSection(&publisher->lock);
+  if (publisher->classic_policy.enabled &&
+      (publisher->classic_policy.policy ==
+       VIEWER_PUBLISHER_CLASSIC_POLICY_LATEST_STATE) &&
+      (((publisher->classic_policy.max_queue_depth > 0) &&
+        (queue_depth > publisher->classic_policy.max_queue_depth)) ||
+       ((publisher->classic_policy.max_queue_bytes > 0) &&
+        (queued_bytes > publisher->classic_policy.max_queue_bytes)))) {
+    decision = VIEWER_PUBLISHER_CLASSIC_DECISION_REPLACE_WITH_BASELINE;
+    publisher->metrics.classic_latest_replacements++;
+  }
+  LeaveCriticalSection(&publisher->lock);
+  return decision;
+}
+
+BOOL viewer_publisher_classic_latest_snapshot(
+    ViewerPublisher *publisher, ViewerFramebuffer *framebuffer,
+    UINT64 viewer_last_generation_sent, ViewerFramebufferSnapshot *snapshot) {
+  if (!publisher || !publisher->initialized || !framebuffer || !snapshot)
+    return FALSE;
+
+  /* Do not hold the publisher lock while taking/copying framebuffer pixels. */
+  if (!viewer_framebuffer_snapshot(framebuffer, snapshot)) {
+    EnterCriticalSection(&publisher->lock);
+    publisher->metrics.classic_latest_snapshot_failures++;
+    LeaveCriticalSection(&publisher->lock);
+    return FALSE;
+  }
+
+  if (!viewer_publisher_make_full_frame_dirty(snapshot)) {
+    viewer_framebuffer_snapshot_free(snapshot);
+    EnterCriticalSection(&publisher->lock);
+    publisher->metrics.classic_latest_snapshot_failures++;
+    LeaveCriticalSection(&publisher->lock);
+    return FALSE;
+  }
+
+  EnterCriticalSection(&publisher->lock);
+  publisher->metrics.latest_generation_available = snapshot->generation;
+  publisher->metrics.latest_dirty_rect_count = snapshot->dirty_rect_count;
+  publisher->metrics.latest_dirty_overflow = snapshot->dirty_overflow;
+  if (snapshot->generation <= viewer_last_generation_sent) {
+    publisher->metrics.classic_latest_suppressed++;
+    LeaveCriticalSection(&publisher->lock);
+    viewer_framebuffer_snapshot_free(snapshot);
+    return FALSE;
+  }
+
+  publisher->metrics.queued_updates++;
+  publisher->metrics.queued_bytes += (UINT64)snapshot->pixel_bytes;
+  LeaveCriticalSection(&publisher->lock);
+  return TRUE;
+}
+
 BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
                                ViewerFramebuffer *framebuffer,
                                ViewerFramebufferSnapshot *snapshot) {

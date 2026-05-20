@@ -50,6 +50,9 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->viewer_late_join_refresh_deadline_ms = 5000;
   cfg->viewer_late_join_replay_max_frames = 4;
   cfg->viewer_throttle_max_updates_per_sec = 0;
+  cfg->viewer_classic_latest_state_enabled = 0;
+  cfg->viewer_classic_latest_state_max_queue_depth = 0;
+  cfg->viewer_classic_latest_state_max_queue_bytes = 0;
   cfg->viewer_security_nla_enabled = 1;
   cfg->viewer_security_tls_enabled = 1;
   cfg->viewer_security_rdp_enabled = 1;
@@ -192,6 +195,15 @@ static int parse_one_instance(const IniFile *ini, const char *name,
   inst->viewer_throttle_max_updates_per_sec =
       ini_get_uint(ini, section, "viewer.throttle_max_updates_per_sec",
                    inst->viewer_throttle_max_updates_per_sec);
+  inst->viewer_classic_latest_state_enabled =
+      ini_get_bool(ini, section, "viewer.classic_latest_state_enabled",
+                   inst->viewer_classic_latest_state_enabled);
+  inst->viewer_classic_latest_state_max_queue_depth =
+      ini_get_uint(ini, section, "viewer.classic_latest_state_max_queue_depth",
+                   inst->viewer_classic_latest_state_max_queue_depth);
+  inst->viewer_classic_latest_state_max_queue_bytes =
+      ini_get_uint(ini, section, "viewer.classic_latest_state_max_queue_bytes",
+                   inst->viewer_classic_latest_state_max_queue_bytes);
   inst->viewer_security_nla_enabled =
       ini_get_bool(ini, section, "viewer.security.nla_enabled",
                    inst->viewer_security_nla_enabled);

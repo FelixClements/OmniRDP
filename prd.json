@@ -141,8 +141,8 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "Policy belongs in viewer_publisher. viewer_server.c should only invoke narrow publisher APIs. Do not replace FIFO semantics until this reviewed story explicitly scopes the behavior change."
+      "passes": true,
+      "notes": "Completed: added a gated/default-off classic latest-state policy owned by viewer_publisher and wired to explicit viewer.classic_latest_state_* config keys. viewer_server.c only asks publisher for queue decisions and per-viewer latest framebuffer snapshots, preserves default FIFO/drop-oldest/full-refresh behavior when the policy is disabled, and replaces stale queued classic backlog with one framebuffer-backed baseline only when the policy is explicitly enabled and configured limits are exceeded. Per-viewer generation tracking resets with viewer send state/cleanup; normal backend BITMAP_UPDATE events remain generation 0, so stale suppression intentionally applies to framebuffer-backed baseline/latest events only. No RDPEGFX/GFX enablement was added."
     },
     {
       "id": "US-008",

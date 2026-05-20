@@ -59,6 +59,15 @@ Primary rule: continue RDPEGFX work from `RDPEGFX_Implementation_Plan.md`, but e
     - `git diff --check`
     - `cmake --build "OmniRDP/build" --config Debug -j`
     - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
+- `US-007` is completed/accepted.
+  - Scope completed: gated/default-off latest-state replacement policy for slow/backlogged classic viewers. Publisher owns policy configuration, queue replacement decisions, stale suppression, and latest framebuffer snapshot selection. Explicit `viewer.classic_latest_state_*` config keys wire production enablement while defaulting off.
+  - Boundary check: `viewer_server.c` calls narrow publisher APIs only, preserves default FIFO/drop-oldest/full-refresh behavior unless the policy is explicitly enabled, clears stale classic backlog only after a newer baseline snapshot/event is available, and does not manipulate pixels or add RDPEGFX/GFX behavior. Per-viewer generation tracking resets with viewer send state/cleanup; normal backend `BITMAP_UPDATE` events remain generation `0`, so stale suppression intentionally applies to framebuffer-backed baseline/latest events only.
+  - Validation completed:
+    - `clang-format -i "OmniRDP/include/viewer_publisher.h" "OmniRDP/include/viewer_server.h" "OmniRDP/src/viewer_publisher.c" "OmniRDP/src/viewer_server.c" "OmniRDP/tests/test_viewer_publisher.c"`
+    - `python -m json.tool "prd.json" > $null`
+    - `git diff --check`
+    - `cmake --build "OmniRDP/build" --config Debug -j`
+    - `ctest --test-dir "OmniRDP/build" -C Debug --output-on-failure`
 - Skeleton modules are present and wired:
   - `OmniRDP/include/viewer_framebuffer.h`
   - `OmniRDP/src/viewer_framebuffer.c`
@@ -114,7 +123,7 @@ Recommended next stories:
 4. `US-004` — completed/accepted; publisher generation and dirty metadata metrics are thread-safe and observability-only.
 5. `US-005` — completed/accepted; classic late join attempts a framebuffer-backed full-frame baseline.
 6. `US-006` — completed/accepted; classic queue observability/scaffolding only.
-7. `US-007` — future `passes:false`; implement actual classic latest-state coalescing policy. Risk: split queue limits and dirty-region coalescing if it becomes too large.
+7. `US-007` — completed/accepted; gated/default-off classic latest-state replacement policy.
 8. `US-008` — add viewer RDPEGFX activation state placeholders.
 9. `US-009` — build uncompressed RDPEGFX surface command from snapshot.
 10. `US-010` — send disabled-by-default RDPEGFX full-frame activation baseline. Risk: split reset/surface setup, encode, and send/fallback if needed.

@@ -206,6 +206,7 @@ typedef struct {
 
 typedef struct ViewerClassicEvent {
   BITMAP_UPDATE *bitmap; /* deep-copied, owned by this event */
+  UINT64 generation;     /* nonzero for framebuffer-backed latest baselines */
 } ViewerClassicEvent;
 
 typedef struct ViewerSurfaceBitsEvent {
@@ -241,6 +242,7 @@ typedef struct {
   UINT64 bitmap_updates_skipped_throttle;
   UINT64 bitmap_updates_queued;
   UINT64 bitmap_queue_dropped;
+  UINT64 classic_last_generation_sent;
   UINT32 consecutive_lag_intervals;
   UINT64 sustained_lag_start_ts;
   UINT64 last_pointer_position_generation;
@@ -304,6 +306,10 @@ BOOL viewer_server_start(ViewerServer *server);
 
 void viewer_server_set_slow_disconnect(ViewerServer *server, BOOL enabled,
                                        UINT32 disconnect_after_ms);
+
+void viewer_server_set_classic_policy(
+    ViewerServer *server,
+    const ViewerPublisherClassicPolicyConfig *classic_policy);
 
 void viewer_server_stop(ViewerServer *server);
 

@@ -28,6 +28,15 @@ static int expect_uint32(UINT32 actual, UINT32 expected, const char *message) {
   return 1;
 }
 
+static int expect_int(int actual, int expected, const char *message) {
+  if (actual != expected) {
+    (void)fprintf(stderr, "FAIL: %s actual=%d expected=%d\n", message, actual,
+                  expected);
+    return 0;
+  }
+  return 1;
+}
+
 static void fill_pixels(BYTE *pixels, size_t count, BYTE seed) {
   for (size_t i = 0; i < count; i++)
     pixels[i] = (BYTE)(seed + (BYTE)i);
@@ -157,6 +166,167 @@ static int test_classic_queue_observation_metrics(void) {
   ok = ok && expect_uint64(metrics.classic_queue_max_bytes, 0,
                            "reset clears max queue bytes");
 
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_classic_policy_default_fifo(void) {
+  ViewerPublisher publisher = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_int(
+                 viewer_publisher_classic_queue_decision(&publisher, 99, 99999),
+                 VIEWER_PUBLISHER_CLASSIC_DECISION_KEEP_FIFO,
+                 "default policy keeps fifo");
+
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_classic_policy_enabled_over_depth_limit(void) {
+  ViewerPublisher publisher = {0};
+  ViewerPublisherClassicPolicyConfig config = {0};
+  ViewerPublisherMetrics metrics = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  config.enabled = TRUE;
+  config.policy = VIEWER_PUBLISHER_CLASSIC_POLICY_LATEST_STATE;
+  config.max_queue_depth = 2;
+  viewer_publisher_set_classic_policy(&publisher, &config);
+
+  ok = ok &&
+       expect_int(viewer_publisher_classic_queue_decision(&publisher, 3, 0),
+                  VIEWER_PUBLISHER_CLASSIC_DECISION_REPLACE_WITH_BASELINE,
+                  "over depth replaces with baseline");
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.classic_latest_replacements, 1,
+                           "depth replacement counted");
+
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_classic_policy_enabled_over_byte_limit(void) {
+  ViewerPublisher publisher = {0};
+  ViewerPublisherClassicPolicyConfig config = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  config.enabled = TRUE;
+  config.policy = VIEWER_PUBLISHER_CLASSIC_POLICY_LATEST_STATE;
+  config.max_queue_bytes = 1024;
+  viewer_publisher_set_classic_policy(&publisher, &config);
+
+  ok = ok &&
+       expect_int(viewer_publisher_classic_queue_decision(&publisher, 1, 1025),
+                  VIEWER_PUBLISHER_CLASSIC_DECISION_REPLACE_WITH_BASELINE,
+                  "over byte limit replaces with baseline");
+
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_classic_policy_below_limit_keeps_fifo(void) {
+  ViewerPublisher publisher = {0};
+  ViewerPublisherClassicPolicyConfig config = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  config.enabled = TRUE;
+  config.policy = VIEWER_PUBLISHER_CLASSIC_POLICY_LATEST_STATE;
+  config.max_queue_depth = 3;
+  config.max_queue_bytes = 2048;
+  viewer_publisher_set_classic_policy(&publisher, &config);
+
+  ok = ok &&
+       expect_int(viewer_publisher_classic_queue_decision(&publisher, 3, 2048),
+                  VIEWER_PUBLISHER_CLASSIC_DECISION_KEEP_FIFO,
+                  "at limits keeps fifo");
+  ok = ok &&
+       expect_int(viewer_publisher_classic_queue_decision(&publisher, 2, 1000),
+                  VIEWER_PUBLISHER_CLASSIC_DECISION_KEEP_FIFO,
+                  "below limits keeps fifo");
+
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_classic_policy_reset_to_default_fifo(void) {
+  ViewerPublisher publisher = {0};
+  ViewerPublisherClassicPolicyConfig config = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  config.enabled = TRUE;
+  config.policy = VIEWER_PUBLISHER_CLASSIC_POLICY_LATEST_STATE;
+  config.max_queue_depth = 1;
+  viewer_publisher_set_classic_policy(&publisher, &config);
+  viewer_publisher_set_classic_policy(&publisher, NULL);
+
+  ok = ok &&
+       expect_int(viewer_publisher_classic_queue_decision(&publisher, 2, 0),
+                  VIEWER_PUBLISHER_CLASSIC_DECISION_KEEP_FIFO,
+                  "null config resets fifo behavior");
+
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_classic_latest_snapshot_newer_generation(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerPublisherMetrics metrics = {0};
+  BYTE pixels[16] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(setup_framebuffer(&fb, pixels, sizeof(pixels)),
+                         "framebuffer setup");
+  ok = ok && expect_true(viewer_publisher_classic_latest_snapshot(
+                             &publisher, &fb, 0, &snapshot),
+                         "latest snapshot succeeds for newer generation");
+  ok = ok && expect_true(snapshot.generation > 0, "snapshot has generation");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "latest snapshot is full-frame baseline");
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.queued_updates, 1,
+                           "latest snapshot counted as queued");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_classic_latest_snapshot_stale_suppression(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerPublisherMetrics metrics = {0};
+  BYTE pixels[16] = {0};
+  UINT64 generation = 0;
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(setup_framebuffer(&fb, pixels, sizeof(pixels)),
+                         "framebuffer setup");
+  ok = ok && expect_true(viewer_publisher_classic_latest_snapshot(
+                             &publisher, &fb, 0, &snapshot),
+                         "initial latest snapshot succeeds");
+  generation = snapshot.generation;
+  viewer_framebuffer_snapshot_free(&snapshot);
+
+  ok = ok && expect_true(!viewer_publisher_classic_latest_snapshot(
+                             &publisher, &fb, generation, &snapshot),
+                         "stale latest snapshot suppressed");
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.classic_latest_suppressed, 1,
+                           "stale latest suppression counted");
+
+  viewer_framebuffer_uninit(&fb);
   viewer_publisher_uninit(&publisher);
   return ok;
 }
@@ -512,6 +682,20 @@ int main(void) {
   if (!test_framebuffer_update_observation_metrics())
     return 1;
   if (!test_classic_queue_observation_metrics())
+    return 1;
+  if (!test_classic_policy_default_fifo())
+    return 1;
+  if (!test_classic_policy_enabled_over_depth_limit())
+    return 1;
+  if (!test_classic_policy_enabled_over_byte_limit())
+    return 1;
+  if (!test_classic_policy_below_limit_keeps_fifo())
+    return 1;
+  if (!test_classic_policy_reset_to_default_fifo())
+    return 1;
+  if (!test_classic_latest_snapshot_newer_generation())
+    return 1;
+  if (!test_classic_latest_snapshot_stale_suppression())
     return 1;
   if (!test_generation_and_metrics())
     return 1;

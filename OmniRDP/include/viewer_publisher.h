@@ -23,17 +23,38 @@ typedef struct {
   UINT64 classic_queue_bytes;
   UINT64 classic_queue_dropped_events;
   UINT64 classic_queue_max_bytes;
+  UINT64 classic_latest_replacements;
+  UINT64 classic_latest_suppressed;
+  UINT64 classic_latest_snapshot_failures;
   UINT32 latest_dirty_rect_count;
   UINT32 classic_queue_depth;
   UINT32 classic_queue_max_depth;
   BOOL latest_dirty_overflow;
 } ViewerPublisherMetrics;
 
+typedef enum {
+  VIEWER_PUBLISHER_CLASSIC_POLICY_FIFO = 0,
+  VIEWER_PUBLISHER_CLASSIC_POLICY_LATEST_STATE = 1
+} ViewerPublisherClassicPolicy;
+
+typedef struct {
+  BOOL enabled;
+  ViewerPublisherClassicPolicy policy;
+  UINT32 max_queue_depth;
+  UINT64 max_queue_bytes;
+} ViewerPublisherClassicPolicyConfig;
+
+typedef enum {
+  VIEWER_PUBLISHER_CLASSIC_DECISION_KEEP_FIFO = 0,
+  VIEWER_PUBLISHER_CLASSIC_DECISION_REPLACE_WITH_BASELINE = 1
+} ViewerPublisherClassicDecision;
+
 typedef struct {
   BOOL initialized;
   BOOL lock_initialized;
   BOOL has_pending_snapshot;
   UINT64 pending_generation;
+  ViewerPublisherClassicPolicyConfig classic_policy;
   ViewerPublisherMetrics metrics;
   CRITICAL_SECTION lock;
 } ViewerPublisher;
@@ -51,6 +72,14 @@ void viewer_publisher_note_classic_queue_state(ViewerPublisher *publisher,
                                                UINT32 queue_depth,
                                                UINT64 queued_bytes);
 void viewer_publisher_note_classic_drop(ViewerPublisher *publisher);
+void viewer_publisher_set_classic_policy(
+    ViewerPublisher *publisher,
+    const ViewerPublisherClassicPolicyConfig *config);
+ViewerPublisherClassicDecision viewer_publisher_classic_queue_decision(
+    ViewerPublisher *publisher, UINT32 queue_depth, UINT64 queued_bytes);
+BOOL viewer_publisher_classic_latest_snapshot(
+    ViewerPublisher *publisher, ViewerFramebuffer *framebuffer,
+    UINT64 viewer_last_generation_sent, ViewerFramebufferSnapshot *snapshot);
 /* Returns FALSE without counting a drop when snapshot generation is already
  * consumed (generation <= last_generation_sent). Dirty rectangles use inclusive
  * left/top/right/bottom coordinates. Empty or overflow dirty lists normalize to

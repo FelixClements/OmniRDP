@@ -630,6 +630,7 @@ int instance_runner_main(int argc, char *argv[]) {
   ViewerSecurityConfig viewer_security = {
       inst->viewer_security_nla_enabled, inst->viewer_security_tls_enabled,
       inst->viewer_security_rdp_enabled, viewer_auth_mode};
+  ViewerPublisherClassicPolicyConfig classic_policy = {0};
   ViewerServer *server = viewer_server_init_ex(
       inst->viewer_bind_address, inst->viewer_port, client,
       inst->viewer_cert_path, inst->viewer_key_path, &viewer_security);
@@ -648,6 +649,21 @@ int instance_runner_main(int argc, char *argv[]) {
         "Applied viewer slow disconnect: enabled=%s after_ms=%u",
         bool_str(inst->viewer_slow_disconnect_enabled),
         inst->viewer_slow_disconnect_after_ms);
+
+  classic_policy.enabled =
+      inst->viewer_classic_latest_state_enabled ? TRUE : FALSE;
+  classic_policy.policy = VIEWER_PUBLISHER_CLASSIC_POLICY_LATEST_STATE;
+  classic_policy.max_queue_depth =
+      (UINT32)inst->viewer_classic_latest_state_max_queue_depth;
+  classic_policy.max_queue_bytes =
+      (UINT64)inst->viewer_classic_latest_state_max_queue_bytes;
+  viewer_server_set_classic_policy(server, &classic_policy);
+  LOG_I("instance_runner",
+        "Applied classic latest-state policy: enabled=%s max_depth=%u "
+        "max_bytes=%u",
+        bool_str(inst->viewer_classic_latest_state_enabled),
+        inst->viewer_classic_latest_state_max_queue_depth,
+        inst->viewer_classic_latest_state_max_queue_bytes);
 
   /* Register FreeRDP WTS API */
   {
