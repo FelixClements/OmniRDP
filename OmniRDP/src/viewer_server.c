@@ -92,6 +92,8 @@ static BOOL viewer_gfx_enter_classic_fallback(ViewerServer *server,
                                               const char *reason);
 static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
                                                  Viewer *viewer, UINT64 now);
+static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
+                                             Viewer *viewer, UINT64 now);
 static BOOL viewer_gfx_request_backend_refresh(ViewerServer *server,
                                                Viewer *viewer, UINT64 now,
                                                const char *reason);
@@ -2440,6 +2442,7 @@ static UINT viewer_rdpgfx_frame_acknowledge(
     viewer_gfx_finish_late_join_locked(viewer, "replay ack received");
   }
   LeaveCriticalSection(&viewer->gfx.lock);
+  viewer_gfx_pipeline_handle_frame_ack(viewer, frame_acknowledge->frameId);
   return CHANNEL_RC_OK;
 }
 
@@ -2837,14 +2840,7 @@ static void viewer_graphics_context_reset(ViewerGraphicsContext *gfx,
   gfx->last_delivered_event_type = 0;
   gfx->last_delivered_ts = 0;
   gfx->last_activated_ts = 0;
-  gfx->dirty_last_sent_generation = 0;
-  gfx->dirty_last_acked_generation = 0;
-  gfx->dirty_reset_generation = 0;
-  gfx->dirty_in_flight_frames = 0;
-  gfx->dirty_max_in_flight_frames = 1;
-  gfx->dirty_suspended_for_no_ack = FALSE;
-  gfx->dirty_updates_enabled = FALSE;
-  gfx->dirty_baseline_required = TRUE;
+  viewer_gfx_pipeline_reset_dirty_state_locked(gfx);
   gfx->queue_head = 0;
   gfx->queue_tail = 0;
   gfx->queue_count = 0;
@@ -3610,6 +3606,41 @@ static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
   return TRUE;
 }
 
+static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
+                                             Viewer *viewer, UINT64 now) {
+  ViewerFramebufferSnapshot snapshot = {0};
+  const char *reason = NULL;
+  UINT64 last_sent_generation = 0;
+  BOOL sent = FALSE;
+
+  if (!server || !viewer || !server->viewer_gfx_enabled)
+    return TRUE;
+
+  EnterCriticalSection(&viewer->gfx.lock);
+  last_sent_generation = viewer->gfx.dirty_last_sent_generation;
+  LeaveCriticalSection(&viewer->gfx.lock);
+
+  if (!viewer_publisher_gfx_dirty_snapshot(&server->publisher,
+                                           &server->framebuffer,
+                                           last_sent_generation, &snapshot))
+    return TRUE;
+
+  if (!viewer_gfx_pipeline_dirty_update_allowed(server, viewer, &snapshot,
+                                                &reason)) {
+    viewer_framebuffer_snapshot_free(&snapshot);
+    return TRUE;
+  }
+
+  sent = viewer_gfx_pipeline_send_dirty_update(server, viewer, &snapshot);
+  viewer_framebuffer_snapshot_free(&snapshot);
+
+  if (!sent)
+    return viewer_gfx_enter_classic_fallback(
+        server, viewer, now, "RDPEGFX dirty update send failed");
+
+  return TRUE;
+}
+
 static BOOL viewer_gfx_step_join(ViewerServer *server, Viewer *viewer,
                                  UINT64 now) {
   ViewerJoinState state = VIEWER_JOIN_STATE_NONE;
@@ -4012,6 +4043,10 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
     }
 
     if (g_viewer_server && !viewer_gfx_step_join(g_viewer_server, viewer, now))
+      break;
+
+    if (g_viewer_server &&
+        !viewer_gfx_try_send_dirty_update(g_viewer_server, viewer, now))
       break;
 
     if (!viewer_pump_gfx(viewer))

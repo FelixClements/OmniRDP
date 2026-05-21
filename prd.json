@@ -227,15 +227,15 @@
     {
       "id": "US-012",
       "dependsOn": ["US-011"],
-      "title": "Send ACK-paced uncompressed dirty RDPEGFX frames",
-      "description": "As an operator, I want activated GFX viewers to receive bounded dirty-region uncompressed RDPEGFX updates paced by acknowledgements so that GFX output remains responsive and one slow viewer cannot cause stale backlog growth.",
+      "title": "Send one ACK-paced uncompressed dirty RDPEGFX frame when eligible",
+      "description": "As an operator, I want each eligible GFX viewer loop to send one bounded uncompressed dirty RDPEGFX frame and advance per-viewer dirty ACK state so incremental updates can be validated before adding timeout hardening.",
       "acceptanceCriteria": [
-        "Dirty updates are encoded from canonical framebuffer snapshots using existing uncompressed codec support only.",
-        "Max in-flight frames per viewer is enforced and acknowledgements advance per-viewer dirty pacing state.",
-        "Stale dirty updates coalesce to the latest framebuffer generation.",
-        "Suspend/no-ack behavior is handled without unbounded queues.",
-        "One slow GFX viewer does not block backend decode or other viewers.",
-        "Resize/reset generation boundaries prevent stale sends and stale acknowledgements.",
+        "viewer_server coordinates only: obtains publisher dirty snapshots, asks pipeline eligibility, calls pipeline dirty-send API, frees snapshots, and uses per-viewer fallback on send failure.",
+        "viewer_gfx_pipeline sends StartFrame, one uncompressed SurfaceCommand per dirty rect, and EndFrame with viewer-local frame IDs and no Reset/Create/Map for dirty updates.",
+        "Successful dirty sends record bounded frame-id to snapshot-generation mappings, increment in-flight count, and update dirty_last_sent_generation.",
+        "Failed dirty sends do not advance generation or increment in-flight state.",
+        "Frame acknowledgements delegate dirty ACK bookkeeping to pipeline; matching dirty ACKs clear mapping, decrement in-flight, and advance dirty_last_acked_generation while unknown/stale ACKs are ignored.",
+        "Baseline/full-frame success and reset boundaries clear dirty frame mappings so old ACKs cannot advance dirty state.",
         "Backend GFX caps or frame IDs are not mirrored to viewers.",
         "clang-format is run on modified C/H files.",
         "git diff --check passes.",
@@ -243,11 +243,32 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 12,
-      "passes": false,
-      "notes": "Future story. Keep backend GFX independent. Fallback is per viewer only. Use existing ACK callback ownership unless a separate reviewed story explicitly migrates FrameAcknowledge handling into viewer_gfx_pipeline."
+      "passes": true,
+      "notes": "Completed: viewer_server now coordinates one eligible dirty update per loop via publisher dirty snapshots and pipeline eligibility/send APIs. viewer_gfx_pipeline sends StartFrame, uncompressed dirty SurfaceCommand(s), and EndFrame, tracks bounded frame-to-generation dirty mappings, advances dirty ACK state on matching acknowledgements, ignores stale/unknown ACKs, enforces in-flight eligibility, and clears mappings on baseline success. No no-ACK timeout scanner, suspend-after-timeout policy, new codecs, backend GFX, or global throttling were added."
     },
     {
       "id": "US-013",
+      "dependsOn": ["US-012"],
+      "title": "Harden dirty RDPEGFX no-ACK timeout and suspend behavior",
+      "description": "As an operator, I want dirty RDPEGFX viewers that stop acknowledging frames to suspend dirty sends or fall back safely without global throttling so one bad viewer cannot accumulate unbounded state.",
+      "acceptanceCriteria": [
+        "No-ACK timeout detection is per viewer and bounded.",
+        "Suspended dirty updates do not accumulate unbounded snapshots or frame mappings.",
+        "Recovery or fallback behavior is per viewer and preserves classic fallback behavior.",
+        "One slow GFX viewer does not block backend decode or other viewers.",
+        "Resize/reset generation boundaries are hardened against stale sends and stale acknowledgements.",
+        "No backend GFX enablement, new codecs, or backend replay authority changes are added.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "Future story for no-ACK timeout scanning and suspend/fallback hardening."
+    },
+    {
+      "id": "US-014",
       "dependsOn": ["US-006"],
       "title": "Add experimental backend GFX decode-only gate",
       "description": "As a maintainer, I want backend RDPEGFX available only as an explicit decode-only experiment so that backend GFX can be evaluated without controlling viewer GFX negotiation or changing defaults.",
@@ -261,7 +282,7 @@
         "Debug build passes, or missing local dependency blocker is documented.",
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
-      "priority": 13,
+      "priority": 14,
       "passes": false,
       "notes": "Intentionally deferred later than the original implementation-plan order to prioritize the canonical framebuffer/viewer MVP and avoid mixing backend PDU replay with the new publisher path. Do not make backend PDU replay authoritative for viewer output."
     }

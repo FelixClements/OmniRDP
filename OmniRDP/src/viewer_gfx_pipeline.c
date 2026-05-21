@@ -40,6 +40,31 @@ static void viewer_gfx_pipeline_caps_result_add_locked(Viewer *viewer,
     viewer->gfx.pending_caps_begin_join_reason = begin_join;
 }
 
+static void
+viewer_gfx_pipeline_dirty_map_clear_locked(ViewerGraphicsContext *gfx) {
+  if (!gfx)
+    return;
+
+  memset(gfx->dirty_frame_ids, 0, sizeof(gfx->dirty_frame_ids));
+  memset(gfx->dirty_frame_generations, 0, sizeof(gfx->dirty_frame_generations));
+  memset(gfx->dirty_frame_valid, 0, sizeof(gfx->dirty_frame_valid));
+  gfx->dirty_in_flight_frames = 0;
+}
+
+void viewer_gfx_pipeline_reset_dirty_state_locked(ViewerGraphicsContext *gfx) {
+  if (!gfx)
+    return;
+
+  gfx->dirty_last_sent_generation = 0;
+  gfx->dirty_last_acked_generation = 0;
+  gfx->dirty_reset_generation = 0;
+  viewer_gfx_pipeline_dirty_map_clear_locked(gfx);
+  gfx->dirty_max_in_flight_frames = 1;
+  gfx->dirty_suspended_for_no_ack = FALSE;
+  gfx->dirty_updates_enabled = FALSE;
+  gfx->dirty_baseline_required = TRUE;
+}
+
 static void viewer_gfx_pipeline_caps_result_consume_locked(
     Viewer *viewer, ViewerGfxPipelineCapsResult *result) {
   if (result)
@@ -570,6 +595,9 @@ BOOL viewer_gfx_pipeline_dirty_update_allowed(
   max_in_flight =
       gfx->dirty_max_in_flight_frames ? gfx->dirty_max_in_flight_frames : 1U;
 
+  if (max_in_flight > VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY)
+    max_in_flight = VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY;
+
   if (!gfx->initialized) {
     deny_reason = "GFX context not initialized";
   } else if (!gfx->dirty_updates_enabled) {
@@ -601,6 +629,114 @@ out:
   if (!allowed && reason)
     *reason = deny_reason ? deny_reason : "dirty update denied";
   return allowed;
+}
+
+void viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id) {
+  ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
+  UINT32 i = 0;
+
+  if (!gfx || !gfx->initialized || (frame_id == 0))
+    return;
+
+  EnterCriticalSection(&gfx->lock);
+  for (i = 0; i < VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY; i++) {
+    if (!gfx->dirty_frame_valid[i] || (gfx->dirty_frame_ids[i] != frame_id))
+      continue;
+
+    gfx->dirty_last_acked_generation = gfx->dirty_frame_generations[i];
+    gfx->dirty_frame_valid[i] = FALSE;
+    gfx->dirty_frame_ids[i] = 0;
+    gfx->dirty_frame_generations[i] = 0;
+    if (gfx->dirty_in_flight_frames > 0)
+      gfx->dirty_in_flight_frames--;
+    break;
+  }
+  LeaveCriticalSection(&gfx->lock);
+}
+
+BOOL viewer_gfx_pipeline_send_dirty_update(
+    ViewerServer *server, Viewer *viewer,
+    const ViewerFramebufferSnapshot *snapshot) {
+  ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
+  RDPGFX_SURFACE_COMMAND *commands = NULL;
+  RDPGFX_START_FRAME_PDU start = {0};
+  RDPGFX_END_FRAME_PDU end = {0};
+  RdpgfxServerContext *rdpgfx = NULL;
+  UINT16 surface_id = 0;
+  UINT32 frame_id = 0;
+  UINT32 map_slot = VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY;
+  UINT32 i = 0;
+  UINT rc = CHANNEL_RC_OK;
+  BOOL ok = FALSE;
+
+  if (!server || !viewer || !gfx || !snapshot || !snapshot->pixels ||
+      (snapshot->dirty_rect_count == 0))
+    return FALSE;
+
+  if (!viewer_gfx_pipeline_dirty_update_allowed(server, viewer, snapshot, NULL))
+    return FALSE;
+
+  commands = (RDPGFX_SURFACE_COMMAND *)calloc(snapshot->dirty_rect_count,
+                                              sizeof(RDPGFX_SURFACE_COMMAND));
+  if (!commands)
+    return FALSE;
+
+  EnterCriticalSection(&gfx->lock);
+  rdpgfx = gfx->rdpgfx;
+  surface_id = gfx->active_surface_id;
+  frame_id = gfx->next_frame_id ? gfx->next_frame_id : 1U;
+  for (i = 0; i < VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY; i++) {
+    if (!gfx->dirty_frame_valid[i]) {
+      map_slot = i;
+      break;
+    }
+  }
+  if (!rdpgfx || !rdpgfx->StartFrame || !rdpgfx->SurfaceCommand ||
+      !rdpgfx->EndFrame || (map_slot >= VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY)) {
+    LeaveCriticalSection(&gfx->lock);
+    goto cleanup;
+  }
+  LeaveCriticalSection(&gfx->lock);
+
+  for (i = 0; i < snapshot->dirty_rect_count; i++) {
+    if (!viewer_gfx_uncompressed_build_surface_command_rect(
+            snapshot, surface_id, &snapshot->dirty_rects[i], &commands[i]))
+      goto cleanup;
+  }
+
+  start.timestamp = 0;
+  start.frameId = frame_id;
+  end.frameId = frame_id;
+
+  EnterCriticalSection(&viewer->send_lock);
+  rc = rdpgfx->StartFrame(rdpgfx, &start);
+  for (i = 0; (rc == CHANNEL_RC_OK) && (i < snapshot->dirty_rect_count); i++)
+    rc = rdpgfx->SurfaceCommand(rdpgfx, &commands[i]);
+  if (rc == CHANNEL_RC_OK)
+    rc = rdpgfx->EndFrame(rdpgfx, &end);
+  LeaveCriticalSection(&viewer->send_lock);
+
+  ok = (rc == CHANNEL_RC_OK);
+  if (!ok)
+    goto cleanup;
+
+  EnterCriticalSection(&gfx->lock);
+  gfx->dirty_frame_valid[map_slot] = TRUE;
+  gfx->dirty_frame_ids[map_slot] = frame_id;
+  gfx->dirty_frame_generations[map_slot] = snapshot->generation;
+  gfx->dirty_in_flight_frames++;
+  gfx->dirty_last_sent_generation = snapshot->generation;
+  gfx->last_sent_frame_id = frame_id;
+  gfx->next_frame_id = frame_id + 1U;
+  LeaveCriticalSection(&gfx->lock);
+
+cleanup:
+  if (commands) {
+    for (i = 0; i < snapshot->dirty_rect_count; i++)
+      viewer_gfx_uncompressed_surface_command_reset(&commands[i]);
+    free(commands);
+  }
+  return ok;
 }
 
 BOOL viewer_gfx_pipeline_send_snapshot(
@@ -695,6 +831,7 @@ BOOL viewer_gfx_pipeline_send_snapshot(
     gfx->last_sent_frame_id = frame_id;
     gfx->next_frame_id = frame_id + 1U;
     gfx->dirty_last_sent_generation = snapshot->generation;
+    viewer_gfx_pipeline_dirty_map_clear_locked(gfx);
     gfx->dirty_baseline_required = FALSE;
     gfx->dirty_updates_enabled = TRUE;
     if (gfx->dirty_max_in_flight_frames == 0)

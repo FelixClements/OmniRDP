@@ -46,6 +46,11 @@ BOOL viewer_gfx_pipeline_send_surface_preamble(ViewerServer *server,
 BOOL viewer_gfx_pipeline_dirty_update_allowed(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot, const char **reason);
+void viewer_gfx_pipeline_reset_dirty_state_locked(ViewerGraphicsContext *gfx);
+BOOL viewer_gfx_pipeline_send_dirty_update(
+    ViewerServer *server, Viewer *viewer,
+    const ViewerFramebufferSnapshot *snapshot);
+void viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id);
 BOOL viewer_gfx_pipeline_send_snapshot(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot);

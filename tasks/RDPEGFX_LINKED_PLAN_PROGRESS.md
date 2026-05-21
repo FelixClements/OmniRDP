@@ -137,10 +137,11 @@ Recommended next stories:
 9. `US-009` — completed/accepted; uncompressed RDPEGFX surface commands are built from snapshots with full-frame and single dirty-rect payload tests.
 10. `US-010` — completed/accepted; disabled-by-default viewer RDPEGFX full-frame baseline sends from canonical framebuffer snapshots behind `viewer.gfx.enabled`.
 11. `US-011` — completed/accepted; dirty-update planning state and publisher dirty snapshot coalescing added with no incremental sends.
-12. `US-012` — send ACK-paced uncompressed dirty RDPEGFX frames.
-13. `US-013` — add experimental backend GFX decode-only gate.
+12. `US-012` — completed/accepted; one eligible ACK-paced uncompressed dirty RDPEGFX frame is sent per viewer loop with bounded dirty ACK mapping.
+13. `US-013` — harden dirty RDPEGFX no-ACK timeout and suspend behavior.
+14. `US-014` — add experimental backend GFX decode-only gate.
 
-Backend GFX (`US-013`) is intentionally deferred later than the original implementation-plan order. The current sequence prioritizes the canonical framebuffer/viewer MVP and avoids mixing backend PDU replay with the new publisher path.
+Backend GFX (`US-014`) is intentionally deferred later than the original implementation-plan order. The current sequence prioritizes the canonical framebuffer/viewer MVP and avoids mixing backend PDU replay with the new publisher path.
 
 ## Per-story validation checklist
 

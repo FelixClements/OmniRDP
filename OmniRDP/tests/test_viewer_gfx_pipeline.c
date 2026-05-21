@@ -15,6 +15,7 @@ typedef enum {
 
 static TestSendOp g_send_order[8] = {0};
 static UINT32 g_send_count = 0;
+static UINT32 g_surface_count = 0;
 static UINT g_fail_on_send = 0;
 static RDPGFX_CREATE_SURFACE_PDU g_last_create = {0};
 static RDPGFX_SURFACE_COMMAND g_last_surface = {0};
@@ -71,6 +72,7 @@ static UINT test_surface_command(RdpgfxServerContext *context,
   if (!cmd)
     return ERROR_INTERNAL_ERROR;
   g_last_surface = *cmd;
+  g_surface_count++;
   return test_record_send(TEST_SEND_SURFACE);
 }
 
@@ -89,6 +91,7 @@ static void reset_send_recorder(void) {
   memset(&g_last_reset_monitor, 0, sizeof(g_last_reset_monitor));
   g_expected_reset_source = NULL;
   g_send_count = 0;
+  g_surface_count = 0;
   g_fail_on_send = 0;
 }
 
@@ -562,6 +565,179 @@ static int test_dirty_update_eligibility_is_per_viewer(void) {
   return ok;
 }
 
+static ViewerFramebufferSnapshot
+make_dirty_snapshot(BYTE *pixels, UINT64 generation, UINT32 rect_count) {
+  ViewerFramebufferSnapshot snapshot = {0};
+
+  snapshot.width = 4;
+  snapshot.height = 4;
+  snapshot.stride = 16;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixels = pixels;
+  snapshot.pixel_bytes = 64;
+  snapshot.generation = generation;
+  snapshot.dirty_rect_count = rect_count;
+  snapshot.dirty_rects[0].left = 1;
+  snapshot.dirty_rects[0].top = 1;
+  snapshot.dirty_rects[0].right = 1;
+  snapshot.dirty_rects[0].bottom = 1;
+  if (rect_count > 1) {
+    snapshot.dirty_rects[1].left = 2;
+    snapshot.dirty_rects[1].top = 2;
+    snapshot.dirty_rects[1].right = 2;
+    snapshot.dirty_rects[1].bottom = 2;
+  }
+  return snapshot;
+}
+
+static int test_dirty_update_send_order_and_ack(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 30, 1);
+  const char *reason = NULL;
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 11;
+
+  reset_send_recorder();
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &snapshot),
+                         "dirty update sends");
+  ok = ok && expect_uint32(g_send_count, 3, "start surface end only");
+  ok = ok && expect_uint32(g_send_order[0], TEST_SEND_START, "dirty start");
+  ok = ok && expect_uint32(g_send_order[1], TEST_SEND_SURFACE, "dirty surface");
+  ok = ok && expect_uint32(g_send_order[2], TEST_SEND_END, "dirty end");
+  ok = ok && expect_uint32(g_surface_count, 1, "one dirty surface command");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
+                           "in-flight incremented");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_generation, 30,
+                           "sent generation recorded");
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "in-flight limit denies when max set to one later");
+
+  viewer_gfx_pipeline_handle_frame_ack(&viewer, 999);
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
+                           "unknown ack ignored");
+  viewer_gfx_pipeline_handle_frame_ack(&viewer, 11);
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "matching ack decrements in-flight");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 30,
+                           "matching ack advances generation");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_update_multi_rect_and_failures(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 40, 2);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 20;
+
+  reset_send_recorder();
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &snapshot),
+                         "multi dirty update sends");
+  ok = ok && expect_uint32(g_send_count, 4, "start two surfaces end");
+  ok = ok && expect_uint32(g_surface_count, 2, "two dirty surface commands");
+  viewer_gfx_pipeline_handle_frame_ack(&viewer, 20);
+
+  snapshot.generation = 41;
+  for (UINT32 fail = 1; fail <= 4; fail++) {
+    reset_send_recorder();
+    g_fail_on_send = fail;
+    ok = ok && expect_true(!viewer_gfx_pipeline_send_dirty_update(
+                               &server, &viewer, &snapshot),
+                           "dirty send failure rejected");
+    ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_generation, 40,
+                             "failed dirty send does not advance generation");
+    ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                             "failed dirty send does not increment in-flight");
+  }
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_mapping_cleared_by_baseline(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot dirty = make_dirty_snapshot(pixels, 50, 1);
+  ViewerFramebufferSnapshot baseline = make_dirty_snapshot(pixels, 60, 1);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 30;
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &dirty),
+                         "dirty before baseline sends");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
+                           "dirty in flight before baseline");
+
+  reset_send_recorder();
+  ok = ok && expect_true(
+                 viewer_gfx_pipeline_send_snapshot(&server, &viewer, &baseline),
+                 "baseline sends and clears dirty mapping");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "baseline clears dirty in-flight");
+  viewer_gfx_pipeline_handle_frame_ack(&viewer, 30);
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
+                           "stale pre-baseline dirty ack ignored");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_mapping_cleared_by_reset(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot dirty = make_dirty_snapshot(pixels, 70, 1);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 40;
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &dirty),
+                         "dirty before reset sends");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
+                           "dirty in flight before reset");
+
+  viewer_gfx_pipeline_reset_dirty_state_locked(&viewer.gfx);
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "reset clears dirty in-flight");
+  viewer_gfx_pipeline_handle_frame_ack(&viewer, 40);
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
+                           "stale pre-reset dirty ack ignored");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
 int main(void) {
   if (!test_activate_rejects_null_inputs())
     return 1;
@@ -582,6 +758,14 @@ int main(void) {
   if (!test_dirty_update_eligibility_denials_and_allowed())
     return 1;
   if (!test_dirty_update_eligibility_is_per_viewer())
+    return 1;
+  if (!test_dirty_update_send_order_and_ack())
+    return 1;
+  if (!test_dirty_update_multi_rect_and_failures())
+    return 1;
+  if (!test_dirty_mapping_cleared_by_baseline())
+    return 1;
+  if (!test_dirty_mapping_cleared_by_reset())
     return 1;
   return 0;
 }
