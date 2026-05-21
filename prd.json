@@ -180,8 +180,8 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 9,
-      "passes": false,
-      "notes": "Codec-specific construction only. RDPEGFX session/protocol sequencing stays in viewer_gfx_pipeline."
+      "passes": true,
+      "notes": "Completed: viewer_gfx_codec_uncompressed builds RDPGFX_CODECID_UNCOMPRESSED surface commands from canonical PIXEL_FORMAT_BGRX32 ViewerFramebufferSnapshot inputs. Full-frame and explicit single dirty-rect payloads are tightly repacked top-down with exclusive command bounds, contextId 0, and no RdpgfxServerContext/send/pipeline integration. Validation rejects nulls, unsupported formats, zero dimensions, bad stride, undersized pixel buffers, invalid/out-of-bounds rects, and sizing overflows; reset/free is safe and idempotent. Tests cover padded-stride full frames, dirty rect bounds/payloads, invalid inputs, and reset idempotence."
     },
     {
       "id": "US-010",

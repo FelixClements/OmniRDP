@@ -134,7 +134,7 @@ Recommended next stories:
 6. `US-006` — completed/accepted; classic queue observability/scaffolding only.
 7. `US-007` — completed/accepted; gated/default-off classic latest-state replacement policy.
 8. `US-008` — completed/accepted; dormant viewer RDPEGFX activation state placeholders.
-9. `US-009` — build uncompressed RDPEGFX surface command from snapshot.
+9. `US-009` — completed/accepted; uncompressed RDPEGFX surface commands are built from snapshots with full-frame and single dirty-rect payload tests.
 10. `US-010` — send disabled-by-default RDPEGFX full-frame activation baseline. Risk: split reset/surface setup, encode, and send/fallback if needed.
 11. `US-011` — add RDPEGFX dirty-region incremental updates with ack pacing.
 12. `US-012` — add experimental backend GFX decode-only gate.

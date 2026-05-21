@@ -31,6 +31,11 @@ add_executable(test_viewer_gfx_pipeline
     ${CMAKE_SOURCE_DIR}/src/platform_compat.c
 )
 
+add_executable(test_viewer_gfx_codec_uncompressed
+    test_viewer_gfx_codec_uncompressed.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_uncompressed.c
+)
+
 if(MSVC)
     set_source_files_properties(test_viewer_gfx_pipeline.c PROPERTIES
         COMPILE_OPTIONS /wd4273
@@ -129,11 +134,25 @@ target_include_directories(test_viewer_gfx_pipeline PRIVATE
 
 target_link_libraries(test_viewer_gfx_pipeline ${WINPR_LIB})
 
+target_include_directories(test_viewer_gfx_codec_uncompressed PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${FREERDP_ROOT}/include
+    ${FREERDP_ROOT}/winpr/include
+    ${FREERDP_BUILD}/include
+    ${FREERDP_BUILD}/winpr/include
+)
+
 if(MSVC)
     target_link_options(test_viewer_gfx_pipeline PRIVATE /ignore:4217)
 endif()
 
 set_target_properties(test_viewer_gfx_pipeline PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+)
+
+set_target_properties(test_viewer_gfx_codec_uncompressed PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
 )
@@ -196,6 +215,14 @@ add_test(NAME test_viewer_gfx_pipeline
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_viewer_gfx_pipeline PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_viewer_gfx_codec_uncompressed
+    COMMAND ${CMAKE_COMMAND}
+        -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DTEST_EXECUTABLE_NAME=test_viewer_gfx_codec_uncompressed${CMAKE_EXECUTABLE_SUFFIX}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
+)
+set_tests_properties(test_viewer_gfx_codec_uncompressed PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_svc_config
     COMMAND ${CMAKE_COMMAND}
