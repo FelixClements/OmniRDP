@@ -221,6 +221,53 @@ BOOL viewer_publisher_classic_latest_snapshot(
   return TRUE;
 }
 
+BOOL viewer_publisher_gfx_dirty_snapshot(ViewerPublisher *publisher,
+                                         ViewerFramebuffer *framebuffer,
+                                         UINT64 viewer_last_generation_sent,
+                                         ViewerFramebufferSnapshot *snapshot) {
+  if (!publisher || !publisher->initialized || !framebuffer || !snapshot)
+    return FALSE;
+
+  /* Snapshot owns copied pixels/dirty metadata; publisher lock is not held
+   * while copying framebuffer data. Generation filtering is per viewer. */
+  if (!viewer_framebuffer_snapshot(framebuffer, snapshot)) {
+    viewer_publisher_count_drop(publisher);
+    return FALSE;
+  }
+
+  EnterCriticalSection(&publisher->lock);
+  publisher->metrics.latest_generation_available = snapshot->generation;
+  publisher->metrics.latest_dirty_rect_count = snapshot->dirty_rect_count;
+  publisher->metrics.latest_dirty_overflow = snapshot->dirty_overflow;
+  if (snapshot->generation <= viewer_last_generation_sent) {
+    LeaveCriticalSection(&publisher->lock);
+    viewer_framebuffer_snapshot_free(snapshot);
+    return FALSE;
+  }
+  LeaveCriticalSection(&publisher->lock);
+
+  if (snapshot->dirty_overflow || (snapshot->dirty_rect_count >
+                                   VIEWER_PUBLISHER_GFX_DIRTY_RECT_THRESHOLD)) {
+    if (!viewer_publisher_make_full_frame_dirty(snapshot)) {
+      viewer_framebuffer_snapshot_free(snapshot);
+      viewer_publisher_count_drop(publisher);
+      return FALSE;
+    }
+  } else if (!viewer_publisher_normalize_dirty_rects(snapshot)) {
+    viewer_framebuffer_snapshot_free(snapshot);
+    viewer_publisher_count_drop(publisher);
+    return FALSE;
+  }
+
+  EnterCriticalSection(&publisher->lock);
+  publisher->metrics.latest_dirty_rect_count = snapshot->dirty_rect_count;
+  publisher->metrics.latest_dirty_overflow = snapshot->dirty_overflow;
+  publisher->metrics.queued_updates++;
+  publisher->metrics.queued_bytes += (UINT64)snapshot->pixel_bytes;
+  LeaveCriticalSection(&publisher->lock);
+  return TRUE;
+}
+
 BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
                                ViewerFramebuffer *framebuffer,
                                ViewerFramebufferSnapshot *snapshot) {

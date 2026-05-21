@@ -2837,6 +2837,14 @@ static void viewer_graphics_context_reset(ViewerGraphicsContext *gfx,
   gfx->last_delivered_event_type = 0;
   gfx->last_delivered_ts = 0;
   gfx->last_activated_ts = 0;
+  gfx->dirty_last_sent_generation = 0;
+  gfx->dirty_last_acked_generation = 0;
+  gfx->dirty_reset_generation = 0;
+  gfx->dirty_in_flight_frames = 0;
+  gfx->dirty_max_in_flight_frames = 1;
+  gfx->dirty_suspended_for_no_ack = FALSE;
+  gfx->dirty_updates_enabled = FALSE;
+  gfx->dirty_baseline_required = TRUE;
   gfx->queue_head = 0;
   gfx->queue_tail = 0;
   gfx->queue_count = 0;

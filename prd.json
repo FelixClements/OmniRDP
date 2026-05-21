@@ -207,10 +207,31 @@
     {
       "id": "US-011",
       "dependsOn": ["US-010"],
-      "title": "Add RDPEGFX dirty updates with ack pacing",
-      "description": "As an operator, I want activated GFX viewers to receive bounded dirty-region incremental updates paced by acknowledgements so that GFX output remains responsive and one slow viewer cannot cause stale backlog growth.",
+      "title": "Add RDPEGFX dirty-update planning state",
+      "description": "As a developer, I want publisher dirty-snapshot coalescing and per-viewer RDPEGFX dirty eligibility/pacing state without live incremental sends so that the later ACK-paced dirty sender can remain small and safe.",
       "acceptanceCriteria": [
-        "Max in-flight frames per viewer is bounded and documented.",
+        "viewer_publisher exposes a per-viewer-generation RDPEGFX dirty snapshot API that returns owned snapshots and normalizes overflow/too-many rects to full-frame dirty metadata.",
+        "viewer_gfx_pipeline owns per-viewer dirty eligibility and pacing state including in-flight limit, suspended/no-ack flag, dirty enablement, and baseline-required/reset generation flags.",
+        "Eligibility API denies disabled, not negotiated/open/live, no baseline/surface, in-flight limit, suspended, and baseline-required states without encoding or sending.",
+        "Per-viewer dirty pacing state is isolated; one suspended viewer does not affect another viewer.",
+        "No live incremental RDPEGFX dirty sends, ACK-paced loop, codec changes, backend GFX enablement, or backend replay authority changes are added.",
+        "clang-format is run on modified C/H files.",
+        "git diff --check passes.",
+        "Debug build passes, or missing local dependency blocker is documented.",
+        "ctest/tests pass, or unavailable tests are documented with the reason."
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "Completed: added viewer_publisher_gfx_dirty_snapshot for per-viewer generation filtering, dirty metadata retention, and full-frame normalization on overflow/too many rects. Added per-viewer dirty planning/pacing fields and viewer_gfx_pipeline_dirty_update_allowed with gate, negotiation/live, baseline/surface, suspension, and in-flight checks. Tests cover publisher generation isolation, dirty rect/full-frame normalization, eligibility denials/allows, and per-viewer isolation. No incremental dirty sends or ACK-paced send loop were added."
+    },
+    {
+      "id": "US-012",
+      "dependsOn": ["US-011"],
+      "title": "Send ACK-paced uncompressed dirty RDPEGFX frames",
+      "description": "As an operator, I want activated GFX viewers to receive bounded dirty-region uncompressed RDPEGFX updates paced by acknowledgements so that GFX output remains responsive and one slow viewer cannot cause stale backlog growth.",
+      "acceptanceCriteria": [
+        "Dirty updates are encoded from canonical framebuffer snapshots using existing uncompressed codec support only.",
+        "Max in-flight frames per viewer is enforced and acknowledgements advance per-viewer dirty pacing state.",
         "Stale dirty updates coalesce to the latest framebuffer generation.",
         "Suspend/no-ack behavior is handled without unbounded queues.",
         "One slow GFX viewer does not block backend decode or other viewers.",
@@ -221,12 +242,12 @@
         "Debug build passes, or missing local dependency blocker is documented.",
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
-      "priority": 11,
+      "priority": 12,
       "passes": false,
-      "notes": "Keep backend GFX independent. Fallback is per viewer only. Use existing ACK state/callback ownership unless a separate reviewed story explicitly migrates FrameAcknowledge handling into viewer_gfx_pipeline."
+      "notes": "Future story. Keep backend GFX independent. Fallback is per viewer only. Use existing ACK callback ownership unless a separate reviewed story explicitly migrates FrameAcknowledge handling into viewer_gfx_pipeline."
     },
     {
-      "id": "US-012",
+      "id": "US-013",
       "dependsOn": ["US-006"],
       "title": "Add experimental backend GFX decode-only gate",
       "description": "As a maintainer, I want backend RDPEGFX available only as an explicit decode-only experiment so that backend GFX can be evaluated without controlling viewer GFX negotiation or changing defaults.",
@@ -240,7 +261,7 @@
         "Debug build passes, or missing local dependency blocker is documented.",
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
-      "priority": 12,
+      "priority": 13,
       "passes": false,
       "notes": "Intentionally deferred later than the original implementation-plan order to prioritize the canonical framebuffer/viewer MVP and avoid mixing backend PDU replay with the new publisher path. Do not make backend PDU replay authoritative for viewer output."
     }

@@ -676,6 +676,113 @@ static int test_stale_consumed_generation_ignored(void) {
   return ok;
 }
 
+static int test_gfx_dirty_snapshot_generation_filtering(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[16] = {0};
+  RECTANGLE_16 dirty = {1, 1, 1, 1};
+  UINT64 generation = 0;
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(setup_framebuffer(&fb, pixels, sizeof(pixels)),
+                         "framebuffer setup");
+  ok = ok && expect_true(viewer_publisher_gfx_dirty_snapshot(&publisher, &fb, 0,
+                                                             &snapshot),
+                         "gfx dirty snapshot for new generation");
+  generation = snapshot.generation;
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "gfx dirty snapshot has dirty rect");
+  viewer_framebuffer_snapshot_free(&snapshot);
+
+  ok = ok && expect_true(!viewer_publisher_gfx_dirty_snapshot(
+                             &publisher, &fb, generation, &snapshot),
+                         "gfx dirty snapshot suppresses consumed generation");
+
+  fill_pixels(pixels, sizeof(pixels), 90);
+  ok = ok &&
+       expect_true(viewer_framebuffer_update_pixels(&fb, pixels, 8, &dirty, 1),
+                   "next dirty update");
+  ok = ok && expect_true(viewer_publisher_gfx_dirty_snapshot(
+                             &publisher, &fb, generation, &snapshot),
+                         "gfx dirty snapshot isolated per viewer generation");
+  ok = ok &&
+       expect_uint32(snapshot.dirty_rects[0].left, 1, "dirty left preserved");
+  ok = ok &&
+       expect_uint32(snapshot.dirty_rects[0].top, 1, "dirty top preserved");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_gfx_dirty_snapshot_too_many_rects_full_frame(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[16] = {0};
+  RECTANGLE_16 dirty[VIEWER_PUBLISHER_GFX_DIRTY_RECT_THRESHOLD + 1U] = {0};
+  int ok = 1;
+
+  for (UINT32 i = 0; i < (UINT32)(sizeof(dirty) / sizeof(dirty[0])); i++)
+    dirty[i].left = dirty[i].top = dirty[i].right = dirty[i].bottom = 0;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(setup_framebuffer(&fb, pixels, sizeof(pixels)),
+                         "framebuffer setup");
+  fill_pixels(pixels, sizeof(pixels), 100);
+  ok = ok && expect_true(viewer_framebuffer_update_pixels(
+                             &fb, pixels, 8, dirty,
+                             (UINT32)(sizeof(dirty) / sizeof(dirty[0]))),
+                         "many dirty rect update");
+  ok = ok && expect_true(viewer_publisher_gfx_dirty_snapshot(&publisher, &fb, 0,
+                                                             &snapshot),
+                         "gfx dirty snapshot accepts many rect generation");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "many dirty rects normalize to one full frame");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 0, "full left");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].top, 0, "full top");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].right, 1, "full right");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].bottom, 1, "full bottom");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_gfx_dirty_snapshot_overflow_full_frame(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[16] = {0};
+  RECTANGLE_16 dirty[VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS + 1U] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(setup_framebuffer(&fb, pixels, sizeof(pixels)),
+                         "framebuffer setup");
+  fill_pixels(pixels, sizeof(pixels), 110);
+  ok = ok && expect_true(viewer_framebuffer_update_pixels(
+                             &fb, pixels, 8, dirty,
+                             VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS + 1U),
+                         "overflow dirty update");
+  ok = ok && expect_true(viewer_publisher_gfx_dirty_snapshot(&publisher, &fb, 0,
+                                                             &snapshot),
+                         "gfx dirty snapshot accepts overflow generation");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "overflow normalizes to one full frame");
+  ok = ok && expect_true(!snapshot.dirty_overflow,
+                         "overflow flag cleared after normalization");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
 int main(void) {
   if (!test_init_uninit_lock_state())
     return 1;
@@ -716,6 +823,12 @@ int main(void) {
   if (!test_duplicate_snapshot_after_consume_is_suppressed())
     return 1;
   if (!test_stale_consumed_generation_ignored())
+    return 1;
+  if (!test_gfx_dirty_snapshot_generation_filtering())
+    return 1;
+  if (!test_gfx_dirty_snapshot_too_many_rects_full_frame())
+    return 1;
+  if (!test_gfx_dirty_snapshot_overflow_full_frame())
     return 1;
   return 0;
 }

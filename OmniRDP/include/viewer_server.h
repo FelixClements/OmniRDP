@@ -191,6 +191,14 @@ typedef struct {
   UINT32 last_delivered_event_type;
   UINT64 last_delivered_ts;
   UINT64 last_activated_ts;
+  UINT64 dirty_last_sent_generation;
+  UINT64 dirty_last_acked_generation;
+  UINT64 dirty_reset_generation;
+  UINT32 dirty_in_flight_frames;
+  UINT32 dirty_max_in_flight_frames;
+  BOOL dirty_suspended_for_no_ack;
+  BOOL dirty_updates_enabled;
+  BOOL dirty_baseline_required;
   ViewerGfxEvent *queue[VIEWER_GFX_QUEUE_CAPACITY];
   UINT32 queue_head;
   UINT32 queue_tail;

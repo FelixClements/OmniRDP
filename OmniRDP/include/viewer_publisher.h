@@ -9,6 +9,8 @@
 extern "C" {
 #endif
 
+#define VIEWER_PUBLISHER_GFX_DIRTY_RECT_THRESHOLD 64U
+
 typedef struct {
   UINT64 queued_updates;
   /* Cumulative bytes accepted as pending/coalesced snapshots, not current
@@ -80,6 +82,10 @@ ViewerPublisherClassicDecision viewer_publisher_classic_queue_decision(
 BOOL viewer_publisher_classic_latest_snapshot(
     ViewerPublisher *publisher, ViewerFramebuffer *framebuffer,
     UINT64 viewer_last_generation_sent, ViewerFramebufferSnapshot *snapshot);
+BOOL viewer_publisher_gfx_dirty_snapshot(ViewerPublisher *publisher,
+                                         ViewerFramebuffer *framebuffer,
+                                         UINT64 viewer_last_generation_sent,
+                                         ViewerFramebufferSnapshot *snapshot);
 /* Returns FALSE without counting a drop when snapshot generation is already
  * consumed (generation <= last_generation_sent). Dirty rectangles use inclusive
  * left/top/right/bottom coordinates. Empty or overflow dirty lists normalize to

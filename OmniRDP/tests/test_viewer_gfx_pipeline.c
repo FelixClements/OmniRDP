@@ -452,6 +452,116 @@ static int test_surface_preamble_deep_copies_reset_monitors(void) {
   return ok;
 }
 
+static void configure_dirty_eligible_viewer(ViewerServer *server,
+                                            Viewer *viewer,
+                                            RdpgfxServerContext *rdpgfx) {
+  server->viewer_gfx_enabled = TRUE;
+  viewer->gfx.rdpgfx = rdpgfx;
+  viewer->gfx.use_rdpgfx = TRUE;
+  viewer->gfx.caps_ready = TRUE;
+  viewer->gfx.channel_opened = TRUE;
+  viewer->gfx.join_state = VIEWER_JOIN_STATE_LIVE;
+  viewer->gfx.surface_created = TRUE;
+  viewer->gfx.force_full_present = FALSE;
+  viewer->gfx.dirty_updates_enabled = TRUE;
+  viewer->gfx.dirty_baseline_required = FALSE;
+  viewer->gfx.dirty_max_in_flight_frames = 2;
+}
+
+static int test_dirty_update_eligibility_denials_and_allowed(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  const char *reason = NULL;
+  int ok = 1;
+
+  snapshot.width = 2;
+  snapshot.height = 2;
+  snapshot.generation = 10;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 2, 2), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+
+  server.viewer_gfx_enabled = FALSE;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "dirty denied when gate disabled");
+  server.viewer_gfx_enabled = TRUE;
+
+  viewer.gfx.caps_ready = FALSE;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "dirty denied when not negotiated");
+  viewer.gfx.caps_ready = TRUE;
+
+  viewer.gfx.join_state = VIEWER_JOIN_STATE_PENDING;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "dirty denied before live");
+  viewer.gfx.join_state = VIEWER_JOIN_STATE_LIVE;
+
+  ok = ok && expect_true(viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "dirty allowed when live under limit");
+
+  viewer.gfx.dirty_in_flight_frames = 2;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "dirty denied at in-flight limit");
+  viewer.gfx.dirty_in_flight_frames = 0;
+
+  viewer.gfx.dirty_suspended_for_no_ack = TRUE;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "dirty denied while suspended");
+  viewer.gfx.dirty_suspended_for_no_ack = FALSE;
+
+  viewer.gfx.dirty_baseline_required = TRUE;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "dirty denied when baseline required");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_update_eligibility_is_per_viewer(void) {
+  ViewerServer server = {0};
+  Viewer viewer_a = {0};
+  Viewer viewer_b = {0};
+  RdpgfxServerContext rdpgfx_a = {0};
+  RdpgfxServerContext rdpgfx_b = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  const char *reason = NULL;
+  int ok = 1;
+
+  snapshot.width = 2;
+  snapshot.height = 2;
+  snapshot.generation = 20;
+
+  ok = ok && expect_true(init_test_viewer(&viewer_a, 2, 2), "viewer A init");
+  ok = ok && expect_true(init_test_viewer(&viewer_b, 2, 2), "viewer B init");
+  configure_dirty_eligible_viewer(&server, &viewer_a, &rdpgfx_a);
+  configure_dirty_eligible_viewer(&server, &viewer_b, &rdpgfx_b);
+  viewer_a.gfx.dirty_suspended_for_no_ack = TRUE;
+
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer_a, &snapshot, &reason),
+                         "viewer A suspended denied");
+  ok = ok && expect_true(viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer_b, &snapshot, &reason),
+                         "viewer B remains allowed");
+
+  viewer_a.gfx.rdpgfx = NULL;
+  viewer_b.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer_a);
+  uninit_test_viewer(&viewer_b);
+  return ok;
+}
+
 int main(void) {
   if (!test_activate_rejects_null_inputs())
     return 1;
@@ -468,6 +578,10 @@ int main(void) {
   if (!test_snapshot_send_failure_propagates())
     return 1;
   if (!test_surface_preamble_deep_copies_reset_monitors())
+    return 1;
+  if (!test_dirty_update_eligibility_denials_and_allowed())
+    return 1;
+  if (!test_dirty_update_eligibility_is_per_viewer())
     return 1;
   return 0;
 }

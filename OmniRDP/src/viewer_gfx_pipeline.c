@@ -545,6 +545,64 @@ cleanup:
   return ok;
 }
 
+BOOL viewer_gfx_pipeline_dirty_update_allowed(
+    ViewerServer *server, Viewer *viewer,
+    const ViewerFramebufferSnapshot *snapshot, const char **reason) {
+  ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
+  const char *deny_reason = NULL;
+  BOOL allowed = FALSE;
+  UINT32 max_in_flight = 0;
+
+  if (reason)
+    *reason = NULL;
+
+  if (!server || !viewer || !gfx || !snapshot) {
+    deny_reason = "invalid arguments";
+    goto out;
+  }
+
+  if (!server->viewer_gfx_enabled) {
+    deny_reason = "viewer GFX disabled";
+    goto out;
+  }
+
+  EnterCriticalSection(&gfx->lock);
+  max_in_flight =
+      gfx->dirty_max_in_flight_frames ? gfx->dirty_max_in_flight_frames : 1U;
+
+  if (!gfx->initialized) {
+    deny_reason = "GFX context not initialized";
+  } else if (!gfx->dirty_updates_enabled) {
+    deny_reason = "dirty updates disabled";
+  } else if (!gfx->rdpgfx || !gfx->use_rdpgfx || !gfx->caps_ready ||
+             !gfx->channel_opened || gfx->rdpgfx_temporarily_disabled ||
+             (gfx->join_state != VIEWER_JOIN_STATE_LIVE)) {
+    deny_reason = "RDPEGFX not live";
+  } else if (!gfx->surface_created || gfx->force_full_present ||
+             gfx->dirty_baseline_required) {
+    deny_reason = "baseline required";
+  } else if (gfx->dirty_suspended_for_no_ack) {
+    deny_reason = "suspended waiting for ack";
+  } else if (gfx->dirty_in_flight_frames >= max_in_flight) {
+    deny_reason = "in-flight limit reached";
+  } else if ((snapshot->generation != 0) &&
+             (snapshot->generation <= gfx->dirty_last_sent_generation)) {
+    deny_reason = "generation already sent";
+  } else if ((gfx->dirty_reset_generation != 0) &&
+             (snapshot->generation <= gfx->dirty_reset_generation)) {
+    deny_reason = "reset generation requires baseline";
+  } else {
+    allowed = TRUE;
+  }
+
+  LeaveCriticalSection(&gfx->lock);
+
+out:
+  if (!allowed && reason)
+    *reason = deny_reason ? deny_reason : "dirty update denied";
+  return allowed;
+}
+
 BOOL viewer_gfx_pipeline_send_snapshot(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot) {
@@ -636,6 +694,11 @@ BOOL viewer_gfx_pipeline_send_snapshot(
     gfx->force_full_present = FALSE;
     gfx->last_sent_frame_id = frame_id;
     gfx->next_frame_id = frame_id + 1U;
+    gfx->dirty_last_sent_generation = snapshot->generation;
+    gfx->dirty_baseline_required = FALSE;
+    gfx->dirty_updates_enabled = TRUE;
+    if (gfx->dirty_max_in_flight_frames == 0)
+      gfx->dirty_max_in_flight_frames = 1;
   } else {
     gfx->rdpgfx_error_count++;
     gfx->rdpgfx_consecutive_errors++;
