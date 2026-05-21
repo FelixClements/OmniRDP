@@ -1,7 +1,96 @@
 #include "viewer_gfx_pipeline.h"
 
+#include <freerdp/codec/color.h>
 #include <stdio.h>
 #include <string.h>
+
+typedef enum {
+  TEST_SEND_RESET = 1,
+  TEST_SEND_CREATE,
+  TEST_SEND_MAP,
+  TEST_SEND_START,
+  TEST_SEND_SURFACE,
+  TEST_SEND_END
+} TestSendOp;
+
+static TestSendOp g_send_order[8] = {0};
+static UINT32 g_send_count = 0;
+static UINT g_fail_on_send = 0;
+static RDPGFX_CREATE_SURFACE_PDU g_last_create = {0};
+static RDPGFX_SURFACE_COMMAND g_last_surface = {0};
+static const MONITOR_DEF *g_expected_reset_source = NULL;
+static MONITOR_DEF g_last_reset_monitor = {0};
+
+static UINT test_record_send(TestSendOp op) {
+  g_send_order[g_send_count++] = op;
+  if (g_fail_on_send == g_send_count)
+    return ERROR_INTERNAL_ERROR;
+  return CHANNEL_RC_OK;
+}
+
+static UINT test_reset_graphics(RdpgfxServerContext *context,
+                                const RDPGFX_RESET_GRAPHICS_PDU *reset) {
+  (void)context;
+  if (!reset || (reset->monitorCount != 1) || !reset->monitorDefArray)
+    return ERROR_INTERNAL_ERROR;
+  if (g_expected_reset_source &&
+      (reset->monitorDefArray == g_expected_reset_source))
+    return ERROR_INTERNAL_ERROR;
+  g_last_reset_monitor = reset->monitorDefArray[0];
+  return test_record_send(TEST_SEND_RESET);
+}
+
+static UINT test_create_surface(RdpgfxServerContext *context,
+                                const RDPGFX_CREATE_SURFACE_PDU *create) {
+  (void)context;
+  if (!create)
+    return ERROR_INTERNAL_ERROR;
+  g_last_create = *create;
+  return test_record_send(TEST_SEND_CREATE);
+}
+
+static UINT test_map_surface(RdpgfxServerContext *context,
+                             const RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU *map) {
+  (void)context;
+  if (!map)
+    return ERROR_INTERNAL_ERROR;
+  return test_record_send(TEST_SEND_MAP);
+}
+
+static UINT test_start_frame(RdpgfxServerContext *context,
+                             const RDPGFX_START_FRAME_PDU *start) {
+  (void)context;
+  if (!start)
+    return ERROR_INTERNAL_ERROR;
+  return test_record_send(TEST_SEND_START);
+}
+
+static UINT test_surface_command(RdpgfxServerContext *context,
+                                 const RDPGFX_SURFACE_COMMAND *cmd) {
+  (void)context;
+  if (!cmd)
+    return ERROR_INTERNAL_ERROR;
+  g_last_surface = *cmd;
+  return test_record_send(TEST_SEND_SURFACE);
+}
+
+static UINT test_end_frame(RdpgfxServerContext *context,
+                           const RDPGFX_END_FRAME_PDU *end) {
+  (void)context;
+  if (!end)
+    return ERROR_INTERNAL_ERROR;
+  return test_record_send(TEST_SEND_END);
+}
+
+static void reset_send_recorder(void) {
+  memset(g_send_order, 0, sizeof(g_send_order));
+  memset(&g_last_create, 0, sizeof(g_last_create));
+  memset(&g_last_surface, 0, sizeof(g_last_surface));
+  memset(&g_last_reset_monitor, 0, sizeof(g_last_reset_monitor));
+  g_expected_reset_source = NULL;
+  g_send_count = 0;
+  g_fail_on_send = 0;
+}
 
 RdpgfxServerContext *rdpgfx_server_context_new(HANDLE vcm) {
   (void)vcm;
@@ -60,15 +149,30 @@ static BOOL init_test_viewer(Viewer *viewer, UINT32 width, UINT32 height) {
   viewer->gfx.negotiated_height = height;
   if (!InitializeCriticalSectionAndSpinCount(&viewer->gfx.lock, 4000))
     return FALSE;
+  if (!InitializeCriticalSectionAndSpinCount(&viewer->send_lock, 4000)) {
+    DeleteCriticalSection(&viewer->gfx.lock);
+    return FALSE;
+  }
   viewer->gfx.initialized = TRUE;
   return TRUE;
 }
 
 static void uninit_test_viewer(Viewer *viewer) {
   if (viewer && viewer->gfx.initialized) {
+    DeleteCriticalSection(&viewer->send_lock);
     DeleteCriticalSection(&viewer->gfx.lock);
     memset(viewer, 0, sizeof(*viewer));
   }
+}
+
+static void init_test_rdpgfx(RdpgfxServerContext *rdpgfx) {
+  memset(rdpgfx, 0, sizeof(*rdpgfx));
+  rdpgfx->ResetGraphics = test_reset_graphics;
+  rdpgfx->CreateSurface = test_create_surface;
+  rdpgfx->MapSurfaceToOutput = test_map_surface;
+  rdpgfx->StartFrame = test_start_frame;
+  rdpgfx->SurfaceCommand = test_surface_command;
+  rdpgfx->EndFrame = test_end_frame;
 }
 
 static int test_activate_rejects_null_inputs(void) {
@@ -169,7 +273,7 @@ static int test_fallback_state_does_not_enable_rdpegfx(void) {
   return ok;
 }
 
-static int test_snapshot_placeholder_validation_and_no_send(void) {
+static int test_snapshot_validation_rejects_not_ready(void) {
   ViewerServer server = {0};
   Viewer viewer = {0};
   ViewerFramebufferSnapshot snapshot = {0};
@@ -194,23 +298,156 @@ static int test_snapshot_placeholder_validation_and_no_send(void) {
   snapshot.width = 2;
   snapshot.height = 2;
   snapshot.stride = 8;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
   snapshot.pixel_bytes = sizeof(pixels);
   viewer.gfx.last_sent_frame_id = 5;
   viewer.gfx.last_ack_frame_id = 4;
-  ok = ok && expect_true(
-                 viewer_gfx_pipeline_send_snapshot(&server, &viewer, &snapshot),
-                 "snapshot placeholder accepts valid shape");
-  ok = ok && expect_uint32(viewer.gfx.surface_width, 2,
-                           "snapshot records intended width");
-  ok = ok && expect_uint32(viewer.gfx.surface_height, 2,
-                           "snapshot records intended height");
+  ok = ok && expect_true(!viewer_gfx_pipeline_send_snapshot(&server, &viewer,
+                                                            &snapshot),
+                         "snapshot rejects missing RDPEGFX context/caps");
   ok = ok && expect_uint32(viewer.gfx.last_sent_frame_id, 5,
-                           "snapshot does not send frame");
+                           "not-ready snapshot does not send frame");
   ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 4,
                            "snapshot does not ack/migrate frames");
   ok = ok && expect_true(!viewer.gfx.surface_created,
                          "snapshot does not create surface");
 
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_snapshot_sends_full_frame_baseline_order(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[16] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 2, 2), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  snapshot.pixels = pixels;
+  snapshot.width = 2;
+  snapshot.height = 2;
+  snapshot.stride = 8;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixel_bytes = sizeof(pixels);
+  viewer.gfx.rdpgfx = &rdpgfx;
+  viewer.gfx.caps_ready = TRUE;
+  viewer.gfx.use_rdpgfx = TRUE;
+  viewer.gfx.channel_opened = TRUE;
+  viewer.gfx.next_frame_id = 9;
+
+  reset_send_recorder();
+  ok = ok && expect_true(
+                 viewer_gfx_pipeline_send_snapshot(&server, &viewer, &snapshot),
+                 "snapshot sends full-frame baseline");
+  ok = ok && expect_uint32(g_send_count, 6, "six send callbacks");
+  ok = ok && expect_uint32(g_send_order[0], TEST_SEND_RESET, "reset first");
+  ok = ok && expect_uint32(g_send_order[1], TEST_SEND_CREATE, "create second");
+  ok = ok && expect_uint32(g_send_order[2], TEST_SEND_MAP, "map third");
+  ok = ok && expect_uint32(g_send_order[3], TEST_SEND_START, "start fourth");
+  ok = ok && expect_uint32(g_send_order[4], TEST_SEND_SURFACE, "surface fifth");
+  ok = ok && expect_uint32(g_send_order[5], TEST_SEND_END, "end sixth");
+  ok = ok && expect_uint32(g_last_create.pixelFormat,
+                           GFX_PIXEL_FORMAT_XRGB_8888, "wire format");
+  ok = ok && expect_uint32(g_last_surface.format, PIXEL_FORMAT_BGRX32,
+                           "surface command FreeRDP format");
+  ok = ok && expect_uint32(g_last_surface.codecId, RDPGFX_CODECID_UNCOMPRESSED,
+                           "uncompressed codec");
+  ok = ok && expect_uint32(viewer.gfx.last_sent_frame_id, 9,
+                           "last sent frame updated");
+  ok = ok &&
+       expect_uint32(viewer.gfx.next_frame_id, 10, "next frame incremented");
+  ok = ok && expect_true(viewer.gfx.surface_created, "surface marked created");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_snapshot_send_failure_propagates(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[16] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 2, 2), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  snapshot.pixels = pixels;
+  snapshot.width = 2;
+  snapshot.height = 2;
+  snapshot.stride = 8;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixel_bytes = sizeof(pixels);
+  viewer.gfx.rdpgfx = &rdpgfx;
+  viewer.gfx.caps_ready = TRUE;
+  viewer.gfx.use_rdpgfx = TRUE;
+  viewer.gfx.channel_opened = TRUE;
+  viewer.gfx.next_frame_id = 4;
+
+  reset_send_recorder();
+  g_fail_on_send = 3;
+  ok = ok && expect_true(!viewer_gfx_pipeline_send_snapshot(&server, &viewer,
+                                                            &snapshot),
+                         "send failure propagates");
+  ok = ok && expect_uint32(g_send_count, 3, "stops at failing callback");
+  ok = ok && expect_uint32(viewer.gfx.last_sent_frame_id, 0,
+                           "failed send does not update frame");
+  ok = ok && expect_true(!viewer.gfx.surface_created,
+                         "failed send does not mark surface created");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_surface_preamble_deep_copies_reset_monitors(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  freerdp_peer peer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  MONITOR_DEF monitors[1] = {0};
+  int ok = 1;
+
+  monitors[0].left = 0;
+  monitors[0].top = 0;
+  monitors[0].right = 799;
+  monitors[0].bottom = 599;
+  monitors[0].flags = MONITOR_PRIMARY;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 800, 600), "viewer init");
+  ok = ok && expect_true(
+                 InitializeCriticalSectionAndSpinCount(&server.gfx.lock, 4000),
+                 "server gfx lock init");
+  init_test_rdpgfx(&rdpgfx);
+  viewer.peer = &peer;
+  viewer.gfx.rdpgfx = &rdpgfx;
+  viewer.gfx.use_rdpgfx = TRUE;
+  server.gfx.has_latest_reset_graphics = TRUE;
+  server.gfx.latest_reset_graphics.width = 800;
+  server.gfx.latest_reset_graphics.height = 600;
+  server.gfx.latest_reset_graphics.monitorCount = 1;
+  server.gfx.latest_reset_graphics.monitorDefArray = monitors;
+
+  reset_send_recorder();
+  g_expected_reset_source = monitors;
+  ok = ok &&
+       expect_true(viewer_gfx_pipeline_send_surface_preamble(&server, &viewer),
+                   "surface preamble sends reset");
+  ok = ok && expect_uint32(g_send_count, 1, "only reset sent");
+  ok = ok && expect_uint32(g_send_order[0], TEST_SEND_RESET, "reset sent");
+  ok = ok && expect_uint32((UINT32)g_last_reset_monitor.right, 799,
+                           "copied monitor right");
+  ok = ok && expect_uint32((UINT32)g_last_reset_monitor.bottom, 599,
+                           "copied monitor bottom");
+  ok = ok && expect_uint32((UINT32)g_last_reset_monitor.flags, MONITOR_PRIMARY,
+                           "copied monitor flags");
+
+  DeleteCriticalSection(&server.gfx.lock);
+  viewer.gfx.rdpgfx = NULL;
   uninit_test_viewer(&viewer);
   return ok;
 }
@@ -224,7 +461,13 @@ int main(void) {
     return 1;
   if (!test_fallback_state_does_not_enable_rdpegfx())
     return 1;
-  if (!test_snapshot_placeholder_validation_and_no_send())
+  if (!test_snapshot_validation_rejects_not_ready())
+    return 1;
+  if (!test_snapshot_sends_full_frame_baseline_order())
+    return 1;
+  if (!test_snapshot_send_failure_propagates())
+    return 1;
+  if (!test_surface_preamble_deep_copies_reset_monitors())
     return 1;
   return 0;
 }

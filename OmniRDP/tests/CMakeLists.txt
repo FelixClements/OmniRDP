@@ -27,6 +27,7 @@ add_executable(test_viewer_publisher
 add_executable(test_viewer_gfx_pipeline
     test_viewer_gfx_pipeline.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_pipeline.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_uncompressed.c
     ${CMAKE_SOURCE_DIR}/src/viewer_internal.c
     ${CMAKE_SOURCE_DIR}/src/platform_compat.c
 )

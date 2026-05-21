@@ -201,8 +201,8 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 10,
-      "passes": false,
-      "notes": "First story allowed to emit new viewer RDPEGFX PDUs. Do not enable backend GFX or add incremental dirty updates here. This is a higher-risk story; split reset/surface setup, full-frame encode, and send/fallback into separate Ralph iterations if review shows it is too large."
+      "passes": true,
+      "notes": "Completed: viewer.gfx.enabled is an explicit default-off gate. When enabled, viewer RDPEGFX no longer depends on backend GFX and uses a canonical framebuffer snapshot for the baseline. viewer_server coordinates activation, snapshots, and per-viewer classic fallback; viewer_gfx_pipeline owns ResetGraphics/CreateSurface/MapSurfaceToOutput/StartFrame/uncompressed SurfaceCommand/EndFrame sends with viewer-local surface/frame IDs. Tests cover config default/enable parsing, disabled/not-ready no-send behavior, successful send ordering and formats, and callback failure propagation. No dirty/incremental updates, backend GFX enablement, non-uncompressed codecs, or ACK pacing were added."
     },
     {
       "id": "US-011",

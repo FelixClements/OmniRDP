@@ -665,6 +665,11 @@ int instance_runner_main(int argc, char *argv[]) {
         inst->viewer_classic_latest_state_max_queue_depth,
         inst->viewer_classic_latest_state_max_queue_bytes);
 
+  viewer_server_set_gfx_enabled(server,
+                                inst->viewer_gfx_enabled ? TRUE : FALSE);
+  LOG_I("instance_runner", "Applied viewer GFX gate: enabled=%s",
+        bool_str(inst->viewer_gfx_enabled));
+
   /* Register FreeRDP WTS API */
   {
     extern const WtsApiFunctionTable *FreeRDP_InitWtsApi(void);

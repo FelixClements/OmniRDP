@@ -50,6 +50,7 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->viewer_late_join_refresh_deadline_ms = 5000;
   cfg->viewer_late_join_replay_max_frames = 4;
   cfg->viewer_throttle_max_updates_per_sec = 0;
+  cfg->viewer_gfx_enabled = 0;
   cfg->viewer_classic_latest_state_enabled = 0;
   cfg->viewer_classic_latest_state_max_queue_depth = 0;
   cfg->viewer_classic_latest_state_max_queue_bytes = 0;
@@ -195,6 +196,8 @@ static int parse_one_instance(const IniFile *ini, const char *name,
   inst->viewer_throttle_max_updates_per_sec =
       ini_get_uint(ini, section, "viewer.throttle_max_updates_per_sec",
                    inst->viewer_throttle_max_updates_per_sec);
+  inst->viewer_gfx_enabled = ini_get_bool(ini, section, "viewer.gfx.enabled",
+                                          inst->viewer_gfx_enabled);
   inst->viewer_classic_latest_state_enabled =
       ini_get_bool(ini, section, "viewer.classic_latest_state_enabled",
                    inst->viewer_classic_latest_state_enabled);

@@ -291,6 +291,7 @@ struct ViewerServer {
   char *cert_path; /* TLS certificate path (config or NULL for default) */
   char *key_path;  /* TLS key path (config or NULL for default) */
   ViewerSecurityConfig security;
+  BOOL viewer_gfx_enabled;
 };
 
 ViewerServer *viewer_server_init(const char *bind_address, UINT16 port,
@@ -310,6 +311,8 @@ void viewer_server_set_slow_disconnect(ViewerServer *server, BOOL enabled,
 void viewer_server_set_classic_policy(
     ViewerServer *server,
     const ViewerPublisherClassicPolicyConfig *classic_policy);
+
+void viewer_server_set_gfx_enabled(ViewerServer *server, BOOL enabled);
 
 void viewer_server_stop(ViewerServer *server);
 
