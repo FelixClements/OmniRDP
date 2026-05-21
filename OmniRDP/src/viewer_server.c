@@ -3616,6 +3616,10 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
   if (!server || !viewer || !server->viewer_gfx_enabled)
     return TRUE;
 
+  if (viewer_gfx_pipeline_poll_dirty_pacing(viewer, now, &reason) !=
+      VIEWER_GFX_DIRTY_PACING_OK)
+    return TRUE;
+
   EnterCriticalSection(&viewer->gfx.lock);
   last_sent_generation = viewer->gfx.dirty_last_sent_generation;
   LeaveCriticalSection(&viewer->gfx.lock);

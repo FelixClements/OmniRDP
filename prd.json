@@ -264,8 +264,8 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 13,
-      "passes": false,
-      "notes": "Future story for no-ACK timeout scanning and suspend/fallback hardening."
+      "passes": true,
+      "notes": "Completed: dirty frame send timestamps are tracked in bounded per-viewer mapping state, dirty pacing polling suspends per viewer after the bounded ACK timeout, eligibility denies while suspended, matching ACKs clear mapping and unsuspend once all dirty frames are acknowledged, stale ACKs are ignored, and baseline/reset clear mappings, timing metadata, and suspension. No global throttling, disconnect policy, backend GFX, backend replay changes, codecs, or compression changes were added."
     },
     {
       "id": "US-014",

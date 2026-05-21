@@ -28,6 +28,12 @@ typedef struct {
   const char *begin_join_reason;
 } ViewerGfxPipelineCapsResult;
 
+typedef enum {
+  VIEWER_GFX_DIRTY_PACING_OK = 0,
+  VIEWER_GFX_DIRTY_PACING_SUSPENDED,
+  VIEWER_GFX_DIRTY_PACING_INVALID
+} ViewerGfxDirtyPacingStatus;
+
 BOOL viewer_gfx_pipeline_post_connect_locked(
     ViewerServer *server, Viewer *viewer, freerdp_peer *peer, BOOL gfx_enabled,
     ViewerGfxFrameAcknowledgeCallback frame_acknowledge);
@@ -47,6 +53,9 @@ BOOL viewer_gfx_pipeline_dirty_update_allowed(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot, const char **reason);
 void viewer_gfx_pipeline_reset_dirty_state_locked(ViewerGraphicsContext *gfx);
+ViewerGfxDirtyPacingStatus
+viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
+                                      const char **reason);
 BOOL viewer_gfx_pipeline_send_dirty_update(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot);

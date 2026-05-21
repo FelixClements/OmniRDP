@@ -617,6 +617,8 @@ static int test_dirty_update_send_order_and_ack(void) {
                            "in-flight incremented");
   ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_generation, 30,
                            "sent generation recorded");
+  ok = ok && expect_true(viewer.gfx.dirty_frame_sent_ts[0] != 0,
+                         "dirty send timestamp recorded");
   ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
                              &server, &viewer, &snapshot, &reason),
                          "in-flight limit denies when max set to one later");
@@ -632,6 +634,118 @@ static int test_dirty_update_send_order_and_ack(void) {
 
   viewer.gfx.rdpgfx = NULL;
   uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_pacing_timeout_suspend_and_ack_recovery(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 80, 1);
+  const char *reason = NULL;
+  UINT64 sent_ts = 0;
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 50;
+
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &snapshot),
+                         "dirty send for pacing");
+  sent_ts = viewer.gfx.dirty_frame_sent_ts[0];
+  ok = ok && expect_true(sent_ts != 0, "dirty timestamp captured");
+  ok = ok && expect_uint32(
+                 viewer_gfx_pipeline_poll_dirty_pacing(
+                     &viewer, sent_ts + VIEWER_GFX_DIRTY_ACK_TIMEOUT_MS - 1U,
+                     &reason),
+                 VIEWER_GFX_DIRTY_PACING_OK, "before timeout remains ok");
+  ok = ok &&
+       expect_uint32(
+           viewer_gfx_pipeline_poll_dirty_pacing(
+               &viewer, sent_ts + VIEWER_GFX_DIRTY_ACK_TIMEOUT_MS, &reason),
+           VIEWER_GFX_DIRTY_PACING_SUSPENDED, "timeout suspends dirty pacing");
+  ok = ok && expect_true(viewer.gfx.dirty_suspended_for_no_ack,
+                         "dirty suspended flag set");
+  snapshot.generation = 81;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "eligibility denied while suspended");
+  viewer_gfx_pipeline_handle_frame_ack(&viewer, 999);
+  ok = ok && expect_true(viewer.gfx.dirty_suspended_for_no_ack,
+                         "stale ack does not unsuspend");
+  viewer_gfx_pipeline_handle_frame_ack(&viewer, 50);
+  ok = ok && expect_true(!viewer.gfx.dirty_suspended_for_no_ack,
+                         "matching ack clears suspension");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "matching ack clears in-flight");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_pacing_baseline_reset_and_per_viewer_isolation(void) {
+  ViewerServer server = {0};
+  Viewer viewer_a = {0};
+  Viewer viewer_b = {0};
+  RdpgfxServerContext rdpgfx_a = {0};
+  RdpgfxServerContext rdpgfx_b = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot dirty = make_dirty_snapshot(pixels, 90, 1);
+  ViewerFramebufferSnapshot baseline = make_dirty_snapshot(pixels, 91, 1);
+  UINT64 sent_ts = 0;
+  const char *reason = NULL;
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer_a, 4, 4), "viewer A init");
+  ok = ok && expect_true(init_test_viewer(&viewer_b, 4, 4), "viewer B init");
+  init_test_rdpgfx(&rdpgfx_a);
+  init_test_rdpgfx(&rdpgfx_b);
+  configure_dirty_eligible_viewer(&server, &viewer_a, &rdpgfx_a);
+  configure_dirty_eligible_viewer(&server, &viewer_b, &rdpgfx_b);
+  viewer_a.gfx.next_frame_id = 60;
+  viewer_b.gfx.next_frame_id = 70;
+
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(
+                             &server, &viewer_a, &dirty),
+                         "viewer A dirty send");
+  sent_ts = viewer_a.gfx.dirty_frame_sent_ts[0];
+  ok = ok &&
+       expect_uint32(
+           viewer_gfx_pipeline_poll_dirty_pacing(
+               &viewer_a, sent_ts + VIEWER_GFX_DIRTY_ACK_TIMEOUT_MS, &reason),
+           VIEWER_GFX_DIRTY_PACING_SUSPENDED, "viewer A timeout suspends");
+  ok = ok &&
+       expect_uint32(
+           viewer_gfx_pipeline_poll_dirty_pacing(
+               &viewer_b, sent_ts + VIEWER_GFX_DIRTY_ACK_TIMEOUT_MS, &reason),
+           VIEWER_GFX_DIRTY_PACING_OK, "viewer B pacing unaffected");
+
+  reset_send_recorder();
+  ok = ok && expect_true(viewer_gfx_pipeline_send_snapshot(&server, &viewer_a,
+                                                           &baseline),
+                         "baseline clears suspended pacing");
+  ok = ok && expect_true(!viewer_a.gfx.dirty_suspended_for_no_ack,
+                         "baseline clears suspension");
+  ok = ok && expect_uint32(viewer_a.gfx.dirty_in_flight_frames, 0,
+                           "baseline clears timing map");
+  viewer_a.gfx.dirty_suspended_for_no_ack = TRUE;
+  viewer_a.gfx.dirty_frame_sent_ts[0] = sent_ts;
+  viewer_a.gfx.dirty_frame_valid[0] = TRUE;
+  viewer_a.gfx.dirty_in_flight_frames = 1;
+  viewer_gfx_pipeline_reset_dirty_state_locked(&viewer_a.gfx);
+  ok = ok && expect_true(!viewer_a.gfx.dirty_suspended_for_no_ack,
+                         "reset clears suspension");
+  ok = ok && expect_uint64(viewer_a.gfx.dirty_frame_sent_ts[0], 0,
+                           "reset clears sent timestamp");
+
+  viewer_a.gfx.rdpgfx = NULL;
+  viewer_b.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer_a);
+  uninit_test_viewer(&viewer_b);
   return ok;
 }
 
@@ -766,6 +880,10 @@ int main(void) {
   if (!test_dirty_mapping_cleared_by_baseline())
     return 1;
   if (!test_dirty_mapping_cleared_by_reset())
+    return 1;
+  if (!test_dirty_pacing_timeout_suspend_and_ack_recovery())
+    return 1;
+  if (!test_dirty_pacing_baseline_reset_and_per_viewer_isolation())
     return 1;
   return 0;
 }

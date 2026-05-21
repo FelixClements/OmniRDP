@@ -47,8 +47,10 @@ viewer_gfx_pipeline_dirty_map_clear_locked(ViewerGraphicsContext *gfx) {
 
   memset(gfx->dirty_frame_ids, 0, sizeof(gfx->dirty_frame_ids));
   memset(gfx->dirty_frame_generations, 0, sizeof(gfx->dirty_frame_generations));
+  memset(gfx->dirty_frame_sent_ts, 0, sizeof(gfx->dirty_frame_sent_ts));
   memset(gfx->dirty_frame_valid, 0, sizeof(gfx->dirty_frame_valid));
   gfx->dirty_in_flight_frames = 0;
+  gfx->dirty_suspended_for_no_ack = FALSE;
 }
 
 void viewer_gfx_pipeline_reset_dirty_state_locked(ViewerGraphicsContext *gfx) {
@@ -647,11 +649,55 @@ void viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id) {
     gfx->dirty_frame_valid[i] = FALSE;
     gfx->dirty_frame_ids[i] = 0;
     gfx->dirty_frame_generations[i] = 0;
+    gfx->dirty_frame_sent_ts[i] = 0;
     if (gfx->dirty_in_flight_frames > 0)
       gfx->dirty_in_flight_frames--;
+    if (gfx->dirty_in_flight_frames == 0)
+      gfx->dirty_suspended_for_no_ack = FALSE;
     break;
   }
   LeaveCriticalSection(&gfx->lock);
+}
+
+ViewerGfxDirtyPacingStatus
+viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
+                                      const char **reason) {
+  ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
+  ViewerGfxDirtyPacingStatus status = VIEWER_GFX_DIRTY_PACING_OK;
+  UINT32 i = 0;
+
+  if (reason)
+    *reason = NULL;
+
+  if (!gfx || !gfx->initialized) {
+    if (reason)
+      *reason = "invalid GFX context";
+    return VIEWER_GFX_DIRTY_PACING_INVALID;
+  }
+
+  EnterCriticalSection(&gfx->lock);
+  if (gfx->dirty_suspended_for_no_ack) {
+    status = VIEWER_GFX_DIRTY_PACING_SUSPENDED;
+    if (reason)
+      *reason = "dirty updates suspended waiting for ack";
+  } else {
+    for (i = 0; i < VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY; i++) {
+      UINT64 sent_ts = gfx->dirty_frame_sent_ts[i];
+      if (!gfx->dirty_frame_valid[i] || (sent_ts == 0))
+        continue;
+
+      if (now >= sent_ts &&
+          ((now - sent_ts) >= VIEWER_GFX_DIRTY_ACK_TIMEOUT_MS)) {
+        gfx->dirty_suspended_for_no_ack = TRUE;
+        status = VIEWER_GFX_DIRTY_PACING_SUSPENDED;
+        if (reason)
+          *reason = "dirty ack timeout";
+        break;
+      }
+    }
+  }
+  LeaveCriticalSection(&gfx->lock);
+  return status;
 }
 
 BOOL viewer_gfx_pipeline_send_dirty_update(
@@ -724,6 +770,7 @@ BOOL viewer_gfx_pipeline_send_dirty_update(
   gfx->dirty_frame_valid[map_slot] = TRUE;
   gfx->dirty_frame_ids[map_slot] = frame_id;
   gfx->dirty_frame_generations[map_slot] = snapshot->generation;
+  gfx->dirty_frame_sent_ts[map_slot] = platform_get_timestamp_ms();
   gfx->dirty_in_flight_frames++;
   gfx->dirty_last_sent_generation = snapshot->generation;
   gfx->last_sent_frame_id = frame_id;
