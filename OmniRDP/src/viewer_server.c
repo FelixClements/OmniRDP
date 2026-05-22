@@ -1199,22 +1199,6 @@ static void viewer_gfx_publisher_state_uninit(ViewerGfxPublisherState *gfx) {
   memset(gfx, 0, sizeof(*gfx));
 }
 
-static UINT viewer_rdpgfx_frame_acknowledge(
-    RdpgfxServerContext *context,
-    const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frame_acknowledge) {
-  Viewer *viewer = context ? (Viewer *)context->custom : NULL;
-
-  if (!viewer || !frame_acknowledge)
-    return ERROR_INVALID_PARAMETER;
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer->gfx.last_ack_frame_id = frame_acknowledge->frameId;
-  viewer->gfx.last_presented_timestamp = platform_get_timestamp_ms();
-  LeaveCriticalSection(&viewer->gfx.lock);
-  viewer_gfx_pipeline_handle_frame_ack(viewer, frame_acknowledge->frameId);
-  return CHANNEL_RC_OK;
-}
-
 static BOOL viewer_pump_gfx(Viewer *viewer) {
   (void)viewer;
   return TRUE;
@@ -2478,9 +2462,8 @@ static BOOL peer_post_connect(freerdp_peer *peer) {
   viewer_graphics_context_reset(
       &viewer->gfx, g_viewer_server ? g_viewer_server->backend : NULL);
 
-  if (!viewer_gfx_pipeline_post_connect_locked(
-          g_viewer_server, viewer, peer, gfx_enabled,
-          viewer_rdpgfx_frame_acknowledge)) {
+  if (!viewer_gfx_pipeline_post_connect_locked(g_viewer_server, viewer, peer,
+                                               gfx_enabled)) {
     LeaveCriticalSection(&viewer->gfx.lock);
     return FALSE;
   }

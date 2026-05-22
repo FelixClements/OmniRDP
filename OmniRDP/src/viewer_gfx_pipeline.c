@@ -53,6 +53,43 @@ viewer_gfx_pipeline_dirty_map_clear_locked(ViewerGraphicsContext *gfx) {
   gfx->dirty_suspended_for_no_ack = FALSE;
 }
 
+static void
+viewer_gfx_pipeline_handle_frame_ack_locked(ViewerGraphicsContext *gfx,
+                                            UINT32 frame_id) {
+  UINT32 i = 0;
+
+  if (!gfx || !gfx->initialized || (frame_id == 0))
+    return;
+
+  for (i = 0; i < VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY; i++) {
+    if (!gfx->dirty_frame_valid[i] || (gfx->dirty_frame_ids[i] != frame_id))
+      continue;
+
+    gfx->dirty_last_acked_generation = gfx->dirty_frame_generations[i];
+    gfx->dirty_frame_valid[i] = FALSE;
+    gfx->dirty_frame_ids[i] = 0;
+    gfx->dirty_frame_generations[i] = 0;
+    gfx->dirty_frame_sent_ts[i] = 0;
+    if (gfx->dirty_in_flight_frames > 0)
+      gfx->dirty_in_flight_frames--;
+    if (gfx->dirty_in_flight_frames == 0)
+      gfx->dirty_suspended_for_no_ack = FALSE;
+    break;
+  }
+}
+
+static UINT viewer_gfx_pipeline_frame_acknowledge(
+    RdpgfxServerContext *context,
+    const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frame_acknowledge) {
+  Viewer *viewer = context ? (Viewer *)context->custom : NULL;
+
+  if (!viewer || !frame_acknowledge)
+    return ERROR_INVALID_PARAMETER;
+
+  return viewer_gfx_pipeline_handle_frame_ack(viewer,
+                                              frame_acknowledge->frameId);
+}
+
 void viewer_gfx_pipeline_reset_dirty_state_locked(ViewerGraphicsContext *gfx) {
   if (!gfx)
     return;
@@ -120,9 +157,9 @@ void viewer_gfx_pipeline_uninit(Viewer *viewer) {
   LeaveCriticalSection(&gfx->lock);
 }
 
-BOOL viewer_gfx_pipeline_post_connect_locked(
-    ViewerServer *server, Viewer *viewer, freerdp_peer *peer, BOOL gfx_enabled,
-    ViewerGfxFrameAcknowledgeCallback frame_acknowledge) {
+BOOL viewer_gfx_pipeline_post_connect_locked(ViewerServer *server,
+                                             Viewer *viewer, freerdp_peer *peer,
+                                             BOOL gfx_enabled) {
   RdpgfxServerContext *rdpgfx = NULL;
 
   if (!viewer || !peer || !peer->context)
@@ -156,7 +193,7 @@ BOOL viewer_gfx_pipeline_post_connect_locked(
   rdpgfx->custom = viewer;
   rdpgfx->rdpcontext = peer->context;
   rdpgfx->CapsAdvertise = viewer_gfx_pipeline_caps_advertise;
-  rdpgfx->FrameAcknowledge = frame_acknowledge;
+  rdpgfx->FrameAcknowledge = viewer_gfx_pipeline_frame_acknowledge;
   if (!rdpgfx->Initialize(rdpgfx, TRUE)) {
     rdpgfx_server_context_free(rdpgfx);
     return FALSE;
@@ -424,32 +461,6 @@ out:
   return allowed;
 }
 
-void viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id) {
-  ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
-  UINT32 i = 0;
-
-  if (!gfx || !gfx->initialized || (frame_id == 0))
-    return;
-
-  EnterCriticalSection(&gfx->lock);
-  for (i = 0; i < VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY; i++) {
-    if (!gfx->dirty_frame_valid[i] || (gfx->dirty_frame_ids[i] != frame_id))
-      continue;
-
-    gfx->dirty_last_acked_generation = gfx->dirty_frame_generations[i];
-    gfx->dirty_frame_valid[i] = FALSE;
-    gfx->dirty_frame_ids[i] = 0;
-    gfx->dirty_frame_generations[i] = 0;
-    gfx->dirty_frame_sent_ts[i] = 0;
-    if (gfx->dirty_in_flight_frames > 0)
-      gfx->dirty_in_flight_frames--;
-    if (gfx->dirty_in_flight_frames == 0)
-      gfx->dirty_suspended_for_no_ack = FALSE;
-    break;
-  }
-  LeaveCriticalSection(&gfx->lock);
-}
-
 ViewerGfxDirtyPacingStatus
 viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
                                       const char **reason) {
@@ -575,6 +586,21 @@ cleanup:
     free(commands);
   }
   return ok;
+}
+
+UINT viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id) {
+  ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
+
+  if (!gfx || !gfx->initialized)
+    return ERROR_INVALID_PARAMETER;
+
+  EnterCriticalSection(&gfx->lock);
+  gfx->last_ack_frame_id = frame_id;
+  gfx->last_presented_timestamp = platform_get_timestamp_ms();
+  if (frame_id != 0)
+    viewer_gfx_pipeline_handle_frame_ack_locked(gfx, frame_id);
+  LeaveCriticalSection(&gfx->lock);
+  return CHANNEL_RC_OK;
 }
 
 BOOL viewer_gfx_pipeline_send_snapshot(

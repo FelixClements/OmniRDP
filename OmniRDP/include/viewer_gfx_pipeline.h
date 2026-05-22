@@ -13,9 +13,6 @@ extern "C" {
 
 BOOL viewer_gfx_pipeline_init(Viewer *viewer);
 void viewer_gfx_pipeline_uninit(Viewer *viewer);
-typedef UINT (*ViewerGfxFrameAcknowledgeCallback)(
-    RdpgfxServerContext *context,
-    const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frame_acknowledge);
 
 #define VIEWER_GFX_PIPELINE_CAPS_ACTION_DISABLE_RDPEGFX 0x00000001U
 #define VIEWER_GFX_PIPELINE_CAPS_ACTION_ENTER_CLASSIC_FALLBACK 0x00000002U
@@ -34,9 +31,9 @@ typedef enum {
   VIEWER_GFX_DIRTY_PACING_INVALID
 } ViewerGfxDirtyPacingStatus;
 
-BOOL viewer_gfx_pipeline_post_connect_locked(
-    ViewerServer *server, Viewer *viewer, freerdp_peer *peer, BOOL gfx_enabled,
-    ViewerGfxFrameAcknowledgeCallback frame_acknowledge);
+BOOL viewer_gfx_pipeline_post_connect_locked(ViewerServer *server,
+                                             Viewer *viewer, freerdp_peer *peer,
+                                             BOOL gfx_enabled);
 UINT viewer_gfx_pipeline_caps_advertise(
     RdpgfxServerContext *context,
     const RDPGFX_CAPS_ADVERTISE_PDU *caps_advertise);
@@ -55,7 +52,7 @@ viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
 BOOL viewer_gfx_pipeline_send_dirty_update(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot);
-void viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id);
+UINT viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id);
 BOOL viewer_gfx_pipeline_send_snapshot(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot);

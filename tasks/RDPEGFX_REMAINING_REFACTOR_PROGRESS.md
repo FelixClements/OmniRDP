@@ -11,13 +11,13 @@ Archived prior loop evidence:
 
 ## Current status
 
-US-001 and US-002 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
+US-001 through US-003 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
 
 ## Story backlog
 
 1. `US-001` — complete — Quarantine backend RDPEGFX callbacks. Backend RDPEGFX callbacks no longer publish viewer GFX PDUs; CTest `test_backend_gfx_quarantine` enforces this boundary. Debug build and CTest passed on 2026-05-22.
 2. `US-002` — complete — Remove backend GFX replay production code. Production replay symbols, backend GFX publish APIs, replay-dependent late-join states/actions, replay ACK release behavior, and replay policy tests were removed; late-joining GFX viewers use the canonical framebuffer baseline and dirty-update path only. CTest `test_no_backend_gfx_replay` enforces forbidden production replay patterns. Debug build and CTest passed on 2026-05-22.
-3. `US-003` — pending — Move remaining FrameAcknowledge handling into pipeline.
+3. `US-003` — complete — Move remaining FrameAcknowledge handling into pipeline. The RDPEGFX FrameAcknowledge callback and remaining ACK bookkeeping now live in `viewer_gfx_pipeline`; `viewer_server.c` no longer writes ACK/presented timestamp state. Debug build and CTest passed on 2026-05-22.
 4. `US-004` — pending — Move canonical late-join GFX state/actions into pipeline.
 5. `US-005` — pending — Move viewer-local RDPEGFX surface/reset state into pipeline.
 6. `US-006` — pending — Shrink `viewer_server.h` public surface.

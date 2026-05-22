@@ -575,16 +575,54 @@ static int test_dirty_update_send_order_and_ack(void) {
                              &server, &viewer, &snapshot, &reason),
                          "in-flight limit denies when max set to one later");
 
-  viewer_gfx_pipeline_handle_frame_ack(&viewer, 999);
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 999),
+                           CHANNEL_RC_OK, "unknown ack accepted");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 999,
+                           "unknown ack records last ack");
+  ok = ok && expect_true(viewer.gfx.last_presented_timestamp != 0,
+                         "unknown ack records presented timestamp");
   ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
                            "unknown ack ignored");
-  viewer_gfx_pipeline_handle_frame_ack(&viewer, 11);
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
+                           "unknown ack does not advance generation");
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 11),
+                           CHANNEL_RC_OK, "matching ack accepted");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 11,
+                           "matching ack records last ack");
   ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
                            "matching ack decrements in-flight");
   ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 30,
                            "matching ack advances generation");
 
   viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_frame_ack_accepts_zero_without_dirty_state_change(void) {
+  Viewer viewer = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  viewer.gfx.last_ack_frame_id = 77;
+  viewer.gfx.last_presented_timestamp = 88;
+  viewer.gfx.dirty_frame_valid[0] = TRUE;
+  viewer.gfx.dirty_frame_ids[0] = 10;
+  viewer.gfx.dirty_frame_generations[0] = 20;
+  viewer.gfx.dirty_in_flight_frames = 1;
+
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 0),
+                           CHANNEL_RC_OK, "zero ack accepted");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 0,
+                           "zero ack records last ack");
+  ok = ok && expect_true(viewer.gfx.last_presented_timestamp != 0 &&
+                             viewer.gfx.last_presented_timestamp != 88,
+                         "zero ack updates presented timestamp");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
+                           "zero ack leaves dirty map unchanged");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
+                           "zero ack does not advance generation");
+
   uninit_test_viewer(&viewer);
   return ok;
 }
@@ -625,10 +663,14 @@ static int test_dirty_pacing_timeout_suspend_and_ack_recovery(void) {
   ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
                              &server, &viewer, &snapshot, &reason),
                          "eligibility denied while suspended");
-  viewer_gfx_pipeline_handle_frame_ack(&viewer, 999);
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 999),
+                           CHANNEL_RC_OK, "stale ack accepted");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 999,
+                           "stale ack records last ack");
   ok = ok && expect_true(viewer.gfx.dirty_suspended_for_no_ack,
                          "stale ack does not unsuspend");
-  viewer_gfx_pipeline_handle_frame_ack(&viewer, 50);
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 50),
+                           CHANNEL_RC_OK, "matching suspended ack accepted");
   ok = ok && expect_true(!viewer.gfx.dirty_suspended_for_no_ack,
                          "matching ack clears suspension");
   ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
@@ -720,7 +762,8 @@ static int test_dirty_update_multi_rect_and_failures(void) {
                          "multi dirty update sends");
   ok = ok && expect_uint32(g_send_count, 4, "start two surfaces end");
   ok = ok && expect_uint32(g_surface_count, 2, "two dirty surface commands");
-  viewer_gfx_pipeline_handle_frame_ack(&viewer, 20);
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 20),
+                           CHANNEL_RC_OK, "multi dirty ack accepted");
 
   snapshot.generation = 41;
   for (UINT32 fail = 1; fail <= 4; fail++) {
@@ -765,7 +808,10 @@ static int test_dirty_mapping_cleared_by_baseline(void) {
                  "baseline sends and clears dirty mapping");
   ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
                            "baseline clears dirty in-flight");
-  viewer_gfx_pipeline_handle_frame_ack(&viewer, 30);
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 30),
+                           CHANNEL_RC_OK, "pre-baseline stale ack accepted");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 30,
+                           "pre-baseline stale ack records last ack");
   ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
                            "stale pre-baseline dirty ack ignored");
 
@@ -795,7 +841,10 @@ static int test_dirty_mapping_cleared_by_reset(void) {
   viewer_gfx_pipeline_reset_dirty_state_locked(&viewer.gfx);
   ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
                            "reset clears dirty in-flight");
-  viewer_gfx_pipeline_handle_frame_ack(&viewer, 40);
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 40),
+                           CHANNEL_RC_OK, "pre-reset stale ack accepted");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 40,
+                           "pre-reset stale ack records last ack");
   ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
                            "stale pre-reset dirty ack ignored");
 
@@ -824,6 +873,8 @@ int main(void) {
   if (!test_dirty_update_eligibility_is_per_viewer())
     return 1;
   if (!test_dirty_update_send_order_and_ack())
+    return 1;
+  if (!test_frame_ack_accepts_zero_without_dirty_state_change())
     return 1;
   if (!test_dirty_update_multi_rect_and_failures())
     return 1;
