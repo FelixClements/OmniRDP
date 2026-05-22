@@ -139,7 +139,7 @@ Recommended next stories:
 11. `US-011` — completed/accepted; dirty-update planning state and publisher dirty snapshot coalescing added with no incremental sends.
 12. `US-012` — completed/accepted; one eligible ACK-paced uncompressed dirty RDPEGFX frame is sent per viewer loop with bounded dirty ACK mapping.
 13. `US-013` — completed/accepted; per-viewer dirty no-ACK timeout polling suspends/resumes dirty sends with bounded timestamp mappings.
-14. `US-014` — add experimental backend GFX decode-only gate.
+14. `US-014` — completed/accepted; backend RDPEGFX decode-only gate added behind default-off `backend.gfx.decode_only_enabled`.
 
 Backend GFX (`US-014`) is intentionally deferred later than the original implementation-plan order. The current sequence prioritizes the canonical framebuffer/viewer MVP and avoids mixing backend PDU replay with the new publisher path.
 

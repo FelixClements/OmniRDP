@@ -45,6 +45,7 @@ typedef struct {
   char backend_password[1024]; /* REQUIRED (may be dpapi:... or plaintext) */
   char backend_domain[256];    /* default: "" */
   unsigned int backend_connect_timeout_ms; /* default: 30000 */
+  int backend_gfx_decode_only_enabled;     /* default: 0 */
 
   /* Reconnect policy */
   int reconnect_enabled;                   /* default: 1 */

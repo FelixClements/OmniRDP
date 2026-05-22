@@ -285,7 +285,9 @@ static void backend_attach_rdpgfx_context(BackendClient *client,
 
   client->rdpgfx = rdpgfx;
   /* Save GDI's original GFX callbacks. GDI handles decoding and
-   * framebuffer updates. Our callbacks forward to viewers. */
+   * framebuffer updates. Our callbacks do not publish backend GFX PDUs when
+
+   * * the backend GFX gate is enabled because it is decode-only. */
   client->gdi_StartFrame = rdpgfx->StartFrame;
   client->gdi_EndFrame = rdpgfx->EndFrame;
   client->gdi_SurfaceCommand = rdpgfx->SurfaceCommand;
@@ -626,7 +628,8 @@ backend_rdpgfx_create_surface(RdpgfxClientContext *context,
   if (!client || !create_surface)
     return ERROR_INVALID_PARAMETER;
 
-  if (viewer_server_publish_gfx_create_surface(client, create_surface))
+  if (backend_gfx_pdu_publish_allowed(client) &&
+      viewer_server_publish_gfx_create_surface(client, create_surface))
     client->forwarded_gfx_create_surface_count++;
 
   return CHANNEL_RC_OK;
@@ -640,7 +643,8 @@ backend_rdpgfx_delete_surface(RdpgfxClientContext *context,
   if (!client || !delete_surface)
     return ERROR_INVALID_PARAMETER;
 
-  if (viewer_server_publish_gfx_delete_surface(client, delete_surface))
+  if (backend_gfx_pdu_publish_allowed(client) &&
+      viewer_server_publish_gfx_delete_surface(client, delete_surface))
     client->forwarded_gfx_delete_surface_count++;
 
   return CHANNEL_RC_OK;
@@ -654,7 +658,8 @@ static UINT backend_rdpgfx_map_surface_to_output(
   if (!client || !map_surface_to_output)
     return ERROR_INVALID_PARAMETER;
 
-  if (viewer_server_publish_gfx_map_surface_to_output(client,
+  if (backend_gfx_pdu_publish_allowed(client) &&
+      viewer_server_publish_gfx_map_surface_to_output(client,
                                                       map_surface_to_output))
     client->forwarded_gfx_map_surface_to_output_count++;
 
@@ -672,7 +677,8 @@ backend_rdpgfx_start_frame(RdpgfxClientContext *context,
   if (client->gdi_StartFrame)
     ((pcRdpgfxStartFrame)client->gdi_StartFrame)(context, start_frame);
 
-  if (viewer_server_publish_gfx_start_frame(client, start_frame))
+  if (backend_gfx_pdu_publish_allowed(client) &&
+      viewer_server_publish_gfx_start_frame(client, start_frame))
     client->forwarded_gfx_start_frame_count++;
 
   return CHANNEL_RC_OK;
@@ -688,7 +694,8 @@ static UINT backend_rdpgfx_end_frame(RdpgfxClientContext *context,
   if (client->gdi_EndFrame)
     ((pcRdpgfxEndFrame)client->gdi_EndFrame)(context, end_frame);
 
-  if (viewer_server_publish_gfx_end_frame(client, end_frame))
+  if (backend_gfx_pdu_publish_allowed(client) &&
+      viewer_server_publish_gfx_end_frame(client, end_frame))
     client->forwarded_gfx_end_frame_count++;
 
   return CHANNEL_RC_OK;
@@ -719,7 +726,8 @@ static UINT backend_rdpgfx_surface_command(RdpgfxClientContext *context,
     backend_ingest_gdi_framebuffer(client, client->context, &dirty_rect, 1);
   }
 
-  if (viewer_server_publish_gfx_surface_command(client, cmd))
+  if (backend_gfx_pdu_publish_allowed(client) &&
+      viewer_server_publish_gfx_surface_command(client, cmd))
     client->forwarded_gfx_surface_command_count++;
 
   return CHANNEL_RC_OK;
@@ -749,7 +757,8 @@ backend_rdpgfx_reset_graphics(RdpgfxClientContext *context,
                                                generation);
   }
 
-  if (viewer_server_publish_gfx_reset_graphics(client, reset_graphics))
+  if (backend_gfx_pdu_publish_allowed(client) &&
+      viewer_server_publish_gfx_reset_graphics(client, reset_graphics))
     client->forwarded_gfx_reset_graphics_count++;
 
   return CHANNEL_RC_OK;
@@ -763,7 +772,8 @@ static UINT backend_rdpgfx_delete_encoding_context(
   if (!client || !delete_encoding_context)
     return ERROR_INVALID_PARAMETER;
 
-  if (viewer_server_publish_gfx_delete_encoding_context(
+  if (backend_gfx_pdu_publish_allowed(client) &&
+      viewer_server_publish_gfx_delete_encoding_context(
           client, delete_encoding_context))
     client->forwarded_gfx_delete_encoding_context_count++;
 
@@ -1822,6 +1832,30 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
                                 client->connect_timeout_ms);
   }
 
+  return TRUE;
+}
+
+BOOL backend_set_gfx_decode_only(BackendClient *client, BOOL enabled) {
+  rdpSettings *settings = NULL;
+
+  if (!client || !client->context || !client->context->settings)
+    return FALSE;
+
+  settings = client->context->settings;
+  client->backend_gfx_decode_only_enabled = enabled ? TRUE : FALSE;
+
+  freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline,
+                            client->backend_gfx_decode_only_enabled);
+  freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
+  freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
+  freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
+
+  if (client->backend_gfx_decode_only_enabled &&
+      !backend_prepare_rdpgfx_channels(client))
+    return FALSE;
+
+  WLog_INFO(TAG, "Backend RDPEGFX decode-only gate enabled=%s",
+            client->backend_gfx_decode_only_enabled ? "true" : "false");
   return TRUE;
 }
 

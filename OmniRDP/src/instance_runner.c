@@ -125,10 +125,12 @@ static void log_effective_instance_config(const SvcConfig *config,
         inst->reconnect_initial_delay_ms, inst->reconnect_max_delay_ms,
         inst->reconnect_backoff_multiplier);
   LOG_I("instance_runner",
-        "Config display/codecs: monitors=%u size=%ux%u depth=%u nscodec=%s "
+        "Config display/codecs: monitors=%u size=%ux%u depth=%u "
+        "backend_gfx_decode=%s nscodec=%s "
         "remote_fx=%s gfx=%s h264=%s avc444=%s avc444v2=%s frame_ack=%u",
         inst->display_monitor_count, inst->display_monitor_width,
         inst->display_monitor_height, inst->display_color_depth,
+        bool_str(inst->backend_gfx_decode_only_enabled),
         bool_str(inst->codec_nscodec), bool_str(inst->codec_remote_fx),
         bool_str(inst->codec_graphics_pipeline), bool_str(inst->codec_h264),
         bool_str(inst->codec_avc444), bool_str(inst->codec_avc444v2),
@@ -562,6 +564,15 @@ int instance_runner_main(int argc, char *argv[]) {
                          &security)) {
     LOG_E("instance_runner", "Failed to configure backend for '%s'",
           args.instance_name);
+    SecureZeroMemory(password, sizeof(password));
+    backend_free(client);
+    svc_config_free(config);
+    return 1;
+  }
+
+  if (!backend_set_gfx_decode_only(
+          client, inst->backend_gfx_decode_only_enabled ? TRUE : FALSE)) {
+    LOG_E("instance_runner", "Failed to configure backend GFX decode gate");
     SecureZeroMemory(password, sizeof(password));
     backend_free(client);
     svc_config_free(config);

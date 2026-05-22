@@ -283,8 +283,8 @@
         "ctest/tests pass, or unavailable tests are documented with the reason."
       ],
       "priority": 14,
-      "passes": false,
-      "notes": "Intentionally deferred later than the original implementation-plan order to prioritize the canonical framebuffer/viewer MVP and avoid mixing backend PDU replay with the new publisher path. Do not make backend PDU replay authoritative for viewer output."
+      "passes": true,
+      "notes": "Completed: added default-off backend.gfx.decode_only_enabled config/template plumbing and backend_gfx_decode_only_enabled field. instance_runner passes the gate to backend_set_gfx_decode_only, which toggles only backend FreeRDP_SupportGraphicsPipeline and keeps H264/AVC disabled. codec.graphics_pipeline remains reserved/no-op and independent. Backend RDPEGFX callbacks suppress viewer_server_publish_gfx_* when the gate is enabled, so backend GFX is decode-only and backend PDU replay/live events are not authoritative. Viewer GFX remains controlled only by viewer.gfx.enabled; no viewer caps/settings, publisher, pipeline, codec, backend replay authority, or backend-to-viewer mirroring changes were added."
     }
   ]
 }

@@ -37,6 +37,10 @@ add_executable(test_viewer_gfx_codec_uncompressed
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_uncompressed.c
 )
 
+add_executable(test_backend_gfx_decode_only
+    test_backend_gfx_decode_only.c
+)
+
 if(MSVC)
     set_source_files_properties(test_viewer_gfx_pipeline.c PROPERTIES
         COMPILE_OPTIONS /wd4273
@@ -168,6 +172,20 @@ set_target_properties(test_svc_config PROPERTIES
     C_STANDARD_REQUIRED ON
 )
 
+target_include_directories(test_backend_gfx_decode_only PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${FREERDP_ROOT}/include
+    ${FREERDP_ROOT}/winpr/include
+    ${FREERDP_BUILD}/include
+    ${FREERDP_BUILD}/winpr/include
+)
+
+set_target_properties(test_backend_gfx_decode_only PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+)
+
 add_test(NAME test_viewer_state
     COMMAND ${CMAKE_COMMAND}
         -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
@@ -232,3 +250,11 @@ add_test(NAME test_svc_config
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_svc_config PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_backend_gfx_decode_only
+    COMMAND ${CMAKE_COMMAND}
+        -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DTEST_EXECUTABLE_NAME=test_backend_gfx_decode_only${CMAKE_EXECUTABLE_SUFFIX}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
+)
+set_tests_properties(test_backend_gfx_decode_only PROPERTIES TIMEOUT 120)

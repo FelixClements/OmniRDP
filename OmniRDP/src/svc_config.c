@@ -35,6 +35,7 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->enabled = 1;
   cfg->backend_port = 3389;
   cfg->backend_connect_timeout_ms = 30000;
+  cfg->backend_gfx_decode_only_enabled = 0;
   cfg->reconnect_enabled = 1;
   cfg->reconnect_max_attempts = 10;
   cfg->reconnect_initial_delay_ms = 1000;
@@ -145,6 +146,9 @@ static int parse_one_instance(const IniFile *ini, const char *name,
   inst->backend_connect_timeout_ms =
       ini_get_uint(ini, section, "backend.connect_timeout_ms",
                    inst->backend_connect_timeout_ms);
+  inst->backend_gfx_decode_only_enabled =
+      ini_get_bool(ini, section, "backend.gfx.decode_only_enabled",
+                   inst->backend_gfx_decode_only_enabled);
 
   /* Reconnect policy */
   inst->reconnect_enabled =

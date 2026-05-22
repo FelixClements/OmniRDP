@@ -64,6 +64,7 @@ typedef struct BackendClient {
   RdpgfxClientContext *rdpgfx;
   BOOL rdpgfx_channel_open;
   BOOL rdpgfx_caps_confirmed;
+  BOOL backend_gfx_decode_only_enabled;
   PointerShapeCache *pointer_shape_cache;
   PointerShapeEntry *active_pointer_shape;
   CRITICAL_SECTION pointer_lock;
@@ -169,6 +170,11 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
                        const char *username, const char *password,
                        const char *domain,
                        const BackendSecurityConfig *security);
+BOOL backend_set_gfx_decode_only(BackendClient *client, BOOL enabled);
+static inline BOOL
+backend_gfx_pdu_publish_allowed(const BackendClient *client) {
+  return client && !client->backend_gfx_decode_only_enabled;
+}
 
 /**
  * @brief Connect to Windows Server
