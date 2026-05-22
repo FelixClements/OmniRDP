@@ -87,8 +87,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 4,
-      "passes": false,
-      "notes": "Viewer-local canonical late-join state only. Replay states/actions and replay ACK release were removed with US-002 and must not be reintroduced."
+      "passes": true,
+      "notes": "Completed: remaining canonical late-join activation/live/fallback transitions and coordinator action decisions moved into viewer_gfx_pipeline. viewer_server.c now coordinates framebuffer baseline sends, classic baseline enqueue/full-refresh side effects, and fallback outcomes from narrow pipeline actions. Tests cover activation actions, baseline step/finish, and fallback boundaries without replay ACK release. clang-format, JSON validation, git diff --check, Debug build, and CTest passed on 2026-05-22."
     },
     {
       "id": "US-005",

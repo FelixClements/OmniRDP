@@ -276,6 +276,145 @@ static int test_fallback_state_does_not_enable_rdpegfx(void) {
   return ok;
 }
 
+static int test_reset_join_state_clears_pipeline_owned_fields(void) {
+  ViewerGraphicsContext gfx = {0};
+  int ok = 1;
+
+  gfx.use_rdpgfx = TRUE;
+  gfx.rdpgfx_temporarily_disabled = TRUE;
+  gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
+  gfx.join_state = VIEWER_JOIN_STATE_REJECTED;
+  gfx.join_strategy = VIEWER_JOIN_STRATEGY_REJECT;
+  gfx.join_start_ts = 123;
+  gfx.last_activated_ts = 456;
+
+  viewer_gfx_pipeline_reset_join_state_locked(&gfx);
+  ok = ok && expect_true(!gfx.use_rdpgfx, "reset disables rdpgfx use");
+  ok = ok && expect_true(!gfx.rdpgfx_temporarily_disabled,
+                         "reset clears temporary disable");
+  ok = ok &&
+       expect_true(gfx.negotiation_outcome == VIEWER_GFX_NEGOTIATION_PENDING,
+                   "reset returns negotiation to pending");
+  ok = ok && expect_true(gfx.join_state == VIEWER_JOIN_STATE_NONE,
+                         "reset clears join state");
+  ok = ok && expect_true(gfx.join_strategy == VIEWER_JOIN_STRATEGY_NONE,
+                         "reset clears join strategy");
+  ok = ok &&
+       expect_uint64(gfx.join_start_ts, 0, "reset clears join start timestamp");
+  ok = ok && expect_uint64(gfx.last_activated_ts, 0,
+                           "reset clears activation timestamp");
+
+  return ok;
+}
+
+static void configure_join_ready_viewer(ViewerServer *server, Viewer *viewer) {
+  server->viewer_gfx_enabled = TRUE;
+  viewer->activated = TRUE;
+  viewer->gfx.post_connect_complete = TRUE;
+  viewer->gfx.drdynvc_state = DRDYNVC_STATE_READY;
+  viewer->gfx.channel_opened = TRUE;
+  viewer->gfx.caps_ready = TRUE;
+  viewer->gfx.use_rdpgfx = TRUE;
+  viewer->gfx.rdpgfx_temporarily_disabled = FALSE;
+  viewer->gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_RDPEGFX_READY;
+}
+
+static int test_peer_activation_sets_join_actions(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  ViewerGfxJoinResult result = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 640, 480), "viewer init");
+  configure_join_ready_viewer(&server, &viewer);
+  viewer.activated = FALSE;
+  ok = ok && expect_true(viewer_gfx_pipeline_activate(&server, &viewer),
+                         "activate succeeds");
+  viewer_gfx_pipeline_on_peer_activated(&viewer, 100, &result);
+  ok = ok && expect_true(viewer.gfx.ready, "peer activation marks gfx ready");
+  ok = ok && expect_true(viewer.gfx.join_state == VIEWER_JOIN_STATE_PENDING,
+                         "rdpgfx activation begins pending join");
+  ok = ok && expect_true(viewer.gfx.join_strategy == VIEWER_JOIN_STRATEGY_NONE,
+                         "rdpgfx activation uses no fallback strategy");
+  ok = ok && expect_uint64(viewer.gfx.join_start_ts, 100,
+                           "rdpgfx activation records join timestamp");
+  ok = ok && expect_uint32(result.actions, VIEWER_GFX_JOIN_ACTION_NONE,
+                           "rdpgfx activation waits for baseline step");
+
+  viewer.gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_PENDING;
+  viewer.gfx.join_state = VIEWER_JOIN_STATE_NONE;
+  viewer_gfx_pipeline_on_peer_activated(&viewer, 150, &result);
+  ok = ok && expect_true(viewer.gfx.join_state == VIEWER_JOIN_STATE_PENDING,
+                         "pending activation waits for caps");
+  ok = ok && expect_uint64(viewer.gfx.join_start_ts, 150,
+                           "pending activation records join timestamp");
+
+  uninit_test_viewer(&viewer);
+  memset(&viewer, 0, sizeof(viewer));
+  ok = ok && expect_true(init_test_viewer(&viewer, 640, 480), "viewer init 2");
+  viewer.gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
+  viewer_gfx_pipeline_on_peer_activated(&viewer, 200, &result);
+  ok = ok && expect_true(viewer.gfx.join_state == VIEWER_JOIN_STATE_LIVE,
+                         "classic activation finishes join");
+  ok = ok && expect_uint64(viewer.gfx.join_start_ts, 200,
+                           "classic activation records join timestamp");
+  ok =
+      ok && expect_uint32(
+                result.actions, VIEWER_GFX_JOIN_ACTION_ENQUEUE_CLASSIC_BASELINE,
+                "classic activation requests classic baseline coordination");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_step_join_and_baseline_result_transitions(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  ViewerGfxJoinResult result = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 640, 480), "viewer init");
+  configure_join_ready_viewer(&server, &viewer);
+  viewer.gfx.join_state = VIEWER_JOIN_STATE_PENDING;
+  viewer.gfx.join_strategy = VIEWER_JOIN_STRATEGY_NONE;
+  viewer_gfx_pipeline_step_join(&server, &viewer, 300, &result);
+  ok = ok && expect_uint32(result.actions, VIEWER_GFX_JOIN_ACTION_SEND_BASELINE,
+                           "pending rdpgfx join requests baseline");
+
+  viewer_gfx_pipeline_on_baseline_result(&viewer, 301, TRUE, &result);
+  ok = ok && expect_true(viewer.gfx.join_state == VIEWER_JOIN_STATE_LIVE,
+                         "successful baseline makes join live");
+  ok = ok && expect_true(viewer.gfx.join_strategy == VIEWER_JOIN_STRATEGY_NONE,
+                         "successful baseline clears join strategy");
+  ok = ok && expect_uint32(result.actions, VIEWER_GFX_JOIN_ACTION_NONE,
+                           "successful baseline has no fallback action");
+
+  viewer.gfx.join_state = VIEWER_JOIN_STATE_PENDING;
+  viewer.gfx.join_strategy = VIEWER_JOIN_STRATEGY_NONE;
+  viewer_gfx_pipeline_on_baseline_result(&viewer, 400, FALSE, &result);
+  ok = ok && expect_true(viewer.gfx.join_state == VIEWER_JOIN_STATE_PENDING,
+                         "failed baseline keeps fallback pending");
+  ok = ok && expect_true(viewer.gfx.join_strategy ==
+                             VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK,
+                         "failed baseline selects classic fallback strategy");
+  ok = ok &&
+       expect_true(!viewer.gfx.use_rdpgfx, "failed baseline disables rdpgfx");
+  ok = ok && expect_uint32(result.actions,
+                           VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK,
+                           "failed baseline requests fallback coordination");
+
+  configure_join_ready_viewer(&server, &viewer);
+  viewer.gfx.join_state = VIEWER_JOIN_STATE_PENDING;
+  viewer.gfx.join_strategy = VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK;
+  viewer_gfx_pipeline_step_join(&server, &viewer, 500, &result);
+  ok = ok && expect_uint32(result.actions,
+                           VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK,
+                           "classic fallback join requests fallback action");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
 static int test_snapshot_validation_rejects_not_ready(void) {
   ViewerServer server = {0};
   Viewer viewer = {0};
@@ -861,6 +1000,12 @@ int main(void) {
   if (!test_repeated_activation_is_idempotent())
     return 1;
   if (!test_fallback_state_does_not_enable_rdpegfx())
+    return 1;
+  if (!test_reset_join_state_clears_pipeline_owned_fields())
+    return 1;
+  if (!test_peer_activation_sets_join_actions())
+    return 1;
+  if (!test_step_join_and_baseline_result_transitions())
     return 1;
   if (!test_snapshot_validation_rejects_not_ready())
     return 1;

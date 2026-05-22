@@ -134,6 +134,220 @@ static const char *viewer_gfx_pipeline_join_state_name(ViewerJoinState state) {
   }
 }
 
+static const char *
+viewer_gfx_pipeline_join_strategy_name(ViewerJoinStrategy strategy) {
+  switch (strategy) {
+  case VIEWER_JOIN_STRATEGY_NONE:
+    return "none";
+  case VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK:
+    return "classic_fallback";
+  case VIEWER_JOIN_STRATEGY_REJECT:
+    return "reject";
+  default:
+    return "unknown";
+  }
+}
+
+static void
+viewer_gfx_pipeline_set_join_state_locked(Viewer *viewer, ViewerJoinState state,
+                                          ViewerJoinStrategy strategy,
+                                          const char *reason) {
+  ViewerJoinState old_state = VIEWER_JOIN_STATE_NONE;
+  ViewerJoinStrategy old_strategy = VIEWER_JOIN_STRATEGY_NONE;
+
+  if (!viewer)
+    return;
+
+  old_state = viewer->gfx.join_state;
+  old_strategy = viewer->gfx.join_strategy;
+  viewer->gfx.join_state = state;
+  viewer->gfx.join_strategy = strategy;
+
+  if ((old_state != state) || (old_strategy != strategy)) {
+    WLog_INFO(TAG, "Viewer %u join transition %s/%s -> %s/%s reason=%s",
+              viewer->id, viewer_gfx_pipeline_join_state_name(old_state),
+              viewer_gfx_pipeline_join_strategy_name(old_strategy),
+              viewer_gfx_pipeline_join_state_name(state),
+              viewer_gfx_pipeline_join_strategy_name(strategy),
+              reason ? reason : "unspecified");
+  }
+}
+
+static BOOL viewer_gfx_pipeline_handshake_ready_locked(const Viewer *viewer) {
+  return viewer && viewer->activated && viewer->gfx.post_connect_complete &&
+         (viewer->gfx.drdynvc_state == DRDYNVC_STATE_READY) &&
+         viewer->gfx.channel_opened && viewer->gfx.caps_ready &&
+         viewer_gfx_negotiation_is_rdpgfx_ready(&viewer->gfx) &&
+         !viewer->gfx.rdpgfx_temporarily_disabled;
+}
+
+void viewer_gfx_pipeline_join_result_clear(ViewerGfxJoinResult *result) {
+  if (result)
+    memset(result, 0, sizeof(*result));
+}
+
+void viewer_gfx_pipeline_begin_join_locked(Viewer *viewer, UINT64 now,
+                                           const char *reason) {
+  if (!viewer)
+    return;
+
+  viewer->gfx.join_start_ts = now;
+  viewer_gfx_pipeline_set_join_state_locked(viewer, VIEWER_JOIN_STATE_PENDING,
+                                            VIEWER_JOIN_STRATEGY_NONE, reason);
+}
+
+void viewer_gfx_pipeline_finish_join_locked(Viewer *viewer,
+                                            const char *reason) {
+  if (!viewer)
+    return;
+
+  viewer->gfx.last_activated_ts = platform_get_timestamp_ms();
+  viewer_gfx_pipeline_set_join_state_locked(viewer, VIEWER_JOIN_STATE_LIVE,
+                                            VIEWER_JOIN_STRATEGY_NONE, reason);
+}
+
+void viewer_gfx_pipeline_disable_rdpgfx_locked(Viewer *viewer) {
+  if (!viewer)
+    return;
+
+  viewer->gfx.ready = FALSE;
+  viewer->gfx.use_rdpgfx = FALSE;
+  viewer->gfx.caps_ready = FALSE;
+  viewer->gfx.rdpgfx_temporarily_disabled = TRUE;
+  viewer->gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
+}
+
+void viewer_gfx_pipeline_reset_join_state_locked(ViewerGraphicsContext *gfx) {
+  if (!gfx)
+    return;
+
+  gfx->use_rdpgfx = FALSE;
+  gfx->rdpgfx_temporarily_disabled = FALSE;
+  gfx->negotiation_outcome = VIEWER_GFX_NEGOTIATION_PENDING;
+  gfx->join_state = VIEWER_JOIN_STATE_NONE;
+  gfx->join_strategy = VIEWER_JOIN_STRATEGY_NONE;
+  gfx->join_start_ts = 0;
+  gfx->last_activated_ts = 0;
+}
+
+void viewer_gfx_pipeline_reject_join(Viewer *viewer, const char *reason) {
+  if (!viewer)
+    return;
+
+  EnterCriticalSection(&viewer->gfx.lock);
+  viewer_gfx_pipeline_set_join_state_locked(
+      viewer, VIEWER_JOIN_STATE_REJECTED, VIEWER_JOIN_STRATEGY_REJECT, reason);
+  LeaveCriticalSection(&viewer->gfx.lock);
+}
+
+static void
+viewer_gfx_pipeline_enter_classic_fallback_locked(Viewer *viewer, UINT64 now,
+                                                  const char *reason) {
+  if (!viewer)
+    return;
+
+  viewer_gfx_pipeline_disable_rdpgfx_locked(viewer);
+  viewer->gfx.join_start_ts = now;
+  viewer_gfx_pipeline_set_join_state_locked(
+      viewer, VIEWER_JOIN_STATE_PENDING, VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK,
+      reason);
+}
+
+void viewer_gfx_pipeline_enter_classic_fallback(Viewer *viewer, UINT64 now,
+                                                const char *reason,
+                                                ViewerGfxJoinResult *result) {
+  viewer_gfx_pipeline_join_result_clear(result);
+  if (!viewer)
+    return;
+
+  EnterCriticalSection(&viewer->gfx.lock);
+  viewer_gfx_pipeline_enter_classic_fallback_locked(viewer, now, reason);
+  LeaveCriticalSection(&viewer->gfx.lock);
+
+  if (result) {
+    result->actions = VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK;
+    result->classic_fallback_reason = reason;
+  }
+}
+
+void viewer_gfx_pipeline_on_baseline_result(Viewer *viewer, UINT64 now,
+                                            BOOL sent,
+                                            ViewerGfxJoinResult *result) {
+  viewer_gfx_pipeline_join_result_clear(result);
+  if (!viewer)
+    return;
+
+  EnterCriticalSection(&viewer->gfx.lock);
+  if (sent) {
+    viewer_gfx_pipeline_finish_join_locked(
+        viewer, "RDPEGFX framebuffer full-frame baseline sent");
+  } else
+    viewer_gfx_pipeline_enter_classic_fallback_locked(
+        viewer, now, "RDPEGFX framebuffer baseline failed");
+  LeaveCriticalSection(&viewer->gfx.lock);
+
+  if (!sent && result) {
+    result->actions = VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK;
+    result->classic_fallback_reason = "RDPEGFX framebuffer baseline failed";
+  }
+}
+
+void viewer_gfx_pipeline_on_peer_activated(Viewer *viewer, UINT64 now,
+                                           ViewerGfxJoinResult *result) {
+  viewer_gfx_pipeline_join_result_clear(result);
+  if (!viewer)
+    return;
+
+  EnterCriticalSection(&viewer->gfx.lock);
+  viewer->gfx.ready = TRUE;
+  if (viewer_gfx_negotiation_is_rdpgfx_ready(&viewer->gfx)) {
+    viewer_gfx_pipeline_begin_join_locked(
+        viewer, now, "peer activated for RDPEGFX late join");
+  } else if (viewer_gfx_activation_waits_for_rdpgfx_caps(&viewer->gfx)) {
+    viewer_gfx_pipeline_begin_join_locked(
+        viewer, now, "peer activated waiting for RDPEGFX caps confirmation");
+  } else {
+    viewer->gfx.join_start_ts = now;
+    viewer_gfx_pipeline_finish_join_locked(viewer,
+                                           "peer activated on classic path");
+    if (result)
+      result->actions = VIEWER_GFX_JOIN_ACTION_ENQUEUE_CLASSIC_BASELINE;
+  }
+  LeaveCriticalSection(&viewer->gfx.lock);
+}
+
+void viewer_gfx_pipeline_step_join(ViewerServer *server, Viewer *viewer,
+                                   UINT64 now, ViewerGfxJoinResult *result) {
+  ViewerJoinState state = VIEWER_JOIN_STATE_NONE;
+  ViewerJoinStrategy strategy = VIEWER_JOIN_STRATEGY_NONE;
+
+  (void)now;
+  viewer_gfx_pipeline_join_result_clear(result);
+  if (!server || !viewer || !result)
+    return;
+
+  EnterCriticalSection(&viewer->gfx.lock);
+  if (!viewer_gfx_pipeline_handshake_ready_locked(viewer)) {
+    LeaveCriticalSection(&viewer->gfx.lock);
+    return;
+  }
+  state = viewer->gfx.join_state;
+  strategy = viewer->gfx.join_strategy;
+  LeaveCriticalSection(&viewer->gfx.lock);
+
+  if (state == VIEWER_JOIN_STATE_LIVE)
+    return;
+  if (strategy == VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK) {
+    result->actions = VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK;
+    result->classic_fallback_reason = "caps or handshake fallback";
+    return;
+  }
+  if ((state == VIEWER_JOIN_STATE_PENDING) && server->viewer_gfx_enabled) {
+    result->actions = VIEWER_GFX_JOIN_ACTION_SEND_BASELINE;
+    result->log_reason = "RDPEGFX pending canonical baseline";
+  }
+}
+
 BOOL viewer_gfx_pipeline_init(Viewer *viewer) { return viewer != NULL; }
 
 void viewer_gfx_pipeline_uninit(Viewer *viewer) {
@@ -298,7 +512,7 @@ UINT viewer_gfx_pipeline_caps_advertise(
           "RDPEGFX caps confirmed after activation");
       WLog_INFO(TAG,
                 "Viewer %u RDPEGFX caps confirmed after activation; gating "
-                "live stream until replay/full refresh",
+                "live stream until framebuffer baseline",
                 viewer->id);
     }
   } else {

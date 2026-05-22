@@ -18,12 +18,23 @@ void viewer_gfx_pipeline_uninit(Viewer *viewer);
 #define VIEWER_GFX_PIPELINE_CAPS_ACTION_ENTER_CLASSIC_FALLBACK 0x00000002U
 #define VIEWER_GFX_PIPELINE_CAPS_ACTION_BEGIN_JOIN 0x00000004U
 
+#define VIEWER_GFX_JOIN_ACTION_NONE 0x00000000U
+#define VIEWER_GFX_JOIN_ACTION_SEND_BASELINE 0x00000001U
+#define VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK 0x00000002U
+#define VIEWER_GFX_JOIN_ACTION_ENQUEUE_CLASSIC_BASELINE 0x00000004U
+
 typedef struct {
   UINT32 actions;
   UINT channel_rc;
   const char *classic_fallback_reason;
   const char *begin_join_reason;
 } ViewerGfxPipelineCapsResult;
+
+typedef struct {
+  UINT32 actions;
+  const char *classic_fallback_reason;
+  const char *log_reason;
+} ViewerGfxJoinResult;
 
 typedef enum {
   VIEWER_GFX_DIRTY_PACING_OK = 0,
@@ -42,6 +53,23 @@ HANDLE viewer_gfx_pipeline_get_event_handle_locked(Viewer *viewer);
 BOOL viewer_gfx_pipeline_handle_messages_locked(
     Viewer *viewer, ViewerGfxPipelineCapsResult *caps_result);
 BOOL viewer_gfx_pipeline_activate(ViewerServer *server, Viewer *viewer);
+void viewer_gfx_pipeline_join_result_clear(ViewerGfxJoinResult *result);
+void viewer_gfx_pipeline_begin_join_locked(Viewer *viewer, UINT64 now,
+                                           const char *reason);
+void viewer_gfx_pipeline_finish_join_locked(Viewer *viewer, const char *reason);
+void viewer_gfx_pipeline_disable_rdpgfx_locked(Viewer *viewer);
+void viewer_gfx_pipeline_reset_join_state_locked(ViewerGraphicsContext *gfx);
+void viewer_gfx_pipeline_reject_join(Viewer *viewer, const char *reason);
+void viewer_gfx_pipeline_enter_classic_fallback(Viewer *viewer, UINT64 now,
+                                                const char *reason,
+                                                ViewerGfxJoinResult *result);
+void viewer_gfx_pipeline_on_baseline_result(Viewer *viewer, UINT64 now,
+                                            BOOL sent,
+                                            ViewerGfxJoinResult *result);
+void viewer_gfx_pipeline_on_peer_activated(Viewer *viewer, UINT64 now,
+                                           ViewerGfxJoinResult *result);
+void viewer_gfx_pipeline_step_join(ViewerServer *server, Viewer *viewer,
+                                   UINT64 now, ViewerGfxJoinResult *result);
 BOOL viewer_gfx_pipeline_dirty_update_allowed(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot, const char **reason);

@@ -90,9 +90,6 @@ static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
                                                  Viewer *viewer, UINT64 now);
 static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
                                              Viewer *viewer, UINT64 now);
-static void viewer_disable_rdpgfx_locked(Viewer *viewer);
-static void viewer_gfx_begin_join_locked(Viewer *viewer, UINT64 now,
-                                         const char *reason);
 static UINT64 viewer_perf_now_us(void);
 static BOOL viewer_should_log_bitmap_perf(UINT64 batch_count, UINT64 publish_us,
                                           UINT32 send_failed_count);
@@ -121,13 +118,13 @@ static void viewer_gfx_apply_caps_result_locked(
     return;
 
   if (caps_result->actions & VIEWER_GFX_PIPELINE_CAPS_ACTION_DISABLE_RDPEGFX)
-    viewer_disable_rdpgfx_locked(viewer);
+    viewer_gfx_pipeline_disable_rdpgfx_locked(viewer);
 
   if (caps_result->actions & VIEWER_GFX_PIPELINE_CAPS_ACTION_BEGIN_JOIN) {
-    viewer_gfx_begin_join_locked(viewer, now,
-                                 caps_result->begin_join_reason
-                                     ? caps_result->begin_join_reason
-                                     : "RDPEGFX caps confirmed");
+    viewer_gfx_pipeline_begin_join_locked(viewer, now,
+                                          caps_result->begin_join_reason
+                                              ? caps_result->begin_join_reason
+                                              : "RDPEGFX caps confirmed");
   }
 
   if ((caps_result->actions &
@@ -1095,89 +1092,6 @@ viewer_surface_bits_dequeue_locked(Viewer *viewer) {
   return event;
 }
 
-static const char *viewer_join_state_name(ViewerJoinState state) {
-  switch (state) {
-  case VIEWER_JOIN_STATE_NONE:
-    return "NONE";
-  case VIEWER_JOIN_STATE_PENDING:
-    return "PENDING";
-  case VIEWER_JOIN_STATE_LIVE:
-    return "LIVE";
-  case VIEWER_JOIN_STATE_REJECTED:
-    return "REJECTED";
-  default:
-    return "UNKNOWN";
-  }
-}
-
-static const char *viewer_join_strategy_name(ViewerJoinStrategy strategy) {
-  switch (strategy) {
-  case VIEWER_JOIN_STRATEGY_NONE:
-    return "NONE";
-  case VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK:
-    return "CLASSIC_FALLBACK";
-  case VIEWER_JOIN_STRATEGY_REJECT:
-    return "REJECT";
-  default:
-    return "UNKNOWN";
-  }
-}
-
-static void viewer_gfx_set_join_state_locked(Viewer *viewer,
-                                             ViewerJoinState state,
-                                             ViewerJoinStrategy strategy,
-                                             const char *reason) {
-  ViewerJoinState old_state = VIEWER_JOIN_STATE_NONE;
-  ViewerJoinStrategy old_strategy = VIEWER_JOIN_STRATEGY_NONE;
-
-  if (!viewer)
-    return;
-
-  old_state = viewer->gfx.join_state;
-  old_strategy = viewer->gfx.join_strategy;
-  viewer->gfx.join_state = state;
-  viewer->gfx.join_strategy = strategy;
-
-  if ((old_state != state) || (old_strategy != strategy)) {
-    WLog_INFO(
-        TAG, "Viewer %u join transition %s/%s -> %s/%s reason=%s", viewer->id,
-        viewer_join_state_name(old_state),
-        viewer_join_strategy_name(old_strategy), viewer_join_state_name(state),
-        viewer_join_strategy_name(strategy), reason ? reason : "unspecified");
-  }
-}
-
-static void viewer_gfx_begin_join_locked(Viewer *viewer, UINT64 now,
-                                         const char *reason) {
-  if (!viewer)
-    return;
-
-  viewer->gfx.join_start_ts = now;
-  viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_PENDING,
-                                   VIEWER_JOIN_STRATEGY_NONE, reason);
-}
-
-static void viewer_gfx_finish_late_join_locked(Viewer *viewer,
-                                               const char *reason) {
-  if (!viewer)
-    return;
-
-  viewer->gfx.last_activated_ts = platform_get_timestamp_ms();
-  viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_LIVE,
-                                   VIEWER_JOIN_STRATEGY_NONE, reason);
-}
-
-static void viewer_disable_rdpgfx_locked(Viewer *viewer) {
-  if (!viewer)
-    return;
-
-  viewer->gfx.ready = FALSE;
-  viewer->gfx.use_rdpgfx = FALSE;
-  viewer->gfx.caps_ready = FALSE;
-  viewer->gfx.rdpgfx_temporarily_disabled = TRUE;
-  viewer->gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
-}
-
 static BOOL viewer_gfx_publisher_state_init(ViewerGfxPublisherState *gfx) {
   if (!gfx || gfx->initialized)
     return gfx && gfx->initialized;
@@ -1409,18 +1323,12 @@ static void viewer_graphics_context_reset(ViewerGraphicsContext *gfx,
   gfx->post_connect_complete = FALSE;
   gfx->ready = FALSE;
   gfx->force_full_present = TRUE;
-  gfx->use_rdpgfx = FALSE;
   gfx->channel_opened = FALSE;
   gfx->vcm_progress_logged = FALSE;
   gfx->drdynvc_joined = FALSE;
   gfx->caps_ready = FALSE;
-  gfx->rdpgfx_temporarily_disabled = FALSE;
-  gfx->negotiation_outcome = VIEWER_GFX_NEGOTIATION_PENDING;
   gfx->drdynvc_state = DRDYNVC_STATE_NONE;
-  gfx->join_state = VIEWER_JOIN_STATE_NONE;
-  gfx->join_strategy = VIEWER_JOIN_STRATEGY_NONE;
-  gfx->join_start_ts = 0;
-  gfx->last_activated_ts = 0;
+  viewer_gfx_pipeline_reset_join_state_locked(gfx);
   viewer_gfx_pipeline_reset_dirty_state_locked(gfx);
 }
 
@@ -1993,27 +1901,13 @@ static BOOL can_viewer_send_input(Viewer *viewer) {
   return allowed;
 }
 
-static BOOL viewer_gfx_handshake_ready_locked(const Viewer *viewer) {
-  return viewer && viewer->activated && viewer->gfx.post_connect_complete &&
-         (viewer->gfx.drdynvc_state == DRDYNVC_STATE_READY) &&
-         viewer->gfx.channel_opened && viewer->gfx.caps_ready &&
-         viewer_gfx_negotiation_is_rdpgfx_ready(&viewer->gfx) &&
-         !viewer->gfx.rdpgfx_temporarily_disabled;
-}
-
 static BOOL viewer_gfx_enter_classic_fallback(ViewerServer *server,
                                               Viewer *viewer, UINT64 now,
                                               const char *reason) {
   if (!viewer)
     return FALSE;
 
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer_disable_rdpgfx_locked(viewer);
-  viewer->gfx.join_start_ts = now;
-  viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_PENDING,
-                                   VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK,
-                                   reason);
-  LeaveCriticalSection(&viewer->gfx.lock);
+  viewer_gfx_pipeline_enter_classic_fallback(viewer, now, reason, NULL);
 
   EnterCriticalSection(&viewer->send_lock);
   viewer->needs_full_refresh = TRUE;
@@ -2032,10 +1926,7 @@ static void viewer_gfx_reject_join(Viewer *viewer, const char *reason) {
   if (!viewer)
     return;
 
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_REJECTED,
-                                   VIEWER_JOIN_STRATEGY_REJECT, reason);
-  LeaveCriticalSection(&viewer->gfx.lock);
+  viewer_gfx_pipeline_reject_join(viewer, reason);
   viewer->stop_requested = TRUE;
   WLog_ERR(TAG, "Viewer %u join rejected reason=%s", viewer->id,
            reason ? reason : "unspecified");
@@ -2067,10 +1958,7 @@ static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
         server, viewer, now, "RDPEGFX framebuffer baseline send failed");
   }
 
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer_gfx_finish_late_join_locked(
-      viewer, "RDPEGFX framebuffer full-frame baseline sent");
-  LeaveCriticalSection(&viewer->gfx.lock);
+  viewer_gfx_pipeline_on_baseline_result(viewer, now, TRUE, NULL);
 
   EnterCriticalSection(&viewer->send_lock);
   viewer->needs_full_refresh = FALSE;
@@ -2122,30 +2010,17 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
 
 static BOOL viewer_gfx_step_join(ViewerServer *server, Viewer *viewer,
                                  UINT64 now) {
-  ViewerJoinState state = VIEWER_JOIN_STATE_NONE;
-  ViewerJoinStrategy strategy = VIEWER_JOIN_STRATEGY_NONE;
+  ViewerGfxJoinResult result = {0};
 
   if (!server || !viewer)
     return FALSE;
 
-  EnterCriticalSection(&viewer->gfx.lock);
-  if (!viewer_gfx_handshake_ready_locked(viewer)) {
-    LeaveCriticalSection(&viewer->gfx.lock);
-    return TRUE;
-  }
-
-  state = viewer->gfx.join_state;
-  strategy = viewer->gfx.join_strategy;
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  if (state == VIEWER_JOIN_STATE_LIVE)
-    return TRUE;
-
-  if (strategy == VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK)
+  viewer_gfx_pipeline_step_join(server, viewer, now, &result);
+  if (result.actions & VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK)
     return viewer_gfx_enter_classic_fallback(server, viewer, now,
-                                             "caps or handshake fallback");
+                                             result.classic_fallback_reason);
 
-  if ((state == VIEWER_JOIN_STATE_PENDING) && server->viewer_gfx_enabled)
+  if (result.actions & VIEWER_GFX_JOIN_ACTION_SEND_BASELINE)
     return viewer_gfx_send_framebuffer_baseline(server, viewer, now);
 
   return TRUE;
@@ -2345,7 +2220,7 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
 
       if (drdynvc_state == DRDYNVC_STATE_READY) {
         if (!viewer_gfx_pipeline_open_if_ready_locked(viewer)) {
-          viewer_disable_rdpgfx_locked(viewer);
+          viewer_gfx_pipeline_disable_rdpgfx_locked(viewer);
           LeaveCriticalSection(&viewer->gfx.lock);
           (void)viewer_gfx_enter_classic_fallback(
               g_viewer_server, viewer, now, "RDPEGFX channel open failed");
@@ -2362,7 +2237,7 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
     if (gfx_event && (WaitForSingleObject(gfx_event, 0) == WAIT_OBJECT_0)) {
       EnterCriticalSection(&viewer->gfx.lock);
       if (!viewer_gfx_pipeline_handle_messages_locked(viewer, &caps_result)) {
-        viewer_disable_rdpgfx_locked(viewer);
+        viewer_gfx_pipeline_disable_rdpgfx_locked(viewer);
         LeaveCriticalSection(&viewer->gfx.lock);
         WLog_WARN(TAG,
                   "Viewer %u RDPEGFX message handling failed; falling back to "
@@ -2571,6 +2446,7 @@ out:
 static BOOL peer_activate(freerdp_peer *peer) {
   Viewer *viewer = find_viewer_by_peer(peer);
   UINT64 now = platform_get_timestamp_ms();
+  ViewerGfxJoinResult join_result = {0};
   ViewerGfxNegotiationOutcome negotiation_outcome =
       VIEWER_GFX_NEGOTIATION_PENDING;
   BOOL classic_activation = FALSE;
@@ -2588,28 +2464,16 @@ static BOOL peer_activate(freerdp_peer *peer) {
   if (!viewer_gfx_pipeline_activate(g_viewer_server, viewer))
     return FALSE;
 
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer->gfx.ready = TRUE;
-  negotiation_outcome = viewer->gfx.negotiation_outcome;
-  if (viewer_gfx_negotiation_is_rdpgfx_ready(&viewer->gfx))
-    viewer_gfx_begin_join_locked(viewer, now,
-                                 "peer activated for RDPEGFX late join");
-  else if (viewer_gfx_activation_waits_for_rdpgfx_caps(&viewer->gfx))
-    viewer_gfx_begin_join_locked(
-        viewer, now, "peer activated waiting for RDPEGFX caps confirmation");
-  else {
-    viewer->gfx.join_start_ts = now;
-    viewer_gfx_finish_late_join_locked(viewer,
-                                       "peer activated on classic path");
-    /* Classic path doesn't need a full refresh gate. SurfaceBits
-     * arrive
-     * continuously from the backend — just start receiving
-     * them
-     * immediately. */
+  viewer_gfx_pipeline_on_peer_activated(viewer, now, &join_result);
+  if (join_result.actions & VIEWER_GFX_JOIN_ACTION_ENQUEUE_CLASSIC_BASELINE) {
+    EnterCriticalSection(&viewer->send_lock);
     viewer->needs_full_refresh = FALSE;
     viewer->full_refresh_deadline_ts = 0;
+    LeaveCriticalSection(&viewer->send_lock);
     classic_activation = TRUE;
   }
+  EnterCriticalSection(&viewer->gfx.lock);
+  negotiation_outcome = viewer->gfx.negotiation_outcome;
   LeaveCriticalSection(&viewer->gfx.lock);
   if (classic_activation && g_viewer_server &&
       viewer_enqueue_classic_baseline_from_framebuffer(g_viewer_server,
@@ -2623,7 +2487,8 @@ static BOOL peer_activate(freerdp_peer *peer) {
   WLog_INFO(TAG, "Viewer %u connecting mid-session", viewer->id);
   if (negotiation_outcome == VIEWER_GFX_NEGOTIATION_RDPEGFX_READY)
     WLog_INFO(TAG,
-              "Viewer %u RDPEGFX activated; evaluating frame-ring late join",
+              "Viewer %u RDPEGFX activated; evaluating framebuffer baseline "
+              "late join",
               viewer->id);
 
   if (g_viewer_server && g_viewer_server->backend) {
@@ -3868,7 +3733,7 @@ BOOL viewer_server_publish_frame_marker(BackendClient *backend,
 
       EnterCriticalSection(&viewer->gfx.lock);
       if (viewer->gfx.join_strategy == VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK)
-        viewer_gfx_finish_late_join_locked(
+        viewer_gfx_pipeline_finish_join_locked(
             viewer, "classic fallback full refresh completed");
       LeaveCriticalSection(&viewer->gfx.lock);
     }
