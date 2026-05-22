@@ -22,7 +22,7 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Decode-only means no backend PDU publishing/replay to viewers. Do not change viewer GFX/caps settings."
     },
     {

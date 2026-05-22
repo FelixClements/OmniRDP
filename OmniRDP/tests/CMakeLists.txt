@@ -258,3 +258,10 @@ add_test(NAME test_backend_gfx_decode_only
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_backend_gfx_decode_only PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_backend_gfx_quarantine
+    COMMAND ${CMAKE_COMMAND}
+        -DBACKEND_SOURCE_FILE=${CMAKE_SOURCE_DIR}/src/backend.c
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/CheckBackendGfxQuarantine.cmake
+)
+set_tests_properties(test_backend_gfx_quarantine PROPERTIES TIMEOUT 120)

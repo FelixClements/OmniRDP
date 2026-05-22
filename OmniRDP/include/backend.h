@@ -171,10 +171,6 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
                        const char *domain,
                        const BackendSecurityConfig *security);
 BOOL backend_set_gfx_decode_only(BackendClient *client, BOOL enabled);
-static inline BOOL
-backend_gfx_pdu_publish_allowed(const BackendClient *client) {
-  return client && !client->backend_gfx_decode_only_enabled;
-}
 
 /**
  * @brief Connect to Windows Server

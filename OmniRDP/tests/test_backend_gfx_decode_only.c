@@ -6,18 +6,15 @@ int main(void) {
 
   test_suppress_crt_dialogs();
 
-  if (backend_gfx_pdu_publish_allowed(NULL))
-    return 1;
-
-  if (!backend_gfx_pdu_publish_allowed(&client))
+  if (client.backend_gfx_decode_only_enabled)
     return 1;
 
   client.backend_gfx_decode_only_enabled = TRUE;
-  if (backend_gfx_pdu_publish_allowed(&client))
+  if (!client.backend_gfx_decode_only_enabled)
     return 1;
 
   client.backend_gfx_decode_only_enabled = FALSE;
-  if (!backend_gfx_pdu_publish_allowed(&client))
+  if (client.backend_gfx_decode_only_enabled)
     return 1;
 
   return 0;

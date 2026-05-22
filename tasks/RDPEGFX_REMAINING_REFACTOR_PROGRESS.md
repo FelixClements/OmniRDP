@@ -11,11 +11,11 @@ Archived prior loop evidence:
 
 ## Current status
 
-All stories are pending. Do not mark a story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
+US-001 is complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
 
 ## Story backlog
 
-1. `US-001` — pending — Quarantine backend RDPEGFX callbacks.
+1. `US-001` — complete — Quarantine backend RDPEGFX callbacks. Backend RDPEGFX callbacks no longer publish viewer GFX PDUs; CTest `test_backend_gfx_quarantine` enforces this boundary. Debug build and CTest passed on 2026-05-22.
 2. `US-002` — pending — Remove backend GFX replay production code.
 3. `US-003` — pending — Move FrameAcknowledge handling into pipeline.
 4. `US-004` — pending — Move late-join GFX state/actions into pipeline.
