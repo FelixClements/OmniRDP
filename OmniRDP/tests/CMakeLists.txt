@@ -3,11 +3,6 @@ add_executable(test_viewer_state
     ${CMAKE_SOURCE_DIR}/src/viewer_internal.c
 )
 
-add_executable(test_late_join_policy
-    test_late_join_policy.c
-    ${CMAKE_SOURCE_DIR}/src/viewer_internal.c
-)
-
 add_executable(test_pointer_shape
     test_pointer_shape.c
     ${CMAKE_SOURCE_DIR}/src/pointer_shape.c
@@ -64,20 +59,6 @@ target_include_directories(test_viewer_state PRIVATE
 )
 
 set_target_properties(test_viewer_state PROPERTIES
-    C_STANDARD 11
-    C_STANDARD_REQUIRED ON
-)
-
-target_include_directories(test_late_join_policy PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
-    ${FREERDP_ROOT}/include
-    ${FREERDP_ROOT}/winpr/include
-    ${FREERDP_BUILD}/include
-    ${FREERDP_BUILD}/winpr/include
-)
-
-set_target_properties(test_late_join_policy PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
 )
@@ -194,14 +175,6 @@ add_test(NAME test_viewer_state
 )
 set_tests_properties(test_viewer_state PROPERTIES TIMEOUT 120)
 
-add_test(NAME test_late_join_policy
-    COMMAND ${CMAKE_COMMAND}
-        -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
-        -DTEST_EXECUTABLE_NAME=test_late_join_policy${CMAKE_EXECUTABLE_SUFFIX}
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
-)
-set_tests_properties(test_late_join_policy PROPERTIES TIMEOUT 120)
-
 add_test(NAME test_pointer_shape
     COMMAND ${CMAKE_COMMAND}
         -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
@@ -265,3 +238,10 @@ add_test(NAME test_backend_gfx_quarantine
         -P ${CMAKE_CURRENT_SOURCE_DIR}/CheckBackendGfxQuarantine.cmake
 )
 set_tests_properties(test_backend_gfx_quarantine PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_no_backend_gfx_replay
+    COMMAND ${CMAKE_COMMAND}
+        -DPRODUCTION_ROOT=${CMAKE_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/CheckNoBackendGfxReplay.cmake
+)
+set_tests_properties(test_no_backend_gfx_replay PROPERTIES TIMEOUT 120)

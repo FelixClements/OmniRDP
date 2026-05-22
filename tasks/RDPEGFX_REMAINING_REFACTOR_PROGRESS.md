@@ -11,14 +11,14 @@ Archived prior loop evidence:
 
 ## Current status
 
-US-001 is complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
+US-001 and US-002 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
 
 ## Story backlog
 
 1. `US-001` — complete — Quarantine backend RDPEGFX callbacks. Backend RDPEGFX callbacks no longer publish viewer GFX PDUs; CTest `test_backend_gfx_quarantine` enforces this boundary. Debug build and CTest passed on 2026-05-22.
-2. `US-002` — pending — Remove backend GFX replay production code.
-3. `US-003` — pending — Move FrameAcknowledge handling into pipeline.
-4. `US-004` — pending — Move late-join GFX state/actions into pipeline.
+2. `US-002` — complete — Remove backend GFX replay production code. Production replay symbols, backend GFX publish APIs, replay-dependent late-join states/actions, replay ACK release behavior, and replay policy tests were removed; late-joining GFX viewers use the canonical framebuffer baseline and dirty-update path only. CTest `test_no_backend_gfx_replay` enforces forbidden production replay patterns. Debug build and CTest passed on 2026-05-22.
+3. `US-003` — pending — Move remaining FrameAcknowledge handling into pipeline.
+4. `US-004` — pending — Move canonical late-join GFX state/actions into pipeline.
 5. `US-005` — pending — Move viewer-local RDPEGFX surface/reset state into pipeline.
 6. `US-006` — pending — Shrink `viewer_server.h` public surface.
 7. `US-007` — pending — Extract classic queue data structures.
@@ -56,3 +56,4 @@ US-001 is complete. Do not mark another story complete until its implementation,
 - Viewer GFX remains controlled only by `viewer.gfx.enabled` and must not derive caps/settings from backend GFX.
 - Backend RDPEGFX callbacks must not call any `viewer_server_publish_gfx_*` function.
 - Production code must not contain `ViewerGfxCompleteFrame`, `ViewerGfxFrameBuffer`, or `viewer_gfx_replay_frame` after `US-002`.
+- Replay-dependent late-join states/actions and replay ACK release behavior were removed with `US-002`; later ACK/late-join stories must cover only canonical framebuffer baseline and dirty-update responsibilities.

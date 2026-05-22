@@ -407,54 +407,6 @@ static int test_snapshot_send_failure_propagates(void) {
   return ok;
 }
 
-static int test_surface_preamble_deep_copies_reset_monitors(void) {
-  ViewerServer server = {0};
-  Viewer viewer = {0};
-  freerdp_peer peer = {0};
-  RdpgfxServerContext rdpgfx = {0};
-  MONITOR_DEF monitors[1] = {0};
-  int ok = 1;
-
-  monitors[0].left = 0;
-  monitors[0].top = 0;
-  monitors[0].right = 799;
-  monitors[0].bottom = 599;
-  monitors[0].flags = MONITOR_PRIMARY;
-
-  ok = ok && expect_true(init_test_viewer(&viewer, 800, 600), "viewer init");
-  ok = ok && expect_true(
-                 InitializeCriticalSectionAndSpinCount(&server.gfx.lock, 4000),
-                 "server gfx lock init");
-  init_test_rdpgfx(&rdpgfx);
-  viewer.peer = &peer;
-  viewer.gfx.rdpgfx = &rdpgfx;
-  viewer.gfx.use_rdpgfx = TRUE;
-  server.gfx.has_latest_reset_graphics = TRUE;
-  server.gfx.latest_reset_graphics.width = 800;
-  server.gfx.latest_reset_graphics.height = 600;
-  server.gfx.latest_reset_graphics.monitorCount = 1;
-  server.gfx.latest_reset_graphics.monitorDefArray = monitors;
-
-  reset_send_recorder();
-  g_expected_reset_source = monitors;
-  ok = ok &&
-       expect_true(viewer_gfx_pipeline_send_surface_preamble(&server, &viewer),
-                   "surface preamble sends reset");
-  ok = ok && expect_uint32(g_send_count, 1, "only reset sent");
-  ok = ok && expect_uint32(g_send_order[0], TEST_SEND_RESET, "reset sent");
-  ok = ok && expect_uint32((UINT32)g_last_reset_monitor.right, 799,
-                           "copied monitor right");
-  ok = ok && expect_uint32((UINT32)g_last_reset_monitor.bottom, 599,
-                           "copied monitor bottom");
-  ok = ok && expect_uint32((UINT32)g_last_reset_monitor.flags, MONITOR_PRIMARY,
-                           "copied monitor flags");
-
-  DeleteCriticalSection(&server.gfx.lock);
-  viewer.gfx.rdpgfx = NULL;
-  uninit_test_viewer(&viewer);
-  return ok;
-}
-
 static void configure_dirty_eligible_viewer(ViewerServer *server,
                                             Viewer *viewer,
                                             RdpgfxServerContext *rdpgfx) {
@@ -866,8 +818,6 @@ int main(void) {
   if (!test_snapshot_sends_full_frame_baseline_order())
     return 1;
   if (!test_snapshot_send_failure_propagates())
-    return 1;
-  if (!test_surface_preamble_deep_copies_reset_monitors())
     return 1;
   if (!test_dirty_update_eligibility_denials_and_allowed())
     return 1;

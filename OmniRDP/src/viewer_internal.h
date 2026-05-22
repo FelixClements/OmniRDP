@@ -15,21 +15,6 @@ typedef struct {
   UINT64 last_input_ts;
 } ViewerInputOwnershipState;
 
-typedef enum {
-  VIEWER_GFX_CODEC_REPLAY_UNSAFE = 0,
-  VIEWER_GFX_CODEC_REPLAY_SAFE,
-  VIEWER_GFX_CODEC_REPLAY_REJECTED_BY_CAPS
-} ViewerGfxCodecReplayPolicy;
-
-typedef struct {
-  BOOL rdpgfx_enabled;
-  BOOL channel_opened;
-  BOOL caps_compatible;
-  BOOL replay_safe_codecs_only;
-  BOOL backend_frame_in_progress;
-  BOOL complete_frame_available;
-} ViewerLateJoinPolicyInputs;
-
 #define VIEWER_SEVERE_LAG_INTERVALS 96U
 #define VIEWER_THROTTLE_LAG_INTERVALS 16U
 
@@ -43,21 +28,6 @@ BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
                                        const RDPGFX_CAPSET *advertised_caps,
                                        UINT16 advertised_caps_count,
                                        RDPGFX_CAPSET *selected_caps);
-
-ViewerGfxCodecReplayPolicy
-viewer_gfx_codec_replay_policy(UINT16 codec_id,
-                               const RDPGFX_CAPSET *confirmed_caps);
-
-ViewerJoinStrategy
-viewer_late_join_select_strategy(const ViewerLateJoinPolicyInputs *inputs);
-
-BOOL viewer_late_join_ack_releases_live(UINT32 required_ack_frame_id,
-                                        UINT32 last_ack_frame_id);
-
-BOOL viewer_late_join_timeout_fallback_due(ViewerJoinStrategy strategy,
-                                           UINT64 late_join_start_ts,
-                                           UINT64 now, UINT32 timeout_ms,
-                                           BOOL waiting_for_ack);
 
 BOOL viewer_gfx_activation_waits_for_rdpgfx_caps(
     const ViewerGraphicsContext *gfx);

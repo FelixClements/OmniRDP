@@ -45,10 +45,6 @@ HANDLE viewer_gfx_pipeline_get_event_handle_locked(Viewer *viewer);
 BOOL viewer_gfx_pipeline_handle_messages_locked(
     Viewer *viewer, ViewerGfxPipelineCapsResult *caps_result);
 BOOL viewer_gfx_pipeline_activate(ViewerServer *server, Viewer *viewer);
-BOOL viewer_gfx_pipeline_send_event(Viewer *viewer,
-                                    const ViewerGfxEvent *event);
-BOOL viewer_gfx_pipeline_send_surface_preamble(ViewerServer *server,
-                                               Viewer *viewer);
 BOOL viewer_gfx_pipeline_dirty_update_allowed(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot, const char **reason);

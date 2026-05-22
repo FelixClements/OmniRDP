@@ -59,33 +59,36 @@ This PRD is intended for a Ralph-style loop. Each user story is scoped to one fo
 - Backend replay implementation is removed from production code, not merely deprecated, test-only, or unreachable.
 - No production symbol named `ViewerGfxCompleteFrame`, `ViewerGfxFrameBuffer`, or `viewer_gfx_replay_frame` remains.
 - Late-joining GFX viewers use canonical framebuffer baseline and dirty-update paths only.
+- Replay-dependent late-join states/actions, replay ACK release behavior, and replay policy tests are removed with the replay implementation.
 - Backend replay is not moved into another production module and no replay path is linked into production binaries.
 - Common validation passes.
 
-### US-003: Move FrameAcknowledge handling into pipeline
+### US-003: Move remaining FrameAcknowledge handling into pipeline
 
-**Description:** As a maintainer, I want viewer RDPEGFX `FrameAcknowledge` handling owned by `viewer_gfx_pipeline` so that `viewer_server.c` only forwards the event and reacts to high-level results.
+**Description:** As a maintainer, I want remaining viewer RDPEGFX `FrameAcknowledge` bookkeeping owned by `viewer_gfx_pipeline` so that `viewer_server.c` only forwards ACKs and reacts to high-level dirty-pacing results.
 
 **Acceptance Criteria:**
 
-- `viewer_server.c` no longer implements RDPEGFX `FrameAcknowledge` protocol logic directly.
-- `viewer_gfx_pipeline` owns last ACK frame ID, dirty ACK state, stale ACK rejection, and ACK result classification.
+- `viewer_server.c` no longer implements remaining RDPEGFX `FrameAcknowledge` bookkeeping directly beyond forwarding the ACK to the pipeline.
+- `viewer_gfx_pipeline` owns last ACK frame ID, last-presented timestamp updates, dirty ACK state, stale ACK rejection, and ACK result classification.
 - `viewer_server.c` receives a narrow result/action from pipeline when coordinator action is needed.
 - Existing dirty ACK and no-ACK suspension behavior remains unchanged.
 - Tests cover matching ACK, stale ACK, unknown ACK, and reset-boundary ACK rejection.
+- Replay ACK release was removed with US-002 and must not be reintroduced.
 - Common validation passes.
 
-### US-004: Move late-join GFX state/actions into pipeline
+### US-004: Move canonical late-join GFX state/actions into pipeline
 
-**Description:** As a maintainer, I want remaining viewer-local GFX late-join activation state and actions owned by `viewer_gfx_pipeline` so `viewer_server.c` coordinates only high-level outcomes.
+**Description:** As a maintainer, I want remaining viewer-local GFX late-join activation state and canonical framebuffer baseline actions owned by `viewer_gfx_pipeline` so `viewer_server.c` coordinates only high-level outcomes.
 
 **Acceptance Criteria:**
 
-- Pipeline owns remaining late-join GFX activation/release state and exposes narrow coordinator actions.
+- Pipeline owns remaining late-join GFX activation/live/fallback state and exposes narrow coordinator actions.
 - Late-join baseline source remains the canonical framebuffer, not backend replay.
 - `viewer_server.c` no longer mutates late-join GFX protocol state directly.
-- Existing late-join activation and fallback behavior remains unchanged.
-- Tests cover late-join ACK release/action behavior and fallback boundaries.
+- Existing canonical framebuffer baseline activation and fallback behavior remains unchanged.
+- Tests cover canonical baseline activation/action behavior and fallback boundaries without replay ACK release.
+- Replay states/actions and replay ACK release were removed with US-002 and must not be reintroduced.
 - Common validation passes.
 
 ### US-005: Move viewer-local RDPEGFX surface/reset state into pipeline
