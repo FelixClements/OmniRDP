@@ -130,8 +130,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 6,
-      "passes": false,
-      "notes": "Prefer opaque types and narrow internal headers; avoid broad public header churn not needed by callers."
+      "passes": true,
+      "notes": "Completed: viewer_server.h is now a lifecycle/config/backend-publish facade with opaque ViewerServer and BackendClient declarations. Internal Viewer/ViewerGraphicsContext/GFX publisher/classic/surface event structs and full ViewerServer storage moved to src/viewer_server_internal.h. MonitorLayout moved to monitor_layout.h for backend/main callers, keeping existing MONITOR_DEF compatibility there. A public facade CTest checks viewer_server.h for forbidden RDPEGFX/listener/WTS/internal tokens. clang-format, JSON validation, git diff --check, Debug build, and CTest passed on 2026-05-23."
     },
     {
       "id": "US-007",

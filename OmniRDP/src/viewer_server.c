@@ -1,9 +1,9 @@
-#include "viewer_server.h"
 #include "backend.h"
 #include "platform_compat.h"
 #include "svc_log.h"
 #include "viewer_gfx_pipeline.h"
 #include "viewer_internal.h"
+#include "viewer_server_internal.h"
 
 #include <freerdp/channels/drdynvc.h>
 #include <freerdp/channels/rdpgfx.h>

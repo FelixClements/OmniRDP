@@ -2,6 +2,7 @@
 #define VIEWER_PUBLISHER_H
 
 #include "viewer_framebuffer.h"
+#include "viewer_publisher_config.h"
 
 #include <winpr/wtypes.h>
 
@@ -33,18 +34,6 @@ typedef struct {
   UINT32 classic_queue_max_depth;
   BOOL latest_dirty_overflow;
 } ViewerPublisherMetrics;
-
-typedef enum {
-  VIEWER_PUBLISHER_CLASSIC_POLICY_FIFO = 0,
-  VIEWER_PUBLISHER_CLASSIC_POLICY_LATEST_STATE = 1
-} ViewerPublisherClassicPolicy;
-
-typedef struct {
-  BOOL enabled;
-  ViewerPublisherClassicPolicy policy;
-  UINT32 max_queue_depth;
-  UINT64 max_queue_bytes;
-} ViewerPublisherClassicPolicyConfig;
 
 typedef enum {
   VIEWER_PUBLISHER_CLASSIC_DECISION_KEEP_FIFO = 0,

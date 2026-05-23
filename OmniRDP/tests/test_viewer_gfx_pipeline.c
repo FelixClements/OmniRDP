@@ -1,4 +1,5 @@
 #include "viewer_gfx_pipeline.h"
+#include "viewer_server_internal.h"
 
 #include <freerdp/codec/color.h>
 #include <stdio.h>

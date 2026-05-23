@@ -2,7 +2,7 @@
 #define VIEWER_GFX_PIPELINE_H
 
 #include "viewer_framebuffer.h"
-#include "viewer_server.h"
+#include "viewer_server_internal.h"
 
 #include <freerdp/freerdp.h>
 #include <freerdp/peer.h>

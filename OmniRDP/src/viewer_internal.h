@@ -1,7 +1,7 @@
 #ifndef VIEWER_INTERNAL_H
 #define VIEWER_INTERNAL_H
 
-#include "viewer_server.h"
+#include "viewer_server_internal.h"
 #include <freerdp/settings_types.h>
 #include <winpr/wtypes.h>
 
@@ -64,8 +64,6 @@ BOOL viewer_disconnect_due(const Viewer *viewer, UINT32 disconnect_ms,
 
 BOOL viewer_monitor_from_size(UINT32 width, UINT32 height,
                               MONITOR_DEF *monitor);
-
-void monitor_layout_init(MonitorLayout *layout, UINT32 monitor_count);
 
 #ifdef __cplusplus
 }

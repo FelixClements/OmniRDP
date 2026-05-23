@@ -9,8 +9,8 @@
 #ifndef BACKEND_H
 #define BACKEND_H
 
+#include "monitor_layout.h"
 #include "pointer_shape.h"
-#include "viewer_server.h"
 #include <freerdp/client.h>
 #include <freerdp/client/rdpgfx.h>
 #include <freerdp/freerdp.h>

@@ -53,13 +53,16 @@ set(SOURCES
 # Header files
 set(HEADERS
     include/backend.h
+    include/monitor_layout.h
     include/viewer_server.h
     include/viewer_framebuffer.h
+    include/viewer_publisher_config.h
     include/viewer_publisher.h
     include/viewer_gfx_pipeline.h
     include/viewer_gfx_codec_uncompressed.h
     include/platform_compat.h
     src/pointer_shape.h
+    src/viewer_server_internal.h
     src/viewer_internal.h
     src/ini_parser.h
     src/svc_config.h

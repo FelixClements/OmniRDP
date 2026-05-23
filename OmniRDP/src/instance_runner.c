@@ -37,6 +37,8 @@
 /* Maximum password length read from pipe */
 #define MAX_PASSWORD_LEN 1024
 
+#define INSTANCE_RUNNER_FIXED_MAX_VIEWERS 10U
+
 static volatile int g_running = 1;
 static ViewerServer *g_server = NULL;
 
@@ -136,11 +138,11 @@ static void log_effective_instance_config(const SvcConfig *config,
         bool_str(inst->codec_avc444), bool_str(inst->codec_avc444v2),
         inst->codec_frame_acknowledge);
 
-  if (inst->viewer_max_viewers != MAX_VIEWERS ||
+  if (inst->viewer_max_viewers != INSTANCE_RUNNER_FIXED_MAX_VIEWERS ||
       instance_key_configured(config, inst, "viewer.max_viewers"))
     LOG_W("instance_runner",
           "viewer.max_viewers is reserved; runtime fixed maximum is %u",
-          MAX_VIEWERS);
+          INSTANCE_RUNNER_FIXED_MAX_VIEWERS);
   if (inst->viewer_slow_lag_interval_ms != 5000 ||
       instance_key_configured(config, inst, "viewer.slow_lag_interval_ms"))
     LOG_W("instance_runner",

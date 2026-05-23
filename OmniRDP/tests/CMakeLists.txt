@@ -245,3 +245,10 @@ add_test(NAME test_no_backend_gfx_replay
         -P ${CMAKE_CURRENT_SOURCE_DIR}/CheckNoBackendGfxReplay.cmake
 )
 set_tests_properties(test_no_backend_gfx_replay PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_public_viewer_server_facade
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/CheckPublicViewerServerFacade.cmake
+)
+set_tests_properties(test_public_viewer_server_facade PROPERTIES TIMEOUT 120)
