@@ -11,7 +11,7 @@ Archived prior loop evidence:
 
 ## Current status
 
-US-001 through US-008 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
+US-001 through US-009 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
 
 ## Story backlog
 
@@ -23,7 +23,7 @@ US-001 through US-008 are complete. Do not mark another story complete until its
 6. `US-006` — complete — Shrink `viewer_server.h` public surface. `viewer_server.h` is now a public facade for lifecycle/config/backend-publish APIs with opaque server/backend declarations; internal viewer, RDPEGFX negotiation/pipeline state, queues, and full server storage moved to `src/viewer_server_internal.h`. `MonitorLayout` moved to `include/monitor_layout.h` for backend/main compatibility. CTest `test_public_viewer_server_facade` enforces forbidden internal tokens in the public facade. Debug build and CTest passed on 2026-05-23.
 7. `US-007` — complete — Extract classic queue data structures.
 8. `US-008` — complete — Move classic backlog policy out of viewer server. Classic BitmapUpdate publish, SurfaceBits publish, pump full-refresh/drop, and latest-state threshold decisions now use pure `viewer_publisher` decision APIs; `viewer_server.c` applies side effects, queue operations, refresh requests, counters/logging, snapshots, and classic sends. `viewer_classic_queue` remains mechanical. Debug build and CTest passed on 2026-05-23.
-9. `US-009` — pending — Move classic FreeRDP sends into transport module.
+9. `US-009` — complete — Move classic FreeRDP sends into transport module. Classic BitmapUpdate chunking/validation, SurfaceBits sends, SurfaceFrameMarker sends, FreeRDP update batching, and send counters/timing now live in `viewer_classic_transport`; `viewer_server.c` coordinates queues/policy/pump only through a narrow transport context. CTest `test_viewer_server_classic_transport_boundary` enforces that direct classic FreeRDP send/update-lock tokens do not return to `viewer_server.c`. Debug build and CTest passed on 2026-05-23.
 10. `US-010` — pending — Implement strict RDPEGFX capabilities whitelist.
 11. `US-011` — pending — Add frame epoch and backpressure-safe ACK handling.
 12. `US-012` — pending — Harden resize/reset GFX sequencing.

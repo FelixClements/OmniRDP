@@ -193,8 +193,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 9,
-      "passes": false,
-      "notes": "Transport extraction only; no compression/protocol behavior changes."
+      "passes": true,
+      "notes": "Completed: classic BitmapUpdate chunking/validation, SurfaceBits sends, SurfaceFrameMarker sends, FreeRDP update batching, and send counters/timing moved into viewer_classic_transport. viewer_server.c now builds a narrow transport context and coordinates queues/policy/pump only. CTest test_viewer_server_classic_transport_boundary enforces no direct classic FreeRDP send/update-lock tokens in viewer_server.c. clang-format, JSON validation, git diff --check, Debug build, and CTest passed on 2026-05-23."
     },
     {
       "id": "US-010",

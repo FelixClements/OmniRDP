@@ -1,6 +1,7 @@
 #include "backend.h"
 #include "platform_compat.h"
 #include "svc_log.h"
+#include "viewer_classic_transport.h"
 #include "viewer_gfx_pipeline.h"
 #include "viewer_internal.h"
 #include "viewer_server_internal.h"
@@ -34,8 +35,6 @@
 #define FULL_REFRESH_TIMEOUT_MS 3000U
 #define VIEWER_RDPEGFX_NEGOTIATION_TIMEOUT_MS 3000U
 #define VIEWER_UPDATE_ACTIVATION_GRACE_MS 250U
-#define VIEWER_CLASSIC_MAX_RECTS_PER_SEND 64U
-#define VIEWER_CLASSIC_MAX_BYTES_PER_SEND (512U * 1024U)
 
 static ViewerServer *g_viewer_server = NULL;
 
@@ -93,6 +92,8 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
 static UINT64 viewer_perf_now_us(void);
 static BOOL viewer_should_log_bitmap_perf(UINT64 batch_count, UINT64 publish_us,
                                           UINT32 send_failed_count);
+static ViewerClassicTransport
+viewer_classic_transport_from_viewer(Viewer *viewer);
 static BOOL viewer_send_bitmap_update(Viewer *viewer,
                                       const BITMAP_UPDATE *bitmap);
 static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
@@ -202,6 +203,40 @@ static BOOL viewer_should_log_bitmap_perf(UINT64 batch_count, UINT64 publish_us,
                                           UINT32 send_failed_count) {
   return (batch_count <= 5) || ((batch_count % 100) == 0) ||
          (publish_us >= 5000ULL) || (send_failed_count > 0);
+}
+
+static ViewerClassicTransport
+viewer_classic_transport_from_viewer(Viewer *viewer) {
+  ViewerClassicTransport transport = {0};
+
+  if (!viewer)
+    return transport;
+
+  transport.peer = viewer->peer;
+  transport.viewer_id = viewer->id;
+  transport.packets_sent = &viewer->packets_sent;
+  transport.packets_failed = &viewer->packets_failed;
+  transport.write_block_events = &viewer->write_block_events;
+  transport.bitmap_updates_sent = &viewer->bitmap_updates_sent;
+  transport.bitmap_updates_failed = &viewer->bitmap_updates_failed;
+  transport.bitmap_rectangles_sent = &viewer->bitmap_rectangles_sent;
+  transport.bitmap_payload_bytes_sent = &viewer->bitmap_payload_bytes_sent;
+  transport.bitmap_write_block_events = &viewer->bitmap_write_block_events;
+  transport.bitmap_send_time_total_us = &viewer->bitmap_send_time_total_us;
+  transport.bitmap_send_time_max_us = &viewer->bitmap_send_time_max_us;
+  transport.bitmap_updates_skipped_writeblock =
+      &viewer->bitmap_updates_skipped_writeblock;
+  transport.surface_bits_updates_sent = &viewer->surface_bits_updates_sent;
+  transport.surface_bits_updates_failed = &viewer->surface_bits_updates_failed;
+  transport.surface_bits_send_time_total_us =
+      &viewer->surface_bits_send_time_total_us;
+  transport.surface_bits_send_time_max_us =
+      &viewer->surface_bits_send_time_max_us;
+  transport.surface_bits_payload_bytes_sent =
+      &viewer->surface_bits_payload_bytes_sent;
+  transport.surface_bits_updates_skipped_writeblock =
+      &viewer->surface_bits_updates_skipped_writeblock;
+  return transport;
 }
 
 static BOOL viewer_string_has_value(const char *value) {
@@ -353,238 +388,6 @@ static BOOL viewer_backend_credentials_match(const BackendClient *backend,
   return viewer_credentials_match_expected(backend->username, backend->domain,
                                            backend->password, viewer_user,
                                            viewer_domain, viewer_password);
-}
-
-static BOOL viewer_bitmap_bpp_sane(UINT32 bpp) {
-  return (bpp == 8) || (bpp == 15) || (bpp == 16) || (bpp == 24) || (bpp == 32);
-}
-
-static BOOL viewer_get_desktop_size(const Viewer *viewer, UINT32 *width,
-                                    UINT32 *height) {
-  rdpSettings *settings = NULL;
-
-  if (!width || !height)
-    return FALSE;
-
-  *width = 0;
-  *height = 0;
-  if (!viewer || !viewer->peer || !viewer->peer->context)
-    return FALSE;
-
-  settings = viewer->peer->context->settings;
-  if (!settings)
-    return FALSE;
-
-  *width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
-  *height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
-  return (*width > 0) && (*height > 0);
-}
-
-static BOOL
-viewer_validate_bitmap_rect(const Viewer *viewer, const BITMAP_UPDATE *bitmap,
-                            const BITMAP_DATA *rect, UINT32 rect_index,
-                            UINT32 desktop_width, UINT32 desktop_height,
-                            const char *operation, BOOL log_invalid) {
-  UINT32 dest_width = 0;
-  UINT32 dest_height = 0;
-  BOOL compressed = FALSE;
-  const char *reason = NULL;
-
-  if (!bitmap || !rect) {
-    reason = "missing rect";
-    goto invalid;
-  }
-
-  compressed = rect->compressed ? TRUE : FALSE;
-
-  if ((rect->destRight < rect->destLeft) ||
-      (rect->destBottom < rect->destTop)) {
-    reason = "invalid bounds";
-    goto invalid;
-  }
-
-  dest_width = (UINT32)rect->destRight - (UINT32)rect->destLeft + 1U;
-  dest_height = (UINT32)rect->destBottom - (UINT32)rect->destTop + 1U;
-
-  if ((dest_width == 0) || (dest_height == 0) || (rect->width == 0) ||
-      (rect->height == 0)) {
-    reason = "non-positive dimensions";
-    goto invalid;
-  }
-
-  if ((rect->destRight >= desktop_width) ||
-      (rect->destBottom >= desktop_height)) {
-    reason = "outside desktop";
-    goto invalid;
-  }
-
-  if (!viewer_bitmap_bpp_sane(rect->bitsPerPixel)) {
-    reason = "invalid bpp";
-    goto invalid;
-  }
-
-  if ((rect->bitmapLength > 0) && !rect->bitmapDataStream) {
-    reason = "missing bitmap data";
-    goto invalid;
-  }
-
-  return TRUE;
-
-invalid:
-  if (log_invalid) {
-    WLog_WARN(
-        TAG,
-        "Viewer %u dropping BitmapUpdate rect op=%s reason=%s rect=%" PRIu32
-        "/%" PRIu32 " bounds=(%" PRIu16 ",%" PRIu16 ")-(%" PRIu16 ",%" PRIu16
-        ") dest_size=%" PRIu32 "x%" PRIu32 " bitmap_size=%" PRIu16 "x%" PRIu16
-        " desktop=%" PRIu32 "x%" PRIu32 " bpp=%" PRIu32 " flags=0x%" PRIx32
-        " compressed=%s length=%" PRIu32 " data_present=%s",
-        viewer ? viewer->id : 0, operation ? operation : "unknown",
-        reason ? reason : "unknown", rect_index, bitmap ? bitmap->number : 0,
-        rect ? rect->destLeft : 0, rect ? rect->destTop : 0,
-        rect ? rect->destRight : 0, rect ? rect->destBottom : 0, dest_width,
-        dest_height, rect ? rect->width : 0, rect ? rect->height : 0,
-        desktop_width, desktop_height, rect ? (UINT32)rect->bitsPerPixel : 0,
-        rect ? (UINT32)rect->flags : 0, compressed ? "true" : "false",
-        rect ? (UINT32)rect->bitmapLength : 0,
-        rect && rect->bitmapDataStream ? "true" : "false");
-  }
-  return FALSE;
-}
-
-static BOOL viewer_send_bitmap_update_chunks(Viewer *viewer,
-                                             const BITMAP_UPDATE *bitmap,
-                                             BOOL update_lock_held,
-                                             const char *operation) {
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
-  BITMAP_DATA chunk_rects[VIEWER_CLASSIC_MAX_RECTS_PER_SEND];
-  BITMAP_UPDATE chunk = {0};
-  UINT32 desktop_width = 0;
-  UINT32 desktop_height = 0;
-  UINT32 valid_sent = 0;
-  UINT32 invalid_dropped = 0;
-  UINT32 chunks_sent = 0;
-  UINT32 i = 0;
-  UINT32 chunk_bytes = 0;
-  UINT64 total_payload_bytes = 0;
-  UINT64 send_time_total_us = 0;
-  BOOL ret = TRUE;
-  BOOL logged_invalid = FALSE;
-
-  if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
-    return FALSE;
-
-  if (!bitmap->rectangles || (bitmap->number == 0)) {
-    WLog_WARN(TAG,
-              "Viewer %u dropping BitmapUpdate op=%s: count=%" PRIu32
-              " rectangles_present=%s",
-              viewer->id, operation ? operation : "unknown", bitmap->number,
-              bitmap->rectangles ? "true" : "false");
-    return TRUE;
-  }
-
-  if (!viewer_get_desktop_size(viewer, &desktop_width, &desktop_height)) {
-    WLog_WARN(TAG, "Viewer %u dropping BitmapUpdate op=%s: no desktop size",
-              viewer->id, operation ? operation : "unknown");
-    return TRUE;
-  }
-
-  memset(&chunk, 0, sizeof(chunk));
-  chunk.skipCompression = bitmap->skipCompression;
-  chunk.rectangles = chunk_rects;
-
-#define VIEWER_SEND_BITMAP_CHUNK()                                             \
-  do {                                                                         \
-    BOOL chunk_ret = FALSE;                                                    \
-    UINT64 send_started_us = 0;                                                \
-    UINT64 send_us = 0;                                                        \
-    if (chunk.number > 0) {                                                    \
-      send_started_us = viewer_perf_now_us();                                  \
-      if (!update_lock_held)                                                   \
-        rdp_update_lock(peer->context->update);                                \
-      IFCALLRET(peer->context->update->BitmapUpdate, chunk_ret, peer->context, \
-                &chunk);                                                       \
-      if (!update_lock_held)                                                   \
-        rdp_update_unlock(peer->context->update);                              \
-      send_us = viewer_perf_now_us() - send_started_us;                        \
-      send_time_total_us += send_us;                                           \
-      if (send_us > viewer->bitmap_send_time_max_us)                           \
-        viewer->bitmap_send_time_max_us = send_us;                             \
-      if (chunk_ret) {                                                         \
-        viewer->packets_sent++;                                                \
-        viewer->bitmap_updates_sent++;                                         \
-        viewer->bitmap_rectangles_sent += chunk.number;                        \
-        viewer->bitmap_payload_bytes_sent += chunk_bytes;                      \
-        valid_sent += chunk.number;                                            \
-        chunks_sent++;                                                         \
-      } else {                                                                 \
-        viewer->packets_failed++;                                              \
-        viewer->bitmap_updates_failed++;                                       \
-        ret = FALSE;                                                           \
-      }                                                                        \
-      chunk.number = 0;                                                        \
-      chunk_bytes = 0;                                                         \
-    }                                                                          \
-  } while (0)
-
-  for (i = 0; i < bitmap->number; i++) {
-    const BITMAP_DATA *rect = &bitmap->rectangles[i];
-    UINT32 rect_bytes = rect ? (UINT32)rect->bitmapLength : 0;
-
-    if (!viewer_validate_bitmap_rect(viewer, bitmap, rect, i, desktop_width,
-                                     desktop_height, operation,
-                                     !logged_invalid)) {
-      invalid_dropped++;
-      logged_invalid = TRUE;
-      continue;
-    }
-
-    if ((chunk.number > 0) &&
-        ((chunk.number >= VIEWER_CLASSIC_MAX_RECTS_PER_SEND) ||
-         ((chunk_bytes + rect_bytes) > VIEWER_CLASSIC_MAX_BYTES_PER_SEND))) {
-      VIEWER_SEND_BITMAP_CHUNK();
-      if (!ret)
-        break;
-    }
-
-    chunk_rects[chunk.number++] = *rect;
-    chunk_bytes += rect_bytes;
-    total_payload_bytes += rect_bytes;
-
-    if (chunk.number >= VIEWER_CLASSIC_MAX_RECTS_PER_SEND) {
-      VIEWER_SEND_BITMAP_CHUNK();
-      if (!ret)
-        break;
-    }
-  }
-
-  if (ret && (chunk.number > 0))
-    VIEWER_SEND_BITMAP_CHUNK();
-
-#undef VIEWER_SEND_BITMAP_CHUNK
-
-  viewer->bitmap_send_time_total_us += send_time_total_us;
-
-  if ((valid_sent == 0) && (invalid_dropped > 0)) {
-    WLog_WARN(TAG,
-              "Viewer %u dropped BitmapUpdate op=%s: all rects invalid "
-              "original=%" PRIu32 " invalid=%" PRIu32,
-              viewer->id, operation ? operation : "unknown", bitmap->number,
-              invalid_dropped);
-    return TRUE;
-  }
-
-  WLog_INFO(TAG,
-            "Viewer %u BitmapUpdate op=%s summary original=%" PRIu32
-            " valid_sent=%" PRIu32 " invalid_dropped=%" PRIu32
-            " chunks_sent=%" PRIu32 " total_payload=%" PRIu64
-            " max_rects=%u max_bytes=%u send_ok=%s",
-            viewer->id, operation ? operation : "unknown", bitmap->number,
-            valid_sent, invalid_dropped, chunks_sent, total_payload_bytes,
-            VIEWER_CLASSIC_MAX_RECTS_PER_SEND,
-            VIEWER_CLASSIC_MAX_BYTES_PER_SEND, ret ? "true" : "false");
-
-  return ret;
 }
 
 /* ---- Classic queue coordination and policy hooks ---- */
@@ -822,7 +625,7 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
   UINT32 coalesced = 0;
   UINT32 sb_pumped = 0;
   BOOL classic_fallback = FALSE;
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
+  ViewerClassicTransport transport = {0};
 
   if (!viewer)
     return FALSE;
@@ -838,13 +641,14 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
   if (!viewer_update_ready(viewer, "pump-classic"))
     return TRUE;
 
-  /* Hold rdp_update_lock across the entire drain loop so that mstsc receives
+  transport = viewer_classic_transport_from_viewer(viewer);
+
+  /* Hold the update batch across the entire drain loop so that mstsc receives
 
    * * all bitmap updates as a continuous stream without rendering between
    *
    * individual sends. */
-  if (peer && peer->context && peer->context->update)
-    rdp_update_lock(peer->context->update);
+  (void)viewer_classic_transport_begin_batch(&transport);
 
   for (;;) {
     /* Drain one queued backend BITMAP_UPDATE at a time. Coalescing is disabled
@@ -885,7 +689,7 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
 
     /* Send the bitmap update, split into bounded chunks if necessary.
      *
-     * rdp_update_lock is already held across the entire pump loop, so mstsc
+     * The update batch is already held across the entire pump loop, so mstsc
 
      * * receives all updates as a continuous stream. */
     if (!viewer_send_bitmap_update_locked(viewer,
@@ -919,10 +723,11 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
     if (!sb_event)
       break;
 
-    /* Send outside send_lock — rdp_update_lock provides FreeRDP's own sync,
+    /* Send outside send_lock — the transport batch provides FreeRDP's own
+     * sync,
      * and the event data is locally owned after dequeue. */
-    if (!viewer_send_surface_bits(
-            viewer, viewer_surface_bits_event_command(sb_event))) {
+    if (!viewer_classic_transport_send_surface_bits(
+            &transport, viewer_surface_bits_event_command(sb_event), FALSE)) {
       WLog_WARN(TAG, "Viewer %u pump-classic: SurfaceBits send failed",
                 viewer->id);
       viewer_surface_bits_event_free(sb_event);
@@ -940,9 +745,8 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
               viewer->id, pumped, coalesced, sb_pumped);
   }
 
-  /* Release the update lock acquired at the top of this function. */
-  if (peer && peer->context && peer->context->update)
-    rdp_update_unlock(peer->context->update);
+  /* Release the update batch acquired at the top of this function. */
+  viewer_classic_transport_end_batch(&transport);
 
   return TRUE;
 }
@@ -1400,7 +1204,11 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   pointer_new.xorBpp = shape_copy.xorBpp;
   pointer_new.colorPtrAttr = pointer_color;
 
-  rdp_update_lock(peer->context->update);
+  {
+    ViewerClassicTransport transport =
+        viewer_classic_transport_from_viewer(viewer);
+    (void)viewer_classic_transport_begin_batch(&transport);
+  }
   if (send_shape) {
     if (!pointer_visible || !active_shape) {
       IFCALLRET(peer->context->update->pointer->PointerSystem, sent,
@@ -1418,7 +1226,11 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   if (sent && send_position && peer->context->update->pointer->PointerPosition)
     IFCALLRET(peer->context->update->pointer->PointerPosition, sent,
               peer->context, &pointer_position);
-  rdp_update_unlock(peer->context->update);
+  {
+    ViewerClassicTransport transport =
+        viewer_classic_transport_from_viewer(viewer);
+    viewer_classic_transport_end_batch(&transport);
+  }
 
   viewer_pointer_shape_entry_reset(&shape_copy);
   if (!sent)
@@ -1434,65 +1246,33 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
 
 static BOOL viewer_send_surface_bits(Viewer *viewer,
                                      const SURFACE_BITS_COMMAND *cmd) {
-  BOOL ret = FALSE;
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
-  UINT64 send_started_us = 0;
-  UINT64 send_us = 0;
+  ViewerClassicTransport transport =
+      viewer_classic_transport_from_viewer(viewer);
 
-  if (!viewer || !peer || !peer->context || !peer->context->update || !cmd)
+  if (!viewer || !cmd)
     return FALSE;
 
   if (!viewer_update_ready(viewer, "SurfaceBits"))
     return FALSE;
 
-  /* Option A: Skip on write-block — don't stall the viewer thread */
-  if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
-    viewer->write_block_events++;
-    viewer->surface_bits_updates_skipped_writeblock++;
-    return FALSE;
-  }
-
-  send_started_us = viewer_perf_now_us();
-  rdp_update_lock(peer->context->update);
-  IFCALLRET(peer->context->update->SurfaceBits, ret, peer->context, cmd);
-  rdp_update_unlock(peer->context->update);
-  send_us = viewer_perf_now_us() - send_started_us;
-  viewer->surface_bits_send_time_total_us += send_us;
-  if (send_us > viewer->surface_bits_send_time_max_us)
-    viewer->surface_bits_send_time_max_us = send_us;
-  if (ret) {
-    viewer->packets_sent++;
-    viewer->surface_bits_updates_sent++;
-    viewer->surface_bits_payload_bytes_sent += cmd->bmp.bitmapDataLength;
-  } else {
-    viewer->packets_failed++;
-    viewer->surface_bits_updates_failed++;
-  }
-  return ret;
+  return viewer_classic_transport_send_surface_bits(&transport, cmd, FALSE);
 }
 
 static BOOL viewer_send_bitmap_update(Viewer *viewer,
                                       const BITMAP_UPDATE *bitmap) {
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
+  ViewerClassicTransport transport =
+      viewer_classic_transport_from_viewer(viewer);
 
-  if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
+  if (!viewer || !bitmap)
     return FALSE;
 
   if (!viewer_update_ready(viewer, "BitmapUpdate"))
     return FALSE;
 
-  if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
-    viewer->write_block_events++;
-    viewer->bitmap_write_block_events++;
-    viewer->bitmap_updates_skipped_writeblock++;
-    return FALSE;
-  }
-
-  return viewer_send_bitmap_update_chunks(viewer, bitmap, FALSE,
-                                          "BitmapUpdate");
+  return viewer_classic_transport_send_bitmap_update(&transport, bitmap);
 }
 
-/* Same as viewer_send_bitmap_update but assumes rdp_update_lock is already
+/* Same as viewer_send_bitmap_update but assumes the update batch is already
  *
  * held. Used by viewer_pump_classic to batch multiple sends under a single
  * lock
@@ -1500,45 +1280,31 @@ static BOOL viewer_send_bitmap_update(Viewer *viewer,
  * updates. */
 static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
                                              const BITMAP_UPDATE *bitmap) {
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
+  ViewerClassicTransport transport =
+      viewer_classic_transport_from_viewer(viewer);
 
-  if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
+  if (!viewer || !bitmap)
     return FALSE;
 
   if (!viewer_update_ready(viewer, "BitmapUpdateLocked"))
     return FALSE;
 
-  if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
-    viewer->write_block_events++;
-    viewer->bitmap_write_block_events++;
-    viewer->bitmap_updates_skipped_writeblock++;
-    return FALSE;
-  }
-
-  return viewer_send_bitmap_update_chunks(viewer, bitmap, TRUE,
-                                          "BitmapUpdateLocked");
+  return viewer_classic_transport_send_bitmap_update_batched(&transport,
+                                                             bitmap);
 }
 
 static BOOL viewer_send_frame_marker(Viewer *viewer,
                                      const SURFACE_FRAME_MARKER *marker) {
-  BOOL ret = FALSE;
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
+  ViewerClassicTransport transport =
+      viewer_classic_transport_from_viewer(viewer);
 
-  if (!viewer || !peer || !peer->context || !peer->context->update || !marker)
+  if (!viewer || !marker)
     return FALSE;
 
   if (!viewer_update_ready(viewer, "SurfaceFrameMarker"))
     return FALSE;
 
-  rdp_update_lock(peer->context->update);
-  IFCALLRET(peer->context->update->SurfaceFrameMarker, ret, peer->context,
-            marker);
-  rdp_update_unlock(peer->context->update);
-  if (ret)
-    viewer->packets_sent++;
-  else
-    viewer->packets_failed++;
-  return ret;
+  return viewer_classic_transport_send_frame_marker(&transport, marker);
 }
 
 static Viewer *find_viewer_by_peer(freerdp_peer *peer) {
