@@ -29,6 +29,8 @@ BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
                                        UINT16 advertised_caps_count,
                                        RDPGFX_CAPSET *selected_caps);
 
+BOOL viewer_gfx_caps_is_whitelisted(const RDPGFX_CAPSET *caps);
+
 BOOL viewer_gfx_activation_waits_for_rdpgfx_caps(
     const ViewerGraphicsContext *gfx);
 

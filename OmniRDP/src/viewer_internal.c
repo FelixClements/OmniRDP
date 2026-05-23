@@ -4,6 +4,103 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+static UINT32 viewer_gfx_caps_allowed_flags(void) {
+  UINT32 flags = 0;
+
+#ifdef RDPGFX_CAPS_FLAG_THINCLIENT
+  flags |= RDPGFX_CAPS_FLAG_THINCLIENT;
+#endif
+#ifdef RDPGFX_CAPS_FLAG_SMALL_CACHE
+  flags |= RDPGFX_CAPS_FLAG_SMALL_CACHE;
+#endif
+#ifdef RDPGFX_CAPS_FLAG_AVC_DISABLED
+  flags |= RDPGFX_CAPS_FLAG_AVC_DISABLED;
+#endif
+#ifdef RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE
+  flags |= RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE;
+#endif
+
+  return flags;
+}
+
+static BOOL viewer_gfx_caps_version_is_whitelisted(UINT32 version) {
+  switch (version) {
+#ifdef RDPGFX_CAPVERSION_8
+  case RDPGFX_CAPVERSION_8:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_81
+  case RDPGFX_CAPVERSION_81:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_10
+  case RDPGFX_CAPVERSION_10:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_101
+  case RDPGFX_CAPVERSION_101:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_102
+  case RDPGFX_CAPVERSION_102:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_103
+  case RDPGFX_CAPVERSION_103:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_104
+  case RDPGFX_CAPVERSION_104:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_105
+  case RDPGFX_CAPVERSION_105:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_106
+  case RDPGFX_CAPVERSION_106:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_106_ERR
+  case RDPGFX_CAPVERSION_106_ERR:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_107
+  case RDPGFX_CAPVERSION_107:
+    return TRUE;
+#endif
+  default:
+    return FALSE;
+  }
+}
+
+BOOL viewer_gfx_caps_is_whitelisted(const RDPGFX_CAPSET *caps) {
+  if (!caps)
+    return FALSE;
+
+  if (!viewer_gfx_caps_version_is_whitelisted(caps->version))
+    return FALSE;
+
+  return (caps->flags & ~viewer_gfx_caps_allowed_flags()) == 0;
+}
+
+static BOOL viewer_gfx_caps_is_preferred(const RDPGFX_CAPSET *candidate,
+                                         const RDPGFX_CAPSET *current) {
+  if (!current)
+    return TRUE;
+
+  if (candidate->version != current->version)
+    return candidate->version < current->version;
+
+#ifdef RDPGFX_CAPS_FLAG_AVC_DISABLED
+  if ((candidate->flags & RDPGFX_CAPS_FLAG_AVC_DISABLED) !=
+      (current->flags & RDPGFX_CAPS_FLAG_AVC_DISABLED))
+    return (candidate->flags & RDPGFX_CAPS_FLAG_AVC_DISABLED) != 0;
+#endif
+
+  return candidate->flags < current->flags;
+}
+
 BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
                                        BOOL canonical_caps_valid,
                                        const RDPGFX_CAPSET *advertised_caps,
@@ -16,11 +113,13 @@ BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
     return FALSE;
 
   if (canonical_caps_valid) {
-    if (!canonical_caps)
+    if (!viewer_gfx_caps_is_whitelisted(canonical_caps))
       return FALSE;
 
     for (i = 0; i < advertised_caps_count; i++) {
       const RDPGFX_CAPSET *caps = &advertised_caps[i];
+      if (!viewer_gfx_caps_is_whitelisted(caps))
+        continue;
       if ((caps->version == canonical_caps->version) &&
           (caps->flags == canonical_caps->flags)) {
         *selected_caps = *caps;
@@ -33,7 +132,9 @@ BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
 
   for (i = 0; i < advertised_caps_count; i++) {
     const RDPGFX_CAPSET *caps = &advertised_caps[i];
-    if (!best || (caps->version > best->version))
+    if (!viewer_gfx_caps_is_whitelisted(caps))
+      continue;
+    if (viewer_gfx_caps_is_preferred(caps, best))
       best = caps;
   }
 

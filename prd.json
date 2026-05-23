@@ -215,8 +215,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 10,
-      "passes": false,
-      "notes": "Uncompressed-only whitelist. No RFX/ClearCodec/H.264/AVC/progressive implementation and no backend caps mirroring."
+      "passes": true,
+      "notes": "Completed: RDPEGFX caps selection now whitelists known-good official uncompressed-compatible versions and an explicit safe flag mask, rejects unknown/future/AVC and other unsupported flags, downgrades to lower supported advertised caps, and only sets canonical caps from whitelist-compatible advertised caps. Unit tests cover supported selection, unsupported versions/flags, downgrade, canonical whitelist/mismatch behavior, and unsupported-first canonical isolation. clang-format, JSON validation, git diff --check, Debug build, and CTest passed on 2026-05-23. No RFX/ClearCodec/H.264/AVC/progressive implementation and no backend caps mirroring."
     },
     {
       "id": "US-011",
