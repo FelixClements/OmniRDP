@@ -423,6 +423,17 @@ static int test_step_join_and_baseline_result_transitions(void) {
                            VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK,
                            "classic fallback join requests fallback action");
 
+  configure_join_ready_viewer(&server, &viewer);
+  viewer.gfx.join_state = VIEWER_JOIN_STATE_LIVE;
+  viewer.gfx.dirty_updates_enabled = FALSE;
+  viewer.gfx.dirty_baseline_required = TRUE;
+  viewer_gfx_pipeline_on_baseline_result(&viewer, 600, FALSE, &result);
+  ok = ok && expect_uint32(result.actions,
+                           VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK,
+                           "failed live resize baseline preserves fallback");
+  ok = ok && expect_true(!viewer.gfx.dirty_updates_enabled,
+                         "failed live resize baseline leaves dirty disabled");
+
   uninit_test_viewer(&viewer);
   return ok;
 }
@@ -1180,6 +1191,224 @@ static int test_stale_ack_after_invalidate_does_not_clear_or_unsuspend(void) {
   return ok;
 }
 
+static ViewerFramebufferSnapshot make_sized_snapshot(BYTE *pixels, UINT32 width,
+                                                     UINT32 height,
+                                                     UINT64 generation,
+                                                     UINT32 rect_count) {
+  ViewerFramebufferSnapshot snapshot = {0};
+
+  snapshot.width = width;
+  snapshot.height = height;
+  snapshot.stride = width * 4U;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixels = pixels;
+  snapshot.pixel_bytes = (UINT64)snapshot.stride * height;
+  snapshot.generation = generation;
+  snapshot.dirty_rect_count = rect_count;
+  snapshot.dirty_rects[0].left = 0;
+  snapshot.dirty_rects[0].top = 0;
+  snapshot.dirty_rects[0].right = 0;
+  snapshot.dirty_rects[0].bottom = 0;
+  return snapshot;
+}
+
+static int test_live_resize_schedules_fresh_baseline(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerGfxJoinResult result = {0};
+  BYTE pixels[160] = {0};
+  ViewerFramebufferSnapshot dirty = make_sized_snapshot(pixels, 6, 5, 201, 1);
+  ViewerFramebufferSnapshot baseline =
+      make_sized_snapshot(pixels, 6, 5, 200, 0);
+  UINT64 epoch = 0;
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_join_ready_viewer(&server, &viewer);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.last_ack_frame_id = 77;
+  viewer.gfx.last_ack_epoch = viewer.gfx.frame_epoch;
+  viewer.gfx.last_presented_timestamp = 123456;
+  epoch = viewer.gfx.frame_epoch;
+
+  viewer_gfx_pipeline_invalidate_surface_locked(&viewer.gfx);
+  ok = ok && expect_uint64(viewer.gfx.frame_epoch, epoch + 1U,
+                           "live resize increments epoch");
+  ok = ok &&
+       expect_true(!viewer.gfx.surface_created, "live resize clears surface");
+  ok = ok && expect_true(!viewer.gfx.dirty_updates_enabled,
+                         "live resize disables dirty");
+  ok = ok && expect_true(viewer.gfx.dirty_baseline_required,
+                         "live resize requires baseline");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 0,
+                           "live resize clears accepted ack");
+  ok = ok && expect_uint64(viewer.gfx.last_presented_timestamp, 0,
+                           "live resize clears presentation timestamp");
+
+  viewer_gfx_pipeline_step_join(&server, &viewer, 1000, &result);
+  ok = ok && expect_uint32(result.actions, VIEWER_GFX_JOIN_ACTION_SEND_BASELINE,
+                           "live resize schedules baseline");
+  reset_send_recorder();
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &dirty),
+                           VIEWER_GFX_DIRTY_SEND_DEFERRED,
+                           "dirty before resize baseline deferred");
+  ok = ok && expect_uint32(g_send_count, 0, "deferred dirty sends nothing");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "deferred dirty records no frame");
+
+  reset_send_recorder();
+  ok = ok && expect_true(
+                 viewer_gfx_pipeline_send_snapshot(&server, &viewer, &baseline),
+                 "resize baseline sends");
+  viewer_gfx_pipeline_on_baseline_result(&viewer, 1001, TRUE, &result);
+  ok = ok && expect_uint32(g_last_reset.width, 6,
+                           "resize baseline uses new snapshot width");
+  ok = ok && expect_uint32(g_last_reset.height, 5,
+                           "resize baseline uses new snapshot height");
+  ok = ok && expect_true(!viewer.gfx.dirty_baseline_required,
+                         "baseline clears requirement");
+  ok = ok &&
+       expect_true(viewer.gfx.dirty_updates_enabled, "baseline enables dirty");
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &dirty),
+                           VIEWER_GFX_DIRTY_SEND_SENT,
+                           "dirty after resize baseline sends");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_resize_with_inflight_dirty_ignores_old_ack(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE old_pixels[64] = {0};
+  BYTE new_pixels[160] = {0};
+  ViewerFramebufferSnapshot old_dirty = make_dirty_snapshot(old_pixels, 210, 1);
+  ViewerFramebufferSnapshot new_baseline =
+      make_sized_snapshot(new_pixels, 6, 5, 211, 0);
+  ViewerFramebufferSnapshot new_dirty =
+      make_sized_snapshot(new_pixels, 6, 5, 212, 1);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 90;
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &old_dirty),
+                         "dirty before resize sends");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
+                           "dirty in flight before resize");
+
+  viewer_gfx_pipeline_invalidate_surface_locked(&viewer.gfx);
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "resize clears frames");
+  ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 0,
+                           "resize clears bytes");
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 90),
+                           CHANNEL_RC_OK, "old resize ack accepted");
+  ok = ok &&
+       expect_uint32(viewer.gfx.last_ack_frame_id, 0, "old resize ack ignored");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
+                           "old resize ack does not advance generation");
+  ok = ok && expect_true(!viewer.gfx.dirty_suspended_for_no_ack,
+                         "old resize ack does not unsuspend");
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &new_dirty),
+                           VIEWER_GFX_DIRTY_SEND_DEFERRED,
+                           "dirty before in-flight resize baseline deferred");
+
+  reset_send_recorder();
+  ok = ok && expect_true(viewer_gfx_pipeline_send_snapshot(&server, &viewer,
+                                                           &new_baseline),
+                         "in-flight resize baseline sends");
+  ok = ok &&
+       expect_uint32(g_last_create.width, 6, "in-flight resize baseline width");
+  ok = ok && expect_uint32(g_last_create.height, 5,
+                           "in-flight resize baseline height");
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &new_dirty),
+                           VIEWER_GFX_DIRTY_SEND_SENT,
+                           "dirty after in-flight resize baseline sends");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_late_join_resize_uses_latest_canonical_snapshot(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerGfxJoinResult result = {0};
+  BYTE pixels[192] = {0};
+  ViewerFramebufferSnapshot latest = make_sized_snapshot(pixels, 8, 6, 300, 0);
+  ViewerFramebufferSnapshot dirty = make_sized_snapshot(pixels, 8, 6, 301, 1);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_join_ready_viewer(&server, &viewer);
+  viewer.gfx.rdpgfx = &rdpgfx;
+  viewer.gfx.join_state = VIEWER_JOIN_STATE_PENDING;
+  viewer.gfx.surface_width = 4;
+  viewer.gfx.surface_height = 4;
+  viewer.gfx.surface_created = TRUE;
+  viewer.gfx.dirty_updates_enabled = FALSE;
+  viewer_gfx_pipeline_invalidate_surface_locked(&viewer.gfx);
+
+  viewer_gfx_pipeline_step_join(&server, &viewer, 2000, &result);
+  ok = ok && expect_uint32(result.actions, VIEWER_GFX_JOIN_ACTION_SEND_BASELINE,
+                           "pending resize join schedules baseline");
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &dirty),
+                           VIEWER_GFX_DIRTY_SEND_DEFERRED,
+                           "late join resize dirty deferred before baseline");
+  reset_send_recorder();
+  ok = ok &&
+       expect_true(viewer_gfx_pipeline_send_snapshot(&server, &viewer, &latest),
+                   "late join latest baseline sends");
+  ok = ok && expect_uint32(g_last_reset.width, 8,
+                           "late join baseline uses latest width");
+  ok = ok && expect_uint32(g_last_reset.height, 6,
+                           "late join baseline uses latest height");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dimension_mismatch_dirty_deferred_without_frame(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[160] = {0};
+  ViewerFramebufferSnapshot mismatch =
+      make_sized_snapshot(pixels, 6, 5, 400, 1);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  reset_send_recorder();
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &mismatch),
+                           VIEWER_GFX_DIRTY_SEND_DEFERRED,
+                           "dimension mismatch dirty deferred");
+  ok = ok && expect_uint32(g_send_count, 0, "dimension mismatch sends nothing");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "dimension mismatch records no frame");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
 static int test_dirty_byte_backpressure_and_ack_release(void) {
   ViewerServer server = {0};
   Viewer viewer = {0};
@@ -1297,6 +1526,14 @@ int main(void) {
   if (!test_dirty_mapping_cleared_by_reset())
     return 1;
   if (!test_stale_ack_after_invalidate_does_not_clear_or_unsuspend())
+    return 1;
+  if (!test_live_resize_schedules_fresh_baseline())
+    return 1;
+  if (!test_resize_with_inflight_dirty_ignores_old_ack())
+    return 1;
+  if (!test_late_join_resize_uses_latest_canonical_snapshot())
+    return 1;
+  if (!test_dimension_mismatch_dirty_deferred_without_frame())
     return 1;
   if (!test_dirty_byte_backpressure_and_ack_release())
     return 1;

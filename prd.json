@@ -260,8 +260,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 12,
-      "passes": false,
-      "notes": "Resize/reset is an epoch boundary before dirty updates resume."
+      "passes": true,
+      "notes": "Completed: Resize/surface invalidation is a per-viewer GFX epoch boundary that clears dirty maps, in-flight frame/byte state, suspension, accepted ACK state, surface state, and disables dirty updates until a baseline succeeds. Live RDPEGFX viewers with invalidated surfaces now have step_join request a canonical framebuffer ResetGraphics/CreateSurface/Map/full-frame baseline before dirty resumes; pending late joins also use the latest canonical snapshot. Tests cover idle live resize, resize with in-flight dirty and stale ACK, late join during resize, dimension mismatch dirty deferral, and baseline failure fallback behavior preservation. clang-format, JSON validation, git diff --check, Debug build, and CTest passed on 2026-05-23."
     },
     {
       "id": "US-013",

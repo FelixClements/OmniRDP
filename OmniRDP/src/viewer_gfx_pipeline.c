@@ -153,6 +153,9 @@ void viewer_gfx_pipeline_invalidate_surface_locked(ViewerGraphicsContext *gfx) {
   gfx->surface_created = FALSE;
   gfx->force_full_present = TRUE;
   viewer_gfx_pipeline_reset_dirty_state_locked(gfx);
+  gfx->last_ack_frame_id = 0;
+  gfx->last_ack_epoch = gfx->frame_epoch;
+  gfx->last_presented_timestamp = 0;
 }
 
 static void viewer_gfx_pipeline_caps_result_consume_locked(
@@ -372,6 +375,7 @@ void viewer_gfx_pipeline_step_join(ViewerServer *server, Viewer *viewer,
                                    UINT64 now, ViewerGfxJoinResult *result) {
   ViewerJoinState state = VIEWER_JOIN_STATE_NONE;
   ViewerJoinStrategy strategy = VIEWER_JOIN_STRATEGY_NONE;
+  BOOL live_baseline_required = FALSE;
 
   (void)now;
   viewer_gfx_pipeline_join_result_clear(result);
@@ -385,8 +389,18 @@ void viewer_gfx_pipeline_step_join(ViewerServer *server, Viewer *viewer,
   }
   state = viewer->gfx.join_state;
   strategy = viewer->gfx.join_strategy;
+  live_baseline_required =
+      (state == VIEWER_JOIN_STATE_LIVE) &&
+      (viewer->gfx.dirty_baseline_required || !viewer->gfx.surface_created ||
+       viewer->gfx.force_full_present || (viewer->gfx.surface_width == 0) ||
+       (viewer->gfx.surface_height == 0));
   LeaveCriticalSection(&viewer->gfx.lock);
 
+  if (live_baseline_required && server->viewer_gfx_enabled) {
+    result->actions = VIEWER_GFX_JOIN_ACTION_SEND_BASELINE;
+    result->log_reason = "RDPEGFX live canonical resize baseline";
+    return;
+  }
   if (state == VIEWER_JOIN_STATE_LIVE)
     return;
   if (strategy == VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK) {
