@@ -11,7 +11,7 @@ Archived prior loop evidence:
 
 ## Current status
 
-US-001 through US-010 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
+US-001 through US-011 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
 
 ## Story backlog
 
@@ -25,7 +25,7 @@ US-001 through US-010 are complete. Do not mark another story complete until its
 8. `US-008` — complete — Move classic backlog policy out of viewer server. Classic BitmapUpdate publish, SurfaceBits publish, pump full-refresh/drop, and latest-state threshold decisions now use pure `viewer_publisher` decision APIs; `viewer_server.c` applies side effects, queue operations, refresh requests, counters/logging, snapshots, and classic sends. `viewer_classic_queue` remains mechanical. Debug build and CTest passed on 2026-05-23.
 9. `US-009` — complete — Move classic FreeRDP sends into transport module. Classic BitmapUpdate chunking/validation, SurfaceBits sends, SurfaceFrameMarker sends, FreeRDP update batching, and send counters/timing now live in `viewer_classic_transport`; `viewer_server.c` coordinates queues/policy/pump only through a narrow transport context. CTest `test_viewer_server_classic_transport_boundary` enforces that direct classic FreeRDP send/update-lock tokens do not return to `viewer_server.c`. Debug build and CTest passed on 2026-05-23.
 10. `US-010` — complete — Implement strict RDPEGFX capabilities whitelist. Caps selection now admits only known-good official uncompressed-compatible RDPEGFX versions with an explicit safe flag mask, rejects unknown/future/AVC and other unsupported flags, downgrades to lower supported advertised caps, and avoids canonical poisoning from unsupported viewers. Unit tests cover supported selection, unsupported versions/flags, downgrade, canonical whitelist/mismatch behavior, and unsupported-first isolation. Debug build and CTest passed on 2026-05-23.
-11. `US-011` — pending — Add frame epoch and backpressure-safe ACK handling.
+11. `US-011` — complete — Add frame epoch and backpressure-safe ACK handling. Viewer dirty frame mappings now include epochs and payload bytes; reset/invalidation/baseline/wrap boundaries clear in-flight frame/byte state and advance epochs; nonzero ACKs only update accepted ACK and dirty pacing on current-epoch matches; frame ID wrap skips zero; and dirty sends are gated by an internal 4 MiB per-viewer byte limit. Tests cover stale ACK protection, baseline/invalidation epoch clearing, byte backpressure and ACK release, zero/unknown ACK compatibility, and wrap behavior. Debug build and CTest passed on 2026-05-23.
 12. `US-012` — pending — Harden resize/reset GFX sequencing.
 13. `US-013` — pending — Add pointer and cursor late-join baseline.
 14. `US-014` — pending — Add final boundary audit enforcement.

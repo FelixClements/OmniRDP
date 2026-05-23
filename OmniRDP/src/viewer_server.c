@@ -1432,7 +1432,7 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
   ViewerFramebufferSnapshot snapshot = {0};
   const char *reason = NULL;
   UINT64 last_sent_generation = 0;
-  BOOL sent = FALSE;
+  ViewerGfxDirtySendStatus send_status = VIEWER_GFX_DIRTY_SEND_FAILED;
 
   if (!server || !viewer || !server->viewer_gfx_enabled)
     return TRUE;
@@ -1456,10 +1456,11 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
     return TRUE;
   }
 
-  sent = viewer_gfx_pipeline_send_dirty_update(server, viewer, &snapshot);
+  send_status =
+      viewer_gfx_pipeline_send_dirty_update_result(server, viewer, &snapshot);
   viewer_framebuffer_snapshot_free(&snapshot);
 
-  if (!sent)
+  if (send_status == VIEWER_GFX_DIRTY_SEND_FAILED)
     return viewer_gfx_enter_classic_fallback(
         server, viewer, now, "RDPEGFX dirty update send failed");
 

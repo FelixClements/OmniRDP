@@ -14,6 +14,30 @@
 
 #define TAG "multiplexer.viewer.gfx"
 
+static UINT64 viewer_gfx_pipeline_default_dirty_byte_limit(void) {
+  return (UINT64)VIEWER_GFX_DIRTY_MAX_IN_FLIGHT_BYTES;
+}
+
+static void
+viewer_gfx_pipeline_ensure_dirty_limits_locked(ViewerGraphicsContext *gfx) {
+  if (!gfx)
+    return;
+  if (gfx->dirty_max_in_flight_frames == 0)
+    gfx->dirty_max_in_flight_frames = 1;
+  if (gfx->dirty_max_in_flight_bytes == 0)
+    gfx->dirty_max_in_flight_bytes =
+        viewer_gfx_pipeline_default_dirty_byte_limit();
+}
+
+static void
+viewer_gfx_pipeline_increment_epoch_locked(ViewerGraphicsContext *gfx) {
+  if (!gfx)
+    return;
+  gfx->frame_epoch++;
+  if (gfx->frame_epoch == 0)
+    gfx->frame_epoch = 1;
+}
+
 static void viewer_gfx_pipeline_caps_result_clear_locked(Viewer *viewer) {
   if (!viewer)
     return;
@@ -46,10 +70,14 @@ viewer_gfx_pipeline_dirty_map_clear_locked(ViewerGraphicsContext *gfx) {
     return;
 
   memset(gfx->dirty_frame_ids, 0, sizeof(gfx->dirty_frame_ids));
+  memset(gfx->dirty_frame_epochs, 0, sizeof(gfx->dirty_frame_epochs));
   memset(gfx->dirty_frame_generations, 0, sizeof(gfx->dirty_frame_generations));
+  memset(gfx->dirty_frame_payload_bytes, 0,
+         sizeof(gfx->dirty_frame_payload_bytes));
   memset(gfx->dirty_frame_sent_ts, 0, sizeof(gfx->dirty_frame_sent_ts));
   memset(gfx->dirty_frame_valid, 0, sizeof(gfx->dirty_frame_valid));
   gfx->dirty_in_flight_frames = 0;
+  gfx->dirty_in_flight_bytes = 0;
   gfx->dirty_suspended_for_no_ack = FALSE;
 }
 
@@ -62,17 +90,27 @@ viewer_gfx_pipeline_handle_frame_ack_locked(ViewerGraphicsContext *gfx,
     return;
 
   for (i = 0; i < VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY; i++) {
-    if (!gfx->dirty_frame_valid[i] || (gfx->dirty_frame_ids[i] != frame_id))
+    if (!gfx->dirty_frame_valid[i] || (gfx->dirty_frame_ids[i] != frame_id) ||
+        (gfx->dirty_frame_epochs[i] != gfx->frame_epoch))
       continue;
 
     gfx->dirty_last_acked_generation = gfx->dirty_frame_generations[i];
+    if (gfx->dirty_in_flight_bytes >= gfx->dirty_frame_payload_bytes[i])
+      gfx->dirty_in_flight_bytes -= gfx->dirty_frame_payload_bytes[i];
+    else
+      gfx->dirty_in_flight_bytes = 0;
     gfx->dirty_frame_valid[i] = FALSE;
     gfx->dirty_frame_ids[i] = 0;
+    gfx->dirty_frame_epochs[i] = 0;
     gfx->dirty_frame_generations[i] = 0;
+    gfx->dirty_frame_payload_bytes[i] = 0;
     gfx->dirty_frame_sent_ts[i] = 0;
     if (gfx->dirty_in_flight_frames > 0)
       gfx->dirty_in_flight_frames--;
-    if (gfx->dirty_in_flight_frames == 0)
+    gfx->last_ack_frame_id = frame_id;
+    gfx->last_ack_epoch = gfx->frame_epoch;
+    gfx->last_presented_timestamp = platform_get_timestamp_ms();
+    if ((gfx->dirty_in_flight_frames == 0) && (gfx->dirty_in_flight_bytes == 0))
       gfx->dirty_suspended_for_no_ack = FALSE;
     break;
   }
@@ -97,8 +135,9 @@ void viewer_gfx_pipeline_reset_dirty_state_locked(ViewerGraphicsContext *gfx) {
   gfx->dirty_last_sent_generation = 0;
   gfx->dirty_last_acked_generation = 0;
   gfx->dirty_reset_generation = 0;
+  viewer_gfx_pipeline_increment_epoch_locked(gfx);
   viewer_gfx_pipeline_dirty_map_clear_locked(gfx);
-  gfx->dirty_max_in_flight_frames = 1;
+  viewer_gfx_pipeline_ensure_dirty_limits_locked(gfx);
   gfx->dirty_suspended_for_no_ack = FALSE;
   gfx->dirty_updates_enabled = FALSE;
   gfx->dirty_baseline_required = TRUE;
@@ -227,6 +266,7 @@ void viewer_gfx_pipeline_disable_rdpgfx_locked(Viewer *viewer) {
   viewer->gfx.caps_ready = FALSE;
   viewer->gfx.rdpgfx_temporarily_disabled = TRUE;
   viewer->gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
+  viewer_gfx_pipeline_reset_dirty_state_locked(&viewer->gfx);
 }
 
 void viewer_gfx_pipeline_reset_join_state_locked(ViewerGraphicsContext *gfx) {
@@ -646,6 +686,7 @@ BOOL viewer_gfx_pipeline_dirty_update_allowed(
   EnterCriticalSection(&gfx->lock);
   max_in_flight =
       gfx->dirty_max_in_flight_frames ? gfx->dirty_max_in_flight_frames : 1U;
+  viewer_gfx_pipeline_ensure_dirty_limits_locked(gfx);
 
   if (max_in_flight > VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY)
     max_in_flight = VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY;
@@ -728,7 +769,7 @@ viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
   return status;
 }
 
-BOOL viewer_gfx_pipeline_send_dirty_update(
+ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot) {
   ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
@@ -739,44 +780,70 @@ BOOL viewer_gfx_pipeline_send_dirty_update(
   UINT16 surface_id = 0;
   UINT32 frame_id = 0;
   UINT32 map_slot = VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY;
+  UINT32 max_in_flight = 0;
+  UINT64 frame_epoch = 0;
+  UINT64 pending_payload_bytes = 0;
   UINT32 i = 0;
   UINT rc = CHANNEL_RC_OK;
   BOOL ok = FALSE;
 
   if (!server || !viewer || !gfx || !snapshot || !snapshot->pixels ||
       (snapshot->dirty_rect_count == 0))
-    return FALSE;
+    return VIEWER_GFX_DIRTY_SEND_FAILED;
 
   if (!viewer_gfx_pipeline_dirty_update_allowed(server, viewer, snapshot, NULL))
-    return FALSE;
+    return VIEWER_GFX_DIRTY_SEND_DEFERRED;
 
   commands = (RDPGFX_SURFACE_COMMAND *)calloc(snapshot->dirty_rect_count,
                                               sizeof(RDPGFX_SURFACE_COMMAND));
   if (!commands)
-    return FALSE;
+    return VIEWER_GFX_DIRTY_SEND_FAILED;
 
   EnterCriticalSection(&gfx->lock);
   rdpgfx = gfx->rdpgfx;
   surface_id = gfx->active_surface_id;
-  frame_id = gfx->next_frame_id ? gfx->next_frame_id : 1U;
-  for (i = 0; i < VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY; i++) {
-    if (!gfx->dirty_frame_valid[i]) {
-      map_slot = i;
-      break;
-    }
-  }
   if (!rdpgfx || !rdpgfx->StartFrame || !rdpgfx->SurfaceCommand ||
-      !rdpgfx->EndFrame || (map_slot >= VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY)) {
+      !rdpgfx->EndFrame) {
     LeaveCriticalSection(&gfx->lock);
-    goto cleanup;
+    goto failed;
   }
   LeaveCriticalSection(&gfx->lock);
 
   for (i = 0; i < snapshot->dirty_rect_count; i++) {
     if (!viewer_gfx_uncompressed_build_surface_command_rect(
             snapshot, surface_id, &snapshot->dirty_rects[i], &commands[i]))
-      goto cleanup;
+      goto failed;
+    if ((UINT64_MAX - pending_payload_bytes) < (UINT64)commands[i].length)
+      goto failed;
+    pending_payload_bytes += (UINT64)commands[i].length;
   }
+
+  EnterCriticalSection(&gfx->lock);
+  viewer_gfx_pipeline_ensure_dirty_limits_locked(gfx);
+  max_in_flight = gfx->dirty_max_in_flight_frames;
+  if (max_in_flight > VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY)
+    max_in_flight = VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY;
+  frame_id = gfx->next_frame_id ? gfx->next_frame_id : 1U;
+  if (frame_id == UINT32_MAX) {
+    viewer_gfx_pipeline_increment_epoch_locked(gfx);
+    viewer_gfx_pipeline_dirty_map_clear_locked(gfx);
+  }
+  for (i = 0; i < VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY; i++) {
+    if (!gfx->dirty_frame_valid[i]) {
+      map_slot = i;
+      break;
+    }
+  }
+  if (((UINT64_MAX - gfx->dirty_in_flight_bytes) < pending_payload_bytes) ||
+      ((gfx->dirty_in_flight_bytes + pending_payload_bytes) >
+       gfx->dirty_max_in_flight_bytes) ||
+      (gfx->dirty_in_flight_frames >= max_in_flight) ||
+      (map_slot >= VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY)) {
+    LeaveCriticalSection(&gfx->lock);
+    goto deferred;
+  }
+  frame_epoch = gfx->frame_epoch;
+  LeaveCriticalSection(&gfx->lock);
 
   start.timestamp = 0;
   start.frameId = frame_id;
@@ -792,17 +859,20 @@ BOOL viewer_gfx_pipeline_send_dirty_update(
 
   ok = (rc == CHANNEL_RC_OK);
   if (!ok)
-    goto cleanup;
+    goto failed;
 
   EnterCriticalSection(&gfx->lock);
   gfx->dirty_frame_valid[map_slot] = TRUE;
   gfx->dirty_frame_ids[map_slot] = frame_id;
+  gfx->dirty_frame_epochs[map_slot] = frame_epoch;
   gfx->dirty_frame_generations[map_slot] = snapshot->generation;
+  gfx->dirty_frame_payload_bytes[map_slot] = pending_payload_bytes;
   gfx->dirty_frame_sent_ts[map_slot] = platform_get_timestamp_ms();
   gfx->dirty_in_flight_frames++;
+  gfx->dirty_in_flight_bytes += pending_payload_bytes;
   gfx->dirty_last_sent_generation = snapshot->generation;
   gfx->last_sent_frame_id = frame_id;
-  gfx->next_frame_id = frame_id + 1U;
+  gfx->next_frame_id = (frame_id == UINT32_MAX) ? 1U : (frame_id + 1U);
   LeaveCriticalSection(&gfx->lock);
 
 cleanup:
@@ -811,7 +881,30 @@ cleanup:
       viewer_gfx_uncompressed_surface_command_reset(&commands[i]);
     free(commands);
   }
-  return ok;
+  return ok ? VIEWER_GFX_DIRTY_SEND_SENT : VIEWER_GFX_DIRTY_SEND_FAILED;
+
+deferred:
+  if (commands) {
+    for (i = 0; i < snapshot->dirty_rect_count; i++)
+      viewer_gfx_uncompressed_surface_command_reset(&commands[i]);
+    free(commands);
+  }
+  return VIEWER_GFX_DIRTY_SEND_DEFERRED;
+
+failed:
+  if (commands) {
+    for (i = 0; i < snapshot->dirty_rect_count; i++)
+      viewer_gfx_uncompressed_surface_command_reset(&commands[i]);
+    free(commands);
+  }
+  return VIEWER_GFX_DIRTY_SEND_FAILED;
+}
+
+BOOL viewer_gfx_pipeline_send_dirty_update(
+    ViewerServer *server, Viewer *viewer,
+    const ViewerFramebufferSnapshot *snapshot) {
+  return viewer_gfx_pipeline_send_dirty_update_result(
+             server, viewer, snapshot) == VIEWER_GFX_DIRTY_SEND_SENT;
 }
 
 UINT viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id) {
@@ -821,10 +914,12 @@ UINT viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id) {
     return ERROR_INVALID_PARAMETER;
 
   EnterCriticalSection(&gfx->lock);
-  gfx->last_ack_frame_id = frame_id;
-  gfx->last_presented_timestamp = platform_get_timestamp_ms();
-  if (frame_id != 0)
+  if (frame_id == 0) {
+    gfx->last_ack_frame_id = frame_id;
+    gfx->last_presented_timestamp = platform_get_timestamp_ms();
+  } else {
     viewer_gfx_pipeline_handle_frame_ack_locked(gfx, frame_id);
+  }
   LeaveCriticalSection(&gfx->lock);
   return CHANNEL_RC_OK;
 }
@@ -865,6 +960,10 @@ BOOL viewer_gfx_pipeline_send_snapshot(
   }
   surface_id = gfx->active_surface_id;
   frame_id = gfx->next_frame_id ? gfx->next_frame_id : 1U;
+  if (frame_id == UINT32_MAX) {
+    viewer_gfx_pipeline_increment_epoch_locked(gfx);
+    viewer_gfx_pipeline_dirty_map_clear_locked(gfx);
+  }
   LeaveCriticalSection(&gfx->lock);
 
   if (!viewer_gfx_uncompressed_build_surface_command(snapshot, surface_id,
@@ -919,13 +1018,13 @@ BOOL viewer_gfx_pipeline_send_snapshot(
     gfx->surface_created = TRUE;
     gfx->force_full_present = FALSE;
     gfx->last_sent_frame_id = frame_id;
-    gfx->next_frame_id = frame_id + 1U;
+    gfx->next_frame_id = (frame_id == UINT32_MAX) ? 1U : (frame_id + 1U);
     gfx->dirty_last_sent_generation = snapshot->generation;
+    viewer_gfx_pipeline_increment_epoch_locked(gfx);
     viewer_gfx_pipeline_dirty_map_clear_locked(gfx);
     gfx->dirty_baseline_required = FALSE;
     gfx->dirty_updates_enabled = TRUE;
-    if (gfx->dirty_max_in_flight_frames == 0)
-      gfx->dirty_max_in_flight_frames = 1;
+    viewer_gfx_pipeline_ensure_dirty_limits_locked(gfx);
   } else {
     gfx->rdpgfx_error_count++;
     gfx->rdpgfx_consecutive_errors++;

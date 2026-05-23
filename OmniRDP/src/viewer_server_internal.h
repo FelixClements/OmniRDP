@@ -23,6 +23,7 @@ extern "C" {
 #define MAX_VIEWERS 10
 #define VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY 8U
 #define VIEWER_GFX_DIRTY_ACK_TIMEOUT_MS 2000U
+#define VIEWER_GFX_DIRTY_MAX_IN_FLIGHT_BYTES (4ULL * 1024ULL * 1024ULL)
 
 typedef enum {
   VIEWER_JOIN_STATE_NONE = 0,
@@ -63,6 +64,8 @@ typedef struct {
   UINT32 next_frame_id;
   UINT32 last_sent_frame_id;
   UINT32 last_ack_frame_id;
+  UINT64 frame_epoch;
+  UINT64 last_ack_epoch;
   UINT16 active_surface_id;
   UINT32 surface_width;
   UINT32 surface_height;
@@ -91,13 +94,17 @@ typedef struct {
   UINT64 dirty_last_sent_generation;
   UINT64 dirty_last_acked_generation;
   UINT64 dirty_reset_generation;
+  UINT64 dirty_in_flight_bytes;
+  UINT64 dirty_max_in_flight_bytes;
   UINT32 dirty_in_flight_frames;
   UINT32 dirty_max_in_flight_frames;
   BOOL dirty_suspended_for_no_ack;
   BOOL dirty_updates_enabled;
   BOOL dirty_baseline_required;
   UINT32 dirty_frame_ids[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
+  UINT64 dirty_frame_epochs[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
   UINT64 dirty_frame_generations[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
+  UINT64 dirty_frame_payload_bytes[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
   UINT64 dirty_frame_sent_ts[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
   BOOL dirty_frame_valid[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
   ViewerServer *pipeline_server;

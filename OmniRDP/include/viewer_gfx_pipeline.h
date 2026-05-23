@@ -42,6 +42,12 @@ typedef enum {
   VIEWER_GFX_DIRTY_PACING_INVALID
 } ViewerGfxDirtyPacingStatus;
 
+typedef enum {
+  VIEWER_GFX_DIRTY_SEND_SENT = 0,
+  VIEWER_GFX_DIRTY_SEND_DEFERRED,
+  VIEWER_GFX_DIRTY_SEND_FAILED
+} ViewerGfxDirtySendStatus;
+
 BOOL viewer_gfx_pipeline_post_connect_locked(ViewerServer *server,
                                              Viewer *viewer, freerdp_peer *peer,
                                              BOOL gfx_enabled);
@@ -79,6 +85,9 @@ ViewerGfxDirtyPacingStatus
 viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
                                       const char **reason);
 BOOL viewer_gfx_pipeline_send_dirty_update(
+    ViewerServer *server, Viewer *viewer,
+    const ViewerFramebufferSnapshot *snapshot);
+ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot);
 UINT viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id);

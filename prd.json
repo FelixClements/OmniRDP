@@ -238,8 +238,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 11,
-      "passes": false,
-      "notes": "Frame/ACK/pacing hardening only; keep per-viewer isolation and avoid global throttling."
+      "passes": true,
+      "notes": "Completed: Viewer GFX dirty frames are keyed by frame epoch and frame ID, ACK-invalidating reset/invalidation/baseline/wrap boundaries increment epoch and clear frame/byte state, frame ID 0 remains reserved, stale/unknown nonzero ACKs no longer update accepted ACK state or dirty pacing, and a conservative internal 4 MiB per-viewer dirty byte limit gates sends until current-epoch ACKs release bytes. Tests cover invalidation/baseline epoch clearing, current-epoch ACK matching, zero/unknown ACK behavior, frame ID wrap, and byte backpressure. clang-format, JSON validation, git diff --check, Debug build, and CTest passed on 2026-05-23."
     },
     {
       "id": "US-012",

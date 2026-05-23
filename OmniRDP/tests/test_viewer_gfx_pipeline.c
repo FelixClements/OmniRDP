@@ -2,6 +2,7 @@
 #include "viewer_server_internal.h"
 
 #include <freerdp/codec/color.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -594,6 +595,7 @@ static void configure_dirty_eligible_viewer(ViewerServer *server,
   viewer->gfx.dirty_updates_enabled = TRUE;
   viewer->gfx.dirty_baseline_required = FALSE;
   viewer->gfx.dirty_max_in_flight_frames = 2;
+  viewer->gfx.dirty_max_in_flight_bytes = VIEWER_GFX_DIRTY_MAX_IN_FLIGHT_BYTES;
 }
 
 static int test_dirty_update_eligibility_denials_and_allowed(void) {
@@ -689,10 +691,14 @@ static int test_surface_invalidation_clears_pipeline_state(void) {
   viewer.gfx.dirty_last_acked_generation = 100;
   viewer.gfx.dirty_reset_generation = 99;
   viewer.gfx.dirty_in_flight_frames = 1;
+  viewer.gfx.dirty_in_flight_bytes = 99;
+  viewer.gfx.frame_epoch = 3;
   viewer.gfx.dirty_suspended_for_no_ack = TRUE;
   viewer.gfx.dirty_frame_valid[0] = TRUE;
   viewer.gfx.dirty_frame_ids[0] = 99;
+  viewer.gfx.dirty_frame_epochs[0] = 3;
   viewer.gfx.dirty_frame_generations[0] = 123;
+  viewer.gfx.dirty_frame_payload_bytes[0] = 99;
   viewer.gfx.dirty_frame_sent_ts[0] = 456;
 
   viewer_gfx_pipeline_invalidate_surface_locked(&viewer.gfx);
@@ -718,14 +724,22 @@ static int test_surface_invalidation_clears_pipeline_state(void) {
                            "invalidation clears reset generation");
   ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
                            "invalidation clears dirty in-flight");
+  ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 0,
+                           "invalidation clears dirty bytes");
+  ok = ok && expect_uint64(viewer.gfx.frame_epoch, 4,
+                           "invalidation increments epoch");
   ok = ok && expect_true(!viewer.gfx.dirty_suspended_for_no_ack,
                          "invalidation clears dirty suspension");
   ok = ok && expect_true(!viewer.gfx.dirty_frame_valid[0],
                          "invalidation clears dirty map validity");
   ok = ok && expect_uint32(viewer.gfx.dirty_frame_ids[0], 0,
                            "invalidation clears dirty frame id");
+  ok = ok && expect_uint64(viewer.gfx.dirty_frame_epochs[0], 0,
+                           "invalidation clears dirty epoch");
   ok = ok && expect_uint64(viewer.gfx.dirty_frame_generations[0], 0,
                            "invalidation clears dirty generation");
+  ok = ok && expect_uint64(viewer.gfx.dirty_frame_payload_bytes[0], 0,
+                           "invalidation clears dirty payload bytes");
   ok = ok && expect_uint64(viewer.gfx.dirty_frame_sent_ts[0], 0,
                            "invalidation clears dirty timestamp");
 
@@ -821,16 +835,22 @@ static int test_dirty_update_send_order_and_ack(void) {
                            "sent generation recorded");
   ok = ok && expect_true(viewer.gfx.dirty_frame_sent_ts[0] != 0,
                          "dirty send timestamp recorded");
+  ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 4,
+                           "dirty payload bytes recorded");
+  ok = ok && expect_uint64(viewer.gfx.dirty_frame_epochs[0],
+                           viewer.gfx.frame_epoch, "dirty epoch recorded");
+  ok = ok && expect_uint64(viewer.gfx.dirty_frame_payload_bytes[0], 4,
+                           "dirty map payload bytes recorded");
   ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
                              &server, &viewer, &snapshot, &reason),
                          "in-flight limit denies when max set to one later");
 
   ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 999),
                            CHANNEL_RC_OK, "unknown ack accepted");
-  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 999,
-                           "unknown ack records last ack");
-  ok = ok && expect_true(viewer.gfx.last_presented_timestamp != 0,
-                         "unknown ack records presented timestamp");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 0,
+                           "unknown ack does not record last ack");
+  ok = ok && expect_uint64(viewer.gfx.last_presented_timestamp, 0,
+                           "unknown ack does not record timestamp");
   ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
                            "unknown ack ignored");
   ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
@@ -841,8 +861,12 @@ static int test_dirty_update_send_order_and_ack(void) {
                            "matching ack records last ack");
   ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
                            "matching ack decrements in-flight");
+  ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 0,
+                           "matching ack clears in-flight bytes");
   ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 30,
                            "matching ack advances generation");
+  ok = ok && expect_uint64(viewer.gfx.last_ack_epoch, viewer.gfx.frame_epoch,
+                           "matching ack records epoch");
 
   viewer.gfx.rdpgfx = NULL;
   uninit_test_viewer(&viewer);
@@ -915,8 +939,8 @@ static int test_dirty_pacing_timeout_suspend_and_ack_recovery(void) {
                          "eligibility denied while suspended");
   ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 999),
                            CHANNEL_RC_OK, "stale ack accepted");
-  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 999,
-                           "stale ack records last ack");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 0,
+                           "stale ack does not record last ack");
   ok = ok && expect_true(viewer.gfx.dirty_suspended_for_no_ack,
                          "stale ack does not unsuspend");
   ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 50),
@@ -1019,6 +1043,12 @@ static int test_dirty_update_multi_rect_and_failures(void) {
   for (UINT32 fail = 1; fail <= 4; fail++) {
     reset_send_recorder();
     g_fail_on_send = fail;
+    ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                                 &server, &viewer, &snapshot),
+                             VIEWER_GFX_DIRTY_SEND_FAILED,
+                             "dirty send failure status is failed");
+    reset_send_recorder();
+    g_fail_on_send = fail;
     ok = ok && expect_true(!viewer_gfx_pipeline_send_dirty_update(
                                &server, &viewer, &snapshot),
                            "dirty send failure rejected");
@@ -1040,6 +1070,7 @@ static int test_dirty_mapping_cleared_by_baseline(void) {
   BYTE pixels[64] = {0};
   ViewerFramebufferSnapshot dirty = make_dirty_snapshot(pixels, 50, 1);
   ViewerFramebufferSnapshot baseline = make_dirty_snapshot(pixels, 60, 1);
+  UINT64 epoch = 0;
   int ok = 1;
 
   ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
@@ -1051,6 +1082,9 @@ static int test_dirty_mapping_cleared_by_baseline(void) {
                          "dirty before baseline sends");
   ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
                            "dirty in flight before baseline");
+  ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 4,
+                           "dirty bytes before baseline");
+  epoch = viewer.gfx.frame_epoch;
 
   reset_send_recorder();
   ok = ok && expect_true(
@@ -1058,10 +1092,14 @@ static int test_dirty_mapping_cleared_by_baseline(void) {
                  "baseline sends and clears dirty mapping");
   ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
                            "baseline clears dirty in-flight");
+  ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 0,
+                           "baseline clears dirty bytes");
+  ok = ok && expect_uint64(viewer.gfx.frame_epoch, epoch + 1U,
+                           "baseline increments epoch");
   ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 30),
                            CHANNEL_RC_OK, "pre-baseline stale ack accepted");
-  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 30,
-                           "pre-baseline stale ack records last ack");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 0,
+                           "pre-baseline stale ack ignored for last ack");
   ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
                            "stale pre-baseline dirty ack ignored");
 
@@ -1093,10 +1131,128 @@ static int test_dirty_mapping_cleared_by_reset(void) {
                            "reset clears dirty in-flight");
   ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 40),
                            CHANNEL_RC_OK, "pre-reset stale ack accepted");
-  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 40,
-                           "pre-reset stale ack records last ack");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 0,
+                           "pre-reset stale ack ignored for last ack");
   ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
                            "stale pre-reset dirty ack ignored");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_stale_ack_after_invalidate_does_not_clear_or_unsuspend(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot dirty = make_dirty_snapshot(pixels, 100, 1);
+  UINT64 epoch = 0;
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 90;
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &dirty),
+                         "dirty before invalidate sends");
+  epoch = viewer.gfx.frame_epoch;
+  viewer.gfx.dirty_suspended_for_no_ack = TRUE;
+  viewer_gfx_pipeline_invalidate_surface_locked(&viewer.gfx);
+  ok = ok && expect_uint64(viewer.gfx.frame_epoch, epoch + 1U,
+                           "invalidate increments epoch");
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 90),
+                           CHANNEL_RC_OK, "stale invalidate ack accepted");
+  ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 0,
+                           "stale invalidate ack not accepted");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
+                           "stale invalidate ack does not advance generation");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "invalidate already cleared in-flight frames");
+  ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 0,
+                           "invalidate already cleared in-flight bytes");
+  ok = ok && expect_true(!viewer.gfx.dirty_suspended_for_no_ack,
+                         "stale invalidate ack does not need to unsuspend");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_byte_backpressure_and_ack_release(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot dirty = make_dirty_snapshot(pixels, 110, 1);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.dirty_max_in_flight_frames = 2;
+  viewer.gfx.dirty_max_in_flight_bytes = 4;
+  viewer.gfx.next_frame_id = 120;
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &dirty),
+                           VIEWER_GFX_DIRTY_SEND_SENT,
+                           "dirty within byte limit status sent");
+  ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 4,
+                           "dirty bytes at limit");
+  dirty.generation = 111;
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &dirty),
+                           VIEWER_GFX_DIRTY_SEND_DEFERRED,
+                           "dirty over byte limit status deferred");
+  ok = ok && expect_true(!viewer_gfx_pipeline_send_dirty_update(
+                             &server, &viewer, &dirty),
+                         "legacy bool reports unsent for byte defer");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
+                           "byte denial does not record frame");
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 120),
+                           CHANNEL_RC_OK, "byte release ack accepted");
+  ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 0,
+                           "ack releases dirty bytes");
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &dirty),
+                         "dirty allowed after ack frees bytes");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_frame_id_wrap_skips_zero_and_starts_epoch(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot dirty = make_dirty_snapshot(pixels, 120, 1);
+  UINT64 epoch = 0;
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.frame_epoch = 7;
+  viewer.gfx.next_frame_id = UINT32_MAX;
+  epoch = viewer.gfx.frame_epoch;
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &dirty),
+                         "wrap boundary dirty sends");
+  ok = ok && expect_uint32(viewer.gfx.last_sent_frame_id, UINT32_MAX,
+                           "UINT32_MAX frame can be sent before wrap");
+  ok = ok &&
+       expect_uint32(viewer.gfx.next_frame_id, 1, "wrap next frame skips zero");
+  ok = ok && expect_uint64(viewer.gfx.frame_epoch, epoch + 1U,
+                           "wrap starts new epoch");
+  ok = ok && expect_uint64(viewer.gfx.dirty_frame_epochs[0],
+                           viewer.gfx.frame_epoch, "wrap frame records epoch");
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 0),
+                           CHANNEL_RC_OK, "zero ack still accepted at wrap");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 1,
+                           "zero ack does not clear wrap frame");
 
   viewer.gfx.rdpgfx = NULL;
   uninit_test_viewer(&viewer);
@@ -1139,6 +1295,12 @@ int main(void) {
   if (!test_dirty_mapping_cleared_by_baseline())
     return 1;
   if (!test_dirty_mapping_cleared_by_reset())
+    return 1;
+  if (!test_stale_ack_after_invalidate_does_not_clear_or_unsuspend())
+    return 1;
+  if (!test_dirty_byte_backpressure_and_ack_release())
+    return 1;
+  if (!test_frame_id_wrap_skips_zero_and_starts_epoch())
     return 1;
   if (!test_dirty_pacing_timeout_suspend_and_ack_recovery())
     return 1;
