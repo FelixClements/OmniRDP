@@ -74,6 +74,7 @@ BOOL viewer_gfx_pipeline_dirty_update_allowed(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot, const char **reason);
 void viewer_gfx_pipeline_reset_dirty_state_locked(ViewerGraphicsContext *gfx);
+void viewer_gfx_pipeline_invalidate_surface_locked(ViewerGraphicsContext *gfx);
 ViewerGfxDirtyPacingStatus
 viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
                                       const char **reason);

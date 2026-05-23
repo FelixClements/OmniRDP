@@ -1311,18 +1311,14 @@ static BOOL viewer_graphics_context_init(ViewerGraphicsContext *gfx) {
 
 static void viewer_graphics_context_reset(ViewerGraphicsContext *gfx,
                                           BackendClient *backend) {
-  UINT32 width = 0;
-  UINT32 height = 0;
+  (void)backend;
 
   if (!gfx)
     return;
 
-  viewer_get_backend_layout(backend, &width, &height, NULL);
-  gfx->negotiated_width = width;
-  gfx->negotiated_height = height;
   gfx->post_connect_complete = FALSE;
   gfx->ready = FALSE;
-  gfx->force_full_present = TRUE;
+  viewer_gfx_pipeline_invalidate_surface_locked(gfx);
   gfx->channel_opened = FALSE;
   gfx->vcm_progress_logged = FALSE;
   gfx->drdynvc_joined = FALSE;
@@ -3233,8 +3229,7 @@ void viewer_server_notify_backend_layout_change(BackendClient *backend,
     int i = target_slots[target_index];
 
     EnterCriticalSection(&viewer->gfx.lock);
-    viewer->gfx.negotiated_width = width;
-    viewer->gfx.negotiated_height = height;
+    viewer_gfx_pipeline_invalidate_surface_locked(&viewer->gfx);
     LeaveCriticalSection(&viewer->gfx.lock);
 
     EnterCriticalSection(&viewer->send_lock);

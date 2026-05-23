@@ -17,7 +17,9 @@ static TestSendOp g_send_order[8] = {0};
 static UINT32 g_send_count = 0;
 static UINT32 g_surface_count = 0;
 static UINT g_fail_on_send = 0;
+static RDPGFX_RESET_GRAPHICS_PDU g_last_reset = {0};
 static RDPGFX_CREATE_SURFACE_PDU g_last_create = {0};
+static RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU g_last_map = {0};
 static RDPGFX_SURFACE_COMMAND g_last_surface = {0};
 static const MONITOR_DEF *g_expected_reset_source = NULL;
 static MONITOR_DEF g_last_reset_monitor = {0};
@@ -37,6 +39,7 @@ static UINT test_reset_graphics(RdpgfxServerContext *context,
   if (g_expected_reset_source &&
       (reset->monitorDefArray == g_expected_reset_source))
     return ERROR_INTERNAL_ERROR;
+  g_last_reset = *reset;
   g_last_reset_monitor = reset->monitorDefArray[0];
   return test_record_send(TEST_SEND_RESET);
 }
@@ -55,6 +58,7 @@ static UINT test_map_surface(RdpgfxServerContext *context,
   (void)context;
   if (!map)
     return ERROR_INTERNAL_ERROR;
+  g_last_map = *map;
   return test_record_send(TEST_SEND_MAP);
 }
 
@@ -86,7 +90,9 @@ static UINT test_end_frame(RdpgfxServerContext *context,
 
 static void reset_send_recorder(void) {
   memset(g_send_order, 0, sizeof(g_send_order));
+  memset(&g_last_reset, 0, sizeof(g_last_reset));
   memset(&g_last_create, 0, sizeof(g_last_create));
+  memset(&g_last_map, 0, sizeof(g_last_map));
   memset(&g_last_surface, 0, sizeof(g_last_surface));
   memset(&g_last_reset_monitor, 0, sizeof(g_last_reset_monitor));
   g_expected_reset_source = NULL;
@@ -214,14 +220,18 @@ static int test_activation_initializes_placeholders(void) {
   ok = ok && expect_uint32(viewer.gfx.last_ack_frame_id, 0, "last ack reset");
   ok = ok &&
        expect_uint32(viewer.gfx.active_surface_id, 0, "active surface reset");
-  ok = ok && expect_uint32(viewer.gfx.surface_width, 800,
-                           "surface width initialized");
-  ok = ok && expect_uint32(viewer.gfx.surface_height, 600,
-                           "surface height initialized");
+  ok = ok &&
+       expect_uint32(viewer.gfx.surface_width, 0, "surface width left unset");
+  ok = ok &&
+       expect_uint32(viewer.gfx.surface_height, 0, "surface height left unset");
   ok = ok && expect_true(!viewer.gfx.surface_created,
                          "surface placeholder not created");
   ok = ok &&
        expect_true(viewer.gfx.force_full_present, "full present requested");
+  ok = ok && expect_true(viewer.gfx.dirty_baseline_required,
+                         "dirty baseline required after activate");
+  ok = ok && expect_true(!viewer.gfx.dirty_updates_enabled,
+                         "dirty updates disabled after activate");
   ok = ok && expect_true(!viewer.gfx.use_rdpgfx,
                          "temporarily disabled does not enable rdpegfx");
   ok = ok && expect_true(viewer.gfx.negotiation_outcome ==
@@ -466,7 +476,7 @@ static int test_snapshot_sends_full_frame_baseline_order(void) {
   BYTE pixels[16] = {0};
   int ok = 1;
 
-  ok = ok && expect_true(init_test_viewer(&viewer, 2, 2), "viewer init");
+  ok = ok && expect_true(init_test_viewer(&viewer, 800, 600), "viewer init");
   init_test_rdpgfx(&rdpgfx);
   snapshot.pixels = pixels;
   snapshot.width = 2;
@@ -491,6 +501,19 @@ static int test_snapshot_sends_full_frame_baseline_order(void) {
   ok = ok && expect_uint32(g_send_order[3], TEST_SEND_START, "start fourth");
   ok = ok && expect_uint32(g_send_order[4], TEST_SEND_SURFACE, "surface fifth");
   ok = ok && expect_uint32(g_send_order[5], TEST_SEND_END, "end sixth");
+  ok = ok && expect_uint32(g_last_reset.width, 2, "reset uses snapshot width");
+  ok =
+      ok && expect_uint32(g_last_reset.height, 2, "reset uses snapshot height");
+  ok = ok && expect_uint32((UINT32)g_last_reset_monitor.right, 1,
+                           "reset monitor uses snapshot right");
+  ok = ok && expect_uint32((UINT32)g_last_reset_monitor.bottom, 1,
+                           "reset monitor uses snapshot bottom");
+  ok =
+      ok && expect_uint32(g_last_create.width, 2, "create uses snapshot width");
+  ok = ok &&
+       expect_uint32(g_last_create.height, 2, "create uses snapshot height");
+  ok = ok &&
+       expect_uint32(g_last_map.surfaceId, 0, "map uses active surface id");
   ok = ok && expect_uint32(g_last_create.pixelFormat,
                            GFX_PIXEL_FORMAT_XRGB_8888, "wire format");
   ok = ok && expect_uint32(g_last_surface.format, PIXEL_FORMAT_BGRX32,
@@ -502,6 +525,14 @@ static int test_snapshot_sends_full_frame_baseline_order(void) {
   ok = ok &&
        expect_uint32(viewer.gfx.next_frame_id, 10, "next frame incremented");
   ok = ok && expect_true(viewer.gfx.surface_created, "surface marked created");
+  ok = ok && expect_uint32(viewer.gfx.surface_width, 2,
+                           "surface width recorded from snapshot");
+  ok = ok && expect_uint32(viewer.gfx.surface_height, 2,
+                           "surface height recorded from snapshot");
+  ok = ok && expect_true(!viewer.gfx.dirty_baseline_required,
+                         "baseline requirement cleared");
+  ok = ok && expect_true(viewer.gfx.dirty_updates_enabled,
+                         "dirty updates enabled after baseline");
 
   viewer.gfx.rdpgfx = NULL;
   uninit_test_viewer(&viewer);
@@ -556,6 +587,8 @@ static void configure_dirty_eligible_viewer(ViewerServer *server,
   viewer->gfx.channel_opened = TRUE;
   viewer->gfx.join_state = VIEWER_JOIN_STATE_LIVE;
   viewer->gfx.surface_created = TRUE;
+  viewer->gfx.surface_width = viewer->gfx.negotiated_width;
+  viewer->gfx.surface_height = viewer->gfx.negotiated_height;
   viewer->gfx.force_full_present = FALSE;
   viewer->gfx.dirty_updates_enabled = TRUE;
   viewer->gfx.dirty_baseline_required = FALSE;
@@ -596,6 +629,23 @@ static int test_dirty_update_eligibility_denials_and_allowed(void) {
                          "dirty denied before live");
   viewer.gfx.join_state = VIEWER_JOIN_STATE_LIVE;
 
+  viewer.gfx.surface_created = FALSE;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "dirty denied before baseline surface creation");
+  viewer.gfx.surface_created = TRUE;
+
+  snapshot.width = 3;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "dirty denied when snapshot width differs");
+  snapshot.width = 2;
+  snapshot.height = 3;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer, &snapshot, &reason),
+                         "dirty denied when snapshot height differs");
+  snapshot.height = 2;
+
   ok = ok && expect_true(viewer_gfx_pipeline_dirty_update_allowed(
                              &server, &viewer, &snapshot, &reason),
                          "dirty allowed when live under limit");
@@ -618,6 +668,66 @@ static int test_dirty_update_eligibility_denials_and_allowed(void) {
                          "dirty denied when baseline required");
 
   viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_surface_invalidation_clears_pipeline_state(void) {
+  Viewer viewer = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  viewer.gfx.active_surface_id = 7;
+  viewer.gfx.surface_width = 4;
+  viewer.gfx.surface_height = 4;
+  viewer.gfx.surface_created = TRUE;
+  viewer.gfx.force_full_present = FALSE;
+  viewer.gfx.dirty_updates_enabled = TRUE;
+  viewer.gfx.dirty_baseline_required = FALSE;
+  viewer.gfx.dirty_last_sent_generation = 101;
+  viewer.gfx.dirty_last_acked_generation = 100;
+  viewer.gfx.dirty_reset_generation = 99;
+  viewer.gfx.dirty_in_flight_frames = 1;
+  viewer.gfx.dirty_suspended_for_no_ack = TRUE;
+  viewer.gfx.dirty_frame_valid[0] = TRUE;
+  viewer.gfx.dirty_frame_ids[0] = 99;
+  viewer.gfx.dirty_frame_generations[0] = 123;
+  viewer.gfx.dirty_frame_sent_ts[0] = 456;
+
+  viewer_gfx_pipeline_invalidate_surface_locked(&viewer.gfx);
+  ok = ok && expect_uint32(viewer.gfx.active_surface_id, 0,
+                           "invalidation clears active surface");
+  ok = ok && expect_uint32(viewer.gfx.surface_width, 0,
+                           "invalidation clears surface width");
+  ok = ok && expect_uint32(viewer.gfx.surface_height, 0,
+                           "invalidation clears surface height");
+  ok = ok && expect_true(!viewer.gfx.surface_created,
+                         "invalidation clears surface created");
+  ok = ok && expect_true(viewer.gfx.force_full_present,
+                         "invalidation requests full present");
+  ok = ok && expect_true(viewer.gfx.dirty_baseline_required,
+                         "invalidation requires dirty baseline");
+  ok = ok && expect_true(!viewer.gfx.dirty_updates_enabled,
+                         "invalidation disables dirty updates");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_generation, 0,
+                           "invalidation clears last sent generation");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
+                           "invalidation clears last acked generation");
+  ok = ok && expect_uint64(viewer.gfx.dirty_reset_generation, 0,
+                           "invalidation clears reset generation");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "invalidation clears dirty in-flight");
+  ok = ok && expect_true(!viewer.gfx.dirty_suspended_for_no_ack,
+                         "invalidation clears dirty suspension");
+  ok = ok && expect_true(!viewer.gfx.dirty_frame_valid[0],
+                         "invalidation clears dirty map validity");
+  ok = ok && expect_uint32(viewer.gfx.dirty_frame_ids[0], 0,
+                           "invalidation clears dirty frame id");
+  ok = ok && expect_uint64(viewer.gfx.dirty_frame_generations[0], 0,
+                           "invalidation clears dirty generation");
+  ok = ok && expect_uint64(viewer.gfx.dirty_frame_sent_ts[0], 0,
+                           "invalidation clears dirty timestamp");
+
   uninit_test_viewer(&viewer);
   return ok;
 }
@@ -1014,6 +1124,8 @@ int main(void) {
   if (!test_snapshot_send_failure_propagates())
     return 1;
   if (!test_dirty_update_eligibility_denials_and_allowed())
+    return 1;
+  if (!test_surface_invalidation_clears_pipeline_state())
     return 1;
   if (!test_dirty_update_eligibility_is_per_viewer())
     return 1;

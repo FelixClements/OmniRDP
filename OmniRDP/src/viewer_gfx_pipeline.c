@@ -104,6 +104,18 @@ void viewer_gfx_pipeline_reset_dirty_state_locked(ViewerGraphicsContext *gfx) {
   gfx->dirty_baseline_required = TRUE;
 }
 
+void viewer_gfx_pipeline_invalidate_surface_locked(ViewerGraphicsContext *gfx) {
+  if (!gfx)
+    return;
+
+  gfx->active_surface_id = 0;
+  gfx->surface_width = 0;
+  gfx->surface_height = 0;
+  gfx->surface_created = FALSE;
+  gfx->force_full_present = TRUE;
+  viewer_gfx_pipeline_reset_dirty_state_locked(gfx);
+}
+
 static void viewer_gfx_pipeline_caps_result_consume_locked(
     Viewer *viewer, ViewerGfxPipelineCapsResult *result) {
   if (result)
@@ -589,11 +601,7 @@ BOOL viewer_gfx_pipeline_activate(ViewerServer *server, Viewer *viewer) {
   gfx->next_frame_id = 1;
   gfx->last_sent_frame_id = 0;
   gfx->last_ack_frame_id = 0;
-  gfx->active_surface_id = 0;
-  gfx->surface_width = gfx->negotiated_width;
-  gfx->surface_height = gfx->negotiated_height;
-  gfx->surface_created = FALSE;
-  gfx->force_full_present = TRUE;
+  viewer_gfx_pipeline_invalidate_surface_locked(gfx);
 
   if (gfx->negotiation_outcome == VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK) {
     gfx->use_rdpgfx = FALSE;
@@ -653,6 +661,10 @@ BOOL viewer_gfx_pipeline_dirty_update_allowed(
   } else if (!gfx->surface_created || gfx->force_full_present ||
              gfx->dirty_baseline_required) {
     deny_reason = "baseline required";
+  } else if ((snapshot->width == 0) || (snapshot->height == 0) ||
+             (snapshot->width != gfx->surface_width) ||
+             (snapshot->height != gfx->surface_height)) {
+    deny_reason = "snapshot dimensions differ from GFX surface";
   } else if (gfx->dirty_suspended_for_no_ack) {
     deny_reason = "suspended waiting for ack";
   } else if (gfx->dirty_in_flight_frames >= max_in_flight) {

@@ -108,8 +108,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 5,
-      "passes": false,
-      "notes": "This is viewer-local protocol state only; explicitly do not import backend replay/surface maps."
+      "passes": true,
+      "notes": "Completed: viewer-local RDPEGFX surface/reset/preamble state is owned by viewer_gfx_pipeline. Activation leaves concrete surface dimensions unset, framebuffer snapshots drive ResetGraphics/CreateSurface/MapSurfaceToOutput/full-frame baseline dimensions, successful baselines record the viewer-local surface and enable dirty updates, dirty updates are denied before baseline or on dimension mismatch, and backend layout changes now invalidate pipeline surface state instead of writing GFX dimensions. Tests cover activation, baseline dimensions/recording, dirty denial boundaries, and invalidation. clang-format, JSON validation, git diff --check, Debug build, and CTest passed on 2026-05-23."
     },
     {
       "id": "US-006",

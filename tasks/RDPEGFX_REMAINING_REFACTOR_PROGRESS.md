@@ -11,7 +11,7 @@ Archived prior loop evidence:
 
 ## Current status
 
-US-001 through US-004 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
+US-001 through US-005 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
 
 ## Story backlog
 
@@ -19,7 +19,7 @@ US-001 through US-004 are complete. Do not mark another story complete until its
 2. `US-002` — complete — Remove backend GFX replay production code. Production replay symbols, backend GFX publish APIs, replay-dependent late-join states/actions, replay ACK release behavior, and replay policy tests were removed; late-joining GFX viewers use the canonical framebuffer baseline and dirty-update path only. CTest `test_no_backend_gfx_replay` enforces forbidden production replay patterns. Debug build and CTest passed on 2026-05-22.
 3. `US-003` — complete — Move remaining FrameAcknowledge handling into pipeline. The RDPEGFX FrameAcknowledge callback and remaining ACK bookkeeping now live in `viewer_gfx_pipeline`; `viewer_server.c` no longer writes ACK/presented timestamp state. Debug build and CTest passed on 2026-05-22.
 4. `US-004` — complete — Move canonical late-join GFX state/actions into pipeline. Remaining viewer-local canonical late-join activation/live/fallback transitions and coordinator action decisions now live in `viewer_gfx_pipeline`; `viewer_server.c` coordinates framebuffer baseline sends and classic fallback side effects from narrow pipeline actions. Tests cover activation actions, baseline step/finish, and fallback boundaries without replay ACK release. Debug build and CTest passed on 2026-05-22.
-5. `US-005` — pending — Move viewer-local RDPEGFX surface/reset state into pipeline.
+5. `US-005` — complete — Move viewer-local RDPEGFX surface/reset state into pipeline. Activation no longer copies negotiated/backend dimensions into viewer GFX surface state; canonical framebuffer snapshots drive ResetGraphics/CreateSurface/MapSurfaceToOutput/full-frame baseline dimensions and successful baselines enable dirty updates. Backend layout changes now invalidate pipeline surface/dirty state and wait for the next canonical snapshot. Tests cover activation, baseline dimensions/recording, dirty denial before baseline and dimension mismatch, and invalidation. Debug build and CTest passed on 2026-05-23.
 6. `US-006` — pending — Shrink `viewer_server.h` public surface.
 7. `US-007` — pending — Extract classic queue data structures.
 8. `US-008` — pending — Move classic backlog policy out of viewer server.
