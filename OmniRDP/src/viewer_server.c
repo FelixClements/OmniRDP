@@ -99,16 +99,14 @@ static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
                                              const BITMAP_UPDATE *bitmap);
 static BOOL viewer_send_surface_bits(Viewer *viewer,
                                      const SURFACE_BITS_COMMAND *cmd);
-static BOOL viewer_classic_enqueue_event_locked(Viewer *viewer,
+static BOOL viewer_enqueue_classic_event_locked(Viewer *viewer,
                                                 ViewerClassicEvent *event);
 static BOOL
 viewer_enqueue_classic_baseline_from_framebuffer(ViewerServer *server,
                                                  Viewer *viewer);
 static void viewer_note_classic_queue_state_locked(const Viewer *viewer);
 static void viewer_classic_apply_latest_policy_locked(Viewer *viewer);
-static ViewerClassicEvent *
-viewer_classic_event_from_snapshot(const ViewerFramebufferSnapshot *snapshot);
-static void viewer_classic_queue_clear_locked(Viewer *viewer);
+static void viewer_clear_classic_queue_locked(Viewer *viewer);
 
 static void viewer_gfx_apply_caps_result_locked(
     ViewerServer *server, Viewer *viewer,
@@ -589,118 +587,32 @@ static BOOL viewer_send_bitmap_update_chunks(Viewer *viewer,
   return ret;
 }
 
-/* ---- Classic bitmap queue: deep-copy helpers ---- */
+/* ---- Classic queue coordination and policy hooks ---- */
 
-static ViewerClassicEvent *
-viewer_classic_event_new(const BITMAP_UPDATE *bitmap) {
-  ViewerClassicEvent *event = NULL;
-  UINT32 i = 0;
-
-  if (!bitmap)
-    return NULL;
-
-  event = (ViewerClassicEvent *)calloc(1, sizeof(ViewerClassicEvent));
-  if (!event)
-    return NULL;
-
-  event->bitmap = (BITMAP_UPDATE *)calloc(1, sizeof(BITMAP_UPDATE));
-  if (!event->bitmap) {
-    free(event);
-    return NULL;
-  }
-
-  /* Shallow-copy top-level fields */
-  event->bitmap->number = bitmap->number;
-  event->bitmap->skipCompression = bitmap->skipCompression;
-
-  if (bitmap->number == 0) {
-    event->bitmap->rectangles = NULL;
-    return event;
-  }
-
-  /* Deep-copy the rectangles array */
-  event->bitmap->rectangles =
-      (BITMAP_DATA *)calloc(bitmap->number, sizeof(BITMAP_DATA));
-  if (!event->bitmap->rectangles) {
-    free(event->bitmap);
-    free(event);
-    return NULL;
-  }
-
-  for (i = 0; i < bitmap->number; i++) {
-    /* Copy inline fields */
-    event->bitmap->rectangles[i] = bitmap->rectangles[i];
-
-    /* Deep-copy the bitmap data stream */
-    if (bitmap->rectangles[i].bitmapLength > 0 &&
-        bitmap->rectangles[i].bitmapDataStream) {
-      event->bitmap->rectangles[i].bitmapDataStream =
-          (BYTE *)malloc(bitmap->rectangles[i].bitmapLength);
-      if (!event->bitmap->rectangles[i].bitmapDataStream) {
-        /* Free already-allocated rectangles on failure */
-        for (UINT32 j = 0; j < i; j++) {
-          free(event->bitmap->rectangles[j].bitmapDataStream);
-          event->bitmap->rectangles[j].bitmapDataStream = NULL;
-        }
-        free(event->bitmap->rectangles);
-        free(event->bitmap);
-        free(event);
-        return NULL;
-      }
-      memmove(event->bitmap->rectangles[i].bitmapDataStream,
-              bitmap->rectangles[i].bitmapDataStream,
-              bitmap->rectangles[i].bitmapLength);
-    } else {
-      event->bitmap->rectangles[i].bitmapDataStream = NULL;
-    }
-  }
-
-  return event;
-}
-
-static void viewer_classic_event_free(ViewerClassicEvent *event) {
-  UINT32 i = 0;
-
-  if (!event)
+static void viewer_apply_classic_drop_info_locked(
+    Viewer *viewer, const ViewerClassicQueueDropInfo *drop_info,
+    BOOL mark_full_refresh) {
+  if (!viewer || !drop_info || (drop_info->dropped_count == 0))
     return;
 
-  if (event->bitmap) {
-    if (event->bitmap->rectangles) {
-      for (i = 0; i < event->bitmap->number; i++) {
-        free(event->bitmap->rectangles[i].bitmapDataStream);
-      }
-      free(event->bitmap->rectangles);
-    }
-    free(event->bitmap);
+  viewer->bitmap_queue_dropped += drop_info->dropped_count;
+  for (UINT32 i = 0; i < drop_info->dropped_count; i++) {
+    if (g_viewer_server)
+      viewer_publisher_note_classic_drop(&g_viewer_server->publisher);
   }
-  free(event);
+  if (mark_full_refresh) {
+    viewer->needs_full_refresh = TRUE;
+    viewer->full_refresh_deadline_ts =
+        platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
+  }
 }
 
-static UINT64
-viewer_classic_event_payload_bytes(const ViewerClassicEvent *event) {
-  UINT64 bytes = 0;
+static void viewer_apply_surface_bits_drop_info_locked(
+    Viewer *viewer, const ViewerClassicQueueDropInfo *drop_info) {
+  if (!viewer || !drop_info || (drop_info->dropped_count == 0))
+    return;
 
-  if (!event || !event->bitmap || !event->bitmap->rectangles)
-    return 0;
-
-  for (UINT32 i = 0; i < event->bitmap->number; i++)
-    bytes += event->bitmap->rectangles[i].bitmapLength;
-  return bytes;
-}
-
-static UINT64 viewer_classic_queue_payload_bytes_locked(const Viewer *viewer) {
-  UINT64 bytes = 0;
-  UINT32 index = 0;
-
-  if (!viewer)
-    return 0;
-
-  index = viewer->classic_queue_head;
-  for (UINT32 i = 0; i < viewer->classic_queue_count; i++) {
-    bytes += viewer_classic_event_payload_bytes(viewer->classic_queue[index]);
-    index = (index + 1U) % VIEWER_CLASSIC_QUEUE_CAPACITY;
-  }
-  return bytes;
+  viewer->surface_bits_queue_dropped += drop_info->dropped_count;
 }
 
 static void viewer_note_classic_queue_state_locked(const Viewer *viewer) {
@@ -710,21 +622,21 @@ static void viewer_note_classic_queue_state_locked(const Viewer *viewer) {
     return;
 
   viewer_publisher_note_classic_queue_state(
-      &server->publisher, viewer->classic_queue_count,
-      viewer_classic_queue_payload_bytes_locked(viewer));
+      &server->publisher,
+      viewer_classic_queue_depth_locked(&viewer->classic_queues),
+      viewer_classic_queue_payload_bytes_locked(&viewer->classic_queues));
 }
 
 static void
 viewer_classic_enqueue_event_direct_locked(Viewer *viewer,
                                            ViewerClassicEvent *event) {
   if (!viewer || !event ||
-      (viewer->classic_queue_count >= VIEWER_CLASSIC_QUEUE_CAPACITY))
+      (viewer_classic_queue_depth_locked(&viewer->classic_queues) >=
+       VIEWER_CLASSIC_QUEUE_CAPACITY))
     return;
 
-  viewer->classic_queue[viewer->classic_queue_tail] = event;
-  viewer->classic_queue_tail =
-      (viewer->classic_queue_tail + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
-  viewer->classic_queue_count++;
+  viewer_classic_queue_enqueue_event_direct_locked(&viewer->classic_queues,
+                                                   event);
   viewer->bitmap_updates_queued++;
   viewer_note_classic_queue_state_locked(viewer);
 }
@@ -738,9 +650,12 @@ static void viewer_classic_apply_latest_policy_locked(Viewer *viewer) {
   if (!server || !viewer)
     return;
 
-  queued_bytes = viewer_classic_queue_payload_bytes_locked(viewer);
+  queued_bytes =
+      viewer_classic_queue_payload_bytes_locked(&viewer->classic_queues);
   if (viewer_publisher_classic_queue_decision(
-          &server->publisher, viewer->classic_queue_count, queued_bytes) !=
+          &server->publisher,
+          viewer_classic_queue_depth_locked(&viewer->classic_queues),
+          queued_bytes) !=
       VIEWER_PUBLISHER_CLASSIC_DECISION_REPLACE_WITH_BASELINE)
     return;
 
@@ -757,65 +672,11 @@ static void viewer_classic_apply_latest_policy_locked(Viewer *viewer) {
   WLog_INFO(TAG,
             "Viewer %u classic latest-state policy replacing %" PRIu32
             " queued events with framebuffer generation %" PRIu64,
-            viewer->id, viewer->classic_queue_count, event->generation);
-  viewer_classic_queue_clear_locked(viewer);
+            viewer->id,
+            viewer_classic_queue_depth_locked(&viewer->classic_queues),
+            viewer_classic_event_generation(event));
+  viewer_clear_classic_queue_locked(viewer);
   viewer_classic_enqueue_event_direct_locked(viewer, event);
-
-  if (viewer->classic_event)
-    SetEvent(viewer->classic_event);
-}
-
-static ViewerClassicEvent *
-viewer_classic_event_from_snapshot(const ViewerFramebufferSnapshot *snapshot) {
-  ViewerClassicEvent *event = NULL;
-  BITMAP_DATA *rect = NULL;
-
-  if (!snapshot || !snapshot->pixels || (snapshot->width == 0) ||
-      (snapshot->height == 0) || (snapshot->stride == 0) ||
-      (snapshot->pixel_bytes == 0) || (snapshot->width > UINT16_MAX) ||
-      (snapshot->height > UINT16_MAX) || (snapshot->pixel_bytes > UINT32_MAX))
-    return NULL;
-
-  event = (ViewerClassicEvent *)calloc(1, sizeof(*event));
-  if (!event)
-    return NULL;
-
-  event->bitmap = (BITMAP_UPDATE *)calloc(1, sizeof(*event->bitmap));
-  if (!event->bitmap) {
-    free(event);
-    return NULL;
-  }
-
-  event->bitmap->rectangles = (BITMAP_DATA *)calloc(1, sizeof(BITMAP_DATA));
-  if (!event->bitmap->rectangles) {
-    viewer_classic_event_free(event);
-    return NULL;
-  }
-
-  event->bitmap->number = 1;
-  event->bitmap->skipCompression = TRUE;
-  rect = &event->bitmap->rectangles[0];
-  rect->destLeft = 0;
-  rect->destTop = 0;
-  rect->destRight = snapshot->width - 1U;
-  rect->destBottom = snapshot->height - 1U;
-  rect->width = snapshot->width;
-  rect->height = snapshot->height;
-  rect->bitsPerPixel = 32;
-  rect->flags = 0;
-  rect->bitmapLength = (UINT32)snapshot->pixel_bytes;
-  rect->cbScanWidth = snapshot->stride;
-  rect->cbUncompressedSize = (UINT32)snapshot->pixel_bytes;
-  rect->compressed = FALSE;
-  rect->bitmapDataStream = (BYTE *)malloc(snapshot->pixel_bytes);
-  if (!rect->bitmapDataStream) {
-    viewer_classic_event_free(event);
-    return NULL;
-  }
-
-  memmove(rect->bitmapDataStream, snapshot->pixels, snapshot->pixel_bytes);
-  event->generation = snapshot->generation;
-  return event;
 }
 
 static BOOL
@@ -838,7 +699,7 @@ viewer_enqueue_classic_baseline_from_framebuffer(ViewerServer *server,
     return FALSE;
 
   EnterCriticalSection(&viewer->send_lock);
-  queued = viewer_classic_enqueue_event_locked(viewer, event);
+  queued = viewer_enqueue_classic_event_locked(viewer, event);
   LeaveCriticalSection(&viewer->send_lock);
 
   if (!queued) {
@@ -850,246 +711,83 @@ viewer_enqueue_classic_baseline_from_framebuffer(ViewerServer *server,
   return TRUE;
 }
 
-/* ---- SurfaceBits event: deep-copy and free ---- */
+static void viewer_clear_classic_queue_locked(Viewer *viewer) {
+  ViewerClassicQueueDropInfo drop_info = {0};
 
-static ViewerSurfaceBitsEvent *
-viewer_surface_bits_event_new(const SURFACE_BITS_COMMAND *cmd) {
-  ViewerSurfaceBitsEvent *event = NULL;
-
-  if (!cmd)
-    return NULL;
-
-  event = (ViewerSurfaceBitsEvent *)calloc(1, sizeof(ViewerSurfaceBitsEvent));
-  if (!event)
-    return NULL;
-
-  /* Shallow-copy all fields */
-  event->cmd = *cmd;
-
-  /* Deep-copy the bitmapData buffer */
-  if (cmd->bmp.bitmapDataLength > 0 && cmd->bmp.bitmapData) {
-    event->cmd.bmp.bitmapData = (BYTE *)malloc(cmd->bmp.bitmapDataLength);
-    if (!event->cmd.bmp.bitmapData) {
-      free(event);
-      return NULL;
-    }
-    memmove(event->cmd.bmp.bitmapData, cmd->bmp.bitmapData,
-            cmd->bmp.bitmapDataLength);
-  } else {
-    event->cmd.bmp.bitmapData = NULL;
-    event->cmd.bmp.bitmapDataLength = 0;
-  }
-
-  return event;
-}
-
-static void viewer_surface_bits_event_free(ViewerSurfaceBitsEvent *event) {
-  if (!event)
+  if (!viewer)
     return;
 
-  free(event->cmd.bmp.bitmapData);
-  free(event);
-}
-
-/* ---- Classic bitmap queue: queue operations ---- */
-
-/* Drop the oldest entry from the classic queue. Caller must hold send_lock. */
-static void viewer_classic_queue_drop_oldest_locked(Viewer *viewer) {
-  ViewerClassicEvent *oldest = NULL;
-
-  if (viewer->classic_queue_count == 0)
-    return;
-
-  oldest = viewer->classic_queue[viewer->classic_queue_head];
-  viewer->classic_queue[viewer->classic_queue_head] = NULL;
-  viewer->classic_queue_head =
-      (viewer->classic_queue_head + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
-  viewer->classic_queue_count--;
-
-  viewer_classic_event_free(oldest);
-  viewer->bitmap_queue_dropped++;
-  if (g_viewer_server)
-    viewer_publisher_note_classic_drop(&g_viewer_server->publisher);
+  viewer_classic_queue_clear_locked(&viewer->classic_queues, &drop_info);
+  viewer_apply_classic_drop_info_locked(viewer, &drop_info, FALSE);
   viewer_note_classic_queue_state_locked(viewer);
 }
 
-static void viewer_classic_queue_clear_locked(Viewer *viewer) {
-  while (viewer->classic_queue_count > 0)
-    viewer_classic_queue_drop_oldest_locked(viewer);
-}
-
-/* Enqueue a deep-copied BITMAP_UPDATE for a viewer.
- * Called from the backend thread under viewer->send_lock.
- * Returns TRUE on success, FALSE if the viewer should be disconnected. */
-static BOOL viewer_classic_enqueue_locked(Viewer *viewer,
-                                          const BITMAP_UPDATE *bitmap) {
-  ViewerClassicEvent *event = NULL;
-
-  if (!viewer || !bitmap)
-    return FALSE;
-
-  /* If queue is full, drop oldest entries to make room */
-  while (viewer->classic_queue_count >= VIEWER_CLASSIC_QUEUE_CAPACITY) {
-    WLog_WARN(TAG, "Viewer %u classic queue full (%u entries), dropping oldest",
-              viewer->id, viewer->classic_queue_count);
-    viewer_classic_queue_drop_oldest_locked(viewer);
-
-    /* After dropping, mark viewer for full refresh to resync */
-    viewer->needs_full_refresh = TRUE;
-    viewer->full_refresh_deadline_ts =
-        platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
-  }
-
-  event = viewer_classic_event_new(bitmap);
-  if (!event) {
-    WLog_ERR(TAG, "Viewer %u failed to allocate classic event", viewer->id);
-    return FALSE;
-  }
-
-  viewer->classic_queue[viewer->classic_queue_tail] = event;
-  viewer->classic_queue_tail =
-      (viewer->classic_queue_tail + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
-  viewer->classic_queue_count++;
-  viewer->bitmap_updates_queued++;
-  viewer_note_classic_queue_state_locked(viewer);
-  viewer_classic_apply_latest_policy_locked(viewer);
-
-  /* Signal the viewer thread that a new event is available */
-  if (viewer->classic_event)
-    SetEvent(viewer->classic_event);
-
-  return TRUE;
-}
-
-/* Enqueue a pre-built event into the viewer's classic queue.
- * Caller must hold send_lock. The event must have been deep-copied
- * by the caller before acquiring the lock. Returns TRUE on success. */
-static BOOL viewer_classic_enqueue_event_locked(Viewer *viewer,
+static BOOL viewer_enqueue_classic_event_locked(Viewer *viewer,
                                                 ViewerClassicEvent *event) {
+  ViewerClassicQueueDropInfo drop_info = {0};
+  BOOL enqueued = FALSE;
+  UINT32 depth = 0;
+
   if (!viewer || !event)
     return FALSE;
 
-  /* If queue is full, drop oldest entries to make room */
-  while (viewer->classic_queue_count >= VIEWER_CLASSIC_QUEUE_CAPACITY) {
+  depth = viewer_classic_queue_depth_locked(&viewer->classic_queues);
+  if (depth >= VIEWER_CLASSIC_QUEUE_CAPACITY)
     WLog_WARN(TAG, "Viewer %u classic queue full (%u entries), dropping oldest",
-              viewer->id, viewer->classic_queue_count);
-    viewer_classic_queue_drop_oldest_locked(viewer);
+              viewer->id, depth);
 
-    /* After dropping, mark viewer for full refresh to resync */
-    viewer->needs_full_refresh = TRUE;
-    viewer->full_refresh_deadline_ts =
-        platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
-  }
-
-  viewer->classic_queue[viewer->classic_queue_tail] = event;
-  viewer->classic_queue_tail =
-      (viewer->classic_queue_tail + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
-  viewer->classic_queue_count++;
-  viewer->bitmap_updates_queued++;
+  enqueued = viewer_classic_queue_enqueue_event_locked(&viewer->classic_queues,
+                                                       event, &drop_info);
+  viewer_apply_classic_drop_info_locked(viewer, &drop_info, TRUE);
+  if (enqueued)
+    viewer->bitmap_updates_queued++;
   viewer_note_classic_queue_state_locked(viewer);
   viewer_classic_apply_latest_policy_locked(viewer);
-
-  /* Signal the viewer thread that a new event is available */
-  if (viewer->classic_event)
-    SetEvent(viewer->classic_event);
-
-  return TRUE;
+  return enqueued;
 }
 
-/* Dequeue the oldest event from the classic queue. Caller must hold send_lock.
- * Returns NULL if queue is empty. Caller must free the returned event. */
-static ViewerClassicEvent *viewer_classic_dequeue_locked(Viewer *viewer) {
+static ViewerClassicEvent *viewer_dequeue_classic_event_locked(Viewer *viewer) {
   ViewerClassicEvent *event = NULL;
 
-  if (!viewer || (viewer->classic_queue_count == 0))
+  if (!viewer)
     return NULL;
 
-  event = viewer->classic_queue[viewer->classic_queue_head];
-  viewer->classic_queue[viewer->classic_queue_head] = NULL;
-  viewer->classic_queue_head =
-      (viewer->classic_queue_head + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
-  viewer->classic_queue_count--;
-  viewer_note_classic_queue_state_locked(viewer);
-
+  event = viewer_classic_queue_dequeue_locked(&viewer->classic_queues);
+  if (event)
+    viewer_note_classic_queue_state_locked(viewer);
   return event;
 }
 
-/* ---- SurfaceBits queue: queue operations ---- */
-
-/* Drop the oldest entry from the SurfaceBits queue. Caller must hold send_lock.
- */
-static void viewer_surface_bits_queue_drop_oldest_locked(Viewer *viewer) {
-  ViewerSurfaceBitsEvent *oldest = NULL;
-
-  if (viewer->surface_bits_queue_count == 0)
-    return;
-
-  oldest = viewer->surface_bits_queue[viewer->surface_bits_queue_head];
-  viewer->surface_bits_queue[viewer->surface_bits_queue_head] = NULL;
-  viewer->surface_bits_queue_head = (viewer->surface_bits_queue_head + 1) %
-                                    VIEWER_SURFACE_BITS_QUEUE_CAPACITY;
-  viewer->surface_bits_queue_count--;
-
-  viewer_surface_bits_event_free(oldest);
-  viewer->surface_bits_queue_dropped++;
-}
-
-static void viewer_surface_bits_queue_clear_locked(Viewer *viewer) {
-  while (viewer->surface_bits_queue_count > 0)
-    viewer_surface_bits_queue_drop_oldest_locked(viewer);
-}
-
-/* Enqueue a pre-built SurfaceBits event into the viewer's queue.
- * Caller must hold send_lock. Returns TRUE on success. */
 static BOOL
-viewer_surface_bits_enqueue_event_locked(Viewer *viewer,
+viewer_enqueue_surface_bits_event_locked(Viewer *viewer,
                                          ViewerSurfaceBitsEvent *event) {
+  ViewerClassicQueueDropInfo drop_info = {0};
+  BOOL enqueued = FALSE;
+  UINT32 depth = 0;
+
   if (!viewer || !event)
     return FALSE;
 
-  /* If queue is full, drop oldest entries to make room */
-  while (viewer->surface_bits_queue_count >=
-         VIEWER_SURFACE_BITS_QUEUE_CAPACITY) {
+  depth = viewer_surface_bits_queue_depth_locked(&viewer->classic_queues);
+  if (depth >= VIEWER_SURFACE_BITS_QUEUE_CAPACITY) {
     WLog_WARN(TAG,
               "Viewer %u SurfaceBits queue full (%u entries), dropping oldest",
-              viewer->id, viewer->surface_bits_queue_count);
-    viewer_surface_bits_queue_drop_oldest_locked(viewer);
-
-    /* Note: do NOT set needs_full_refresh here. SurfaceBits ARE the
-     * refresh data — setting needs_full_refresh would cause the pump
-     * to drop all queued SurfaceBits, creating a deadlock. */
+              viewer->id, depth);
   }
 
-  viewer->surface_bits_queue[viewer->surface_bits_queue_tail] = event;
-  viewer->surface_bits_queue_tail = (viewer->surface_bits_queue_tail + 1) %
-                                    VIEWER_SURFACE_BITS_QUEUE_CAPACITY;
-  viewer->surface_bits_queue_count++;
-  viewer->surface_bits_updates_queued++;
-
-  /* Signal the viewer thread that a new event is available */
-  if (viewer->classic_event)
-    SetEvent(viewer->classic_event);
-
-  return TRUE;
+  enqueued = viewer_surface_bits_queue_enqueue_event_locked(
+      &viewer->classic_queues, event, &drop_info);
+  viewer_apply_surface_bits_drop_info_locked(viewer, &drop_info);
+  if (enqueued)
+    viewer->surface_bits_updates_queued++;
+  return enqueued;
 }
 
-/* Dequeue the oldest event from the SurfaceBits queue. Caller must hold
- * send_lock. Returns NULL if queue is empty. Caller must free the returned
- * event. */
 static ViewerSurfaceBitsEvent *
-viewer_surface_bits_dequeue_locked(Viewer *viewer) {
-  ViewerSurfaceBitsEvent *event = NULL;
-
-  if (!viewer || (viewer->surface_bits_queue_count == 0))
-    return NULL;
-
-  event = viewer->surface_bits_queue[viewer->surface_bits_queue_head];
-  viewer->surface_bits_queue[viewer->surface_bits_queue_head] = NULL;
-  viewer->surface_bits_queue_head = (viewer->surface_bits_queue_head + 1) %
-                                    VIEWER_SURFACE_BITS_QUEUE_CAPACITY;
-  viewer->surface_bits_queue_count--;
-
-  return event;
+viewer_dequeue_surface_bits_event_locked(Viewer *viewer) {
+  return viewer
+             ? viewer_surface_bits_queue_dequeue_locked(&viewer->classic_queues)
+             : NULL;
 }
 
 static BOOL viewer_gfx_publisher_state_init(ViewerGfxPublisherState *gfx) {
@@ -1160,18 +858,20 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
     if (viewer->needs_full_refresh) {
       /* Drop all queued updates — they're stale relative to the
        * upcoming full refresh */
-      if (viewer->classic_queue_count > 0) {
+      UINT32 classic_depth =
+          viewer_classic_queue_depth_locked(&viewer->classic_queues);
+      if (classic_depth > 0) {
         WLog_INFO(TAG,
                   "Viewer %u pump-classic: dropping %" PRIu32
                   " queued updates (needs full refresh)",
-                  viewer->id, viewer->classic_queue_count);
-        viewer_classic_queue_clear_locked(viewer);
+                  viewer->id, classic_depth);
+        viewer_clear_classic_queue_locked(viewer);
       }
       LeaveCriticalSection(&viewer->send_lock);
       break;
     }
 
-    event = viewer_classic_dequeue_locked(viewer);
+    event = viewer_dequeue_classic_event_locked(viewer);
     LeaveCriticalSection(&viewer->send_lock);
 
     if (!event)
@@ -1190,7 +890,8 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
      * rdp_update_lock is already held across the entire pump loop, so mstsc
 
      * * receives all updates as a continuous stream. */
-    if (!viewer_send_bitmap_update_locked(viewer, event->bitmap)) {
+    if (!viewer_send_bitmap_update_locked(viewer,
+                                          viewer_classic_event_bitmap(event))) {
       WLog_WARN(TAG, "Viewer %u pump-classic: send failed", viewer->id);
       viewer_classic_event_free(event);
       /* Send failure is not fatal — the viewer may recover */
@@ -1198,8 +899,10 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
     }
 
     pumped++;
-    if (event->generation > viewer->classic_last_generation_sent)
-      viewer->classic_last_generation_sent = event->generation;
+    if (viewer_classic_event_generation(event) >
+        viewer->classic_last_generation_sent)
+      viewer->classic_last_generation_sent =
+          viewer_classic_event_generation(event);
     viewer_classic_event_free(event);
   }
 
@@ -1212,7 +915,7 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
     ViewerSurfaceBitsEvent *sb_event = NULL;
 
     EnterCriticalSection(&viewer->send_lock);
-    sb_event = viewer_surface_bits_dequeue_locked(viewer);
+    sb_event = viewer_dequeue_surface_bits_event_locked(viewer);
     LeaveCriticalSection(&viewer->send_lock);
 
     if (!sb_event)
@@ -1220,7 +923,8 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
 
     /* Send outside send_lock — rdp_update_lock provides FreeRDP's own sync,
      * and the event data is locally owned after dequeue. */
-    if (!viewer_send_surface_bits(viewer, &sb_event->cmd)) {
+    if (!viewer_send_surface_bits(
+            viewer, viewer_surface_bits_event_command(sb_event))) {
       WLog_WARN(TAG, "Viewer %u pump-classic: SurfaceBits send failed",
                 viewer->id);
       viewer_surface_bits_event_free(sb_event);
@@ -1361,14 +1065,7 @@ static BOOL viewer_send_state_init(Viewer *viewer) {
   viewer->sustained_lag_start_ts = 0;
   viewer->last_pointer_position_generation = 0;
   viewer->last_pointer_shape_generation = 0;
-  viewer->classic_queue_head = 0;
-  viewer->classic_queue_tail = 0;
-  viewer->classic_queue_count = 0;
-  memset(viewer->classic_queue, 0, sizeof(viewer->classic_queue));
-  viewer->surface_bits_queue_head = 0;
-  viewer->surface_bits_queue_tail = 0;
-  viewer->surface_bits_queue_count = 0;
-  memset(viewer->surface_bits_queue, 0, sizeof(viewer->surface_bits_queue));
+  memset(&viewer->classic_queues, 0, sizeof(viewer->classic_queues));
   viewer->surface_bits_updates_sent = 0;
   viewer->surface_bits_updates_failed = 0;
   viewer->surface_bits_updates_skipped_writeblock = 0;
@@ -1378,8 +1075,7 @@ static BOOL viewer_send_state_init(Viewer *viewer) {
   viewer->surface_bits_send_time_total_us = 0;
   viewer->surface_bits_send_time_max_us = 0;
   viewer->surface_bits_payload_bytes_sent = 0;
-  viewer->classic_event = CreateEventA(NULL, TRUE, FALSE, NULL);
-  if (!viewer->classic_event) {
+  if (!viewer_classic_queues_init(&viewer->classic_queues)) {
     DeleteCriticalSection(&viewer->send_lock);
     return FALSE;
   }
@@ -1387,20 +1083,22 @@ static BOOL viewer_send_state_init(Viewer *viewer) {
 }
 
 static void viewer_send_state_uninit(Viewer *viewer) {
-  if (!viewer || !viewer->classic_event)
+  if (!viewer || !viewer_classic_queues_event(&viewer->classic_queues))
     return;
 
   /* Free any remaining classic queue entries */
   EnterCriticalSection(&viewer->send_lock);
-  viewer_classic_queue_clear_locked(viewer);
-  viewer_surface_bits_queue_clear_locked(viewer);
+  viewer_clear_classic_queue_locked(viewer);
+  {
+    ViewerClassicQueueDropInfo surface_drop_info = {0};
+    viewer_surface_bits_queue_clear_locked(&viewer->classic_queues,
+                                           &surface_drop_info);
+    viewer_apply_surface_bits_drop_info_locked(viewer, &surface_drop_info);
+  }
   viewer->classic_last_generation_sent = 0;
   LeaveCriticalSection(&viewer->send_lock);
 
-  if (viewer->classic_event) {
-    CloseHandle(viewer->classic_event);
-    viewer->classic_event = NULL;
-  }
+  viewer_classic_queues_uninit(&viewer->classic_queues);
 
   DeleteCriticalSection(&viewer->send_lock);
 }
@@ -2163,8 +1861,10 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
       /* Add classic_event to the wait set so the viewer thread wakes
        *
        * immediately when a bitmap update is enqueued (Option B). */
-      if (viewer->classic_event && (wait_count < MAXIMUM_WAIT_OBJECTS)) {
-        wait_objects[wait_count] = viewer->classic_event;
+      if (viewer_classic_queues_event(&viewer->classic_queues) &&
+          (wait_count < MAXIMUM_WAIT_OBJECTS)) {
+        wait_objects[wait_count] =
+            viewer_classic_queues_event(&viewer->classic_queues);
         wait_count++;
       }
 
@@ -2176,8 +1876,7 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
         break;
 
       /* Reset the classic event signal — we'll drain the queue below */
-      if (viewer->classic_event)
-        ResetEvent(viewer->classic_event);
+      viewer_classic_queues_reset_event(&viewer->classic_queues);
     } else if (peer && peer->CheckFileDescriptor) {
       if (!peer->CheckFileDescriptor(peer))
         break;
@@ -3408,7 +3107,7 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
       continue;
     }
     EnterCriticalSection(&viewer->send_lock);
-    enqueued = viewer_surface_bits_enqueue_event_locked(viewer, event);
+    enqueued = viewer_enqueue_surface_bits_event_locked(viewer, event);
     LeaveCriticalSection(&viewer->send_lock);
     if (enqueued)
       enqueued_count++;
@@ -3543,7 +3242,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
         continue;
       }
       EnterCriticalSection(&viewer->send_lock);
-      enqueued = viewer_classic_enqueue_event_locked(viewer, event);
+      enqueued = viewer_enqueue_classic_event_locked(viewer, event);
       LeaveCriticalSection(&viewer->send_lock);
       if (enqueued)
         enqueued_count++;
@@ -3566,7 +3265,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
         continue;
       }
       EnterCriticalSection(&viewer->send_lock);
-      enqueued = viewer_classic_enqueue_event_locked(viewer, event);
+      enqueued = viewer_enqueue_classic_event_locked(viewer, event);
       LeaveCriticalSection(&viewer->send_lock);
       if (enqueued)
         enqueued_count++;
@@ -3599,7 +3298,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
         continue;
       }
       EnterCriticalSection(&viewer->send_lock);
-      enqueued = viewer_classic_enqueue_event_locked(viewer, event);
+      enqueued = viewer_enqueue_classic_event_locked(viewer, event);
       LeaveCriticalSection(&viewer->send_lock);
       if (enqueued)
         enqueued_count++;

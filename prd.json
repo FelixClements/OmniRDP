@@ -151,8 +151,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "Mechanical extraction first; do not change stale/drop/coalescing policy here."
+      "passes": true,
+      "notes": "Completed: added dedicated viewer_classic_queue internal module for classic bitmap and SurfaceBits event storage, deep-copy/free helpers, payload accounting, FIFO enqueue/dequeue/clear/drop mechanics, and wake event ownership. viewer_server.c now coordinates queue operations through locked wrappers and keeps latest-state/full-refresh/drop policy side effects in server/publisher. Added test_viewer_classic_queue covering deep-copy, FIFO ordering, drop metadata, clear/uninit, payload accounting, snapshot baseline event generation/dimensions, SurfaceBits queue behavior, and wake event signaling. clang-format, JSON validation, git diff --check, Debug build, and CTest passed on 2026-05-23."
     },
     {
       "id": "US-008",

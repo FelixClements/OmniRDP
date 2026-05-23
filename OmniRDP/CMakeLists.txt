@@ -38,6 +38,7 @@ set(SOURCES
     src/viewer_internal.c
     src/viewer_framebuffer.c
     src/viewer_publisher.c
+    src/viewer_classic_queue.c
     src/viewer_gfx_pipeline.c
     src/viewer_gfx_codec_uncompressed.c
     src/viewer_server.c
@@ -58,6 +59,7 @@ set(HEADERS
     include/viewer_framebuffer.h
     include/viewer_publisher_config.h
     include/viewer_publisher.h
+    src/viewer_classic_queue.h
     include/viewer_gfx_pipeline.h
     include/viewer_gfx_codec_uncompressed.h
     include/platform_compat.h

@@ -2,6 +2,7 @@
 #define VIEWER_SERVER_INTERNAL_H
 
 #include "monitor_layout.h"
+#include "viewer_classic_queue.h"
 #include "viewer_framebuffer.h"
 #include "viewer_publisher.h"
 #include "viewer_server.h"
@@ -22,8 +23,6 @@ extern "C" {
 #define MAX_VIEWERS 10
 #define VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY 8U
 #define VIEWER_GFX_DIRTY_ACK_TIMEOUT_MS 2000U
-#define VIEWER_CLASSIC_QUEUE_CAPACITY 32U
-#define VIEWER_SURFACE_BITS_QUEUE_CAPACITY 1024U
 
 typedef enum {
   VIEWER_JOIN_STATE_NONE = 0,
@@ -109,15 +108,6 @@ typedef struct {
   CRITICAL_SECTION lock;
 } ViewerGraphicsContext;
 
-typedef struct ViewerClassicEvent {
-  BITMAP_UPDATE *bitmap; /* deep-copied, owned by this event */
-  UINT64 generation;     /* nonzero for framebuffer-backed latest baselines */
-} ViewerClassicEvent;
-
-typedef struct ViewerSurfaceBitsEvent {
-  SURFACE_BITS_COMMAND cmd; /* deep-copied, owned by this event */
-} ViewerSurfaceBitsEvent;
-
 typedef struct {
   freerdp_peer *peer;
   rdpContext *context;
@@ -152,16 +142,7 @@ typedef struct {
   UINT64 sustained_lag_start_ts;
   UINT64 last_pointer_position_generation;
   UINT64 last_pointer_shape_generation;
-  ViewerClassicEvent *classic_queue[VIEWER_CLASSIC_QUEUE_CAPACITY];
-  UINT32 classic_queue_head;
-  UINT32 classic_queue_tail;
-  UINT32 classic_queue_count;
-  HANDLE classic_event;
-  ViewerSurfaceBitsEvent
-      *surface_bits_queue[VIEWER_SURFACE_BITS_QUEUE_CAPACITY];
-  UINT32 surface_bits_queue_head;
-  UINT32 surface_bits_queue_tail;
-  UINT32 surface_bits_queue_count;
+  ViewerClassicQueues classic_queues;
   UINT64 surface_bits_updates_sent;
   UINT64 surface_bits_updates_failed;
   UINT64 surface_bits_updates_skipped_writeblock;

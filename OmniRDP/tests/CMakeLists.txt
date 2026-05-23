@@ -19,6 +19,11 @@ add_executable(test_viewer_publisher
     ${CMAKE_SOURCE_DIR}/src/viewer_framebuffer.c
 )
 
+add_executable(test_viewer_classic_queue
+    test_viewer_classic_queue.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_classic_queue.c
+)
+
 add_executable(test_viewer_gfx_pipeline
     test_viewer_gfx_pipeline.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_pipeline.c
@@ -105,6 +110,22 @@ target_include_directories(test_viewer_publisher PRIVATE
 target_link_libraries(test_viewer_publisher ${WINPR_LIB})
 
 set_target_properties(test_viewer_publisher PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+)
+
+target_include_directories(test_viewer_classic_queue PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${FREERDP_ROOT}/include
+    ${FREERDP_ROOT}/winpr/include
+    ${FREERDP_BUILD}/include
+    ${FREERDP_BUILD}/winpr/include
+)
+
+target_link_libraries(test_viewer_classic_queue ${WINPR_LIB})
+
+set_target_properties(test_viewer_classic_queue PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
 )
@@ -198,6 +219,14 @@ add_test(NAME test_viewer_publisher
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_viewer_publisher PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_viewer_classic_queue
+    COMMAND ${CMAKE_COMMAND}
+        -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DTEST_EXECUTABLE_NAME=test_viewer_classic_queue${CMAKE_EXECUTABLE_SUFFIX}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
+)
+set_tests_properties(test_viewer_classic_queue PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_viewer_gfx_pipeline
     COMMAND ${CMAKE_COMMAND}
