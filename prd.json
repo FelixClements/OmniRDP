@@ -172,8 +172,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 8,
-      "passes": false,
-      "notes": "Policy ownership move only; preserve classic delivery semantics."
+      "passes": true,
+      "notes": "Completed: classic BitmapUpdate publish, SurfaceBits publish, pump full-refresh/drop, and latest-state threshold decisions now use pure viewer_publisher decision APIs with viewer_server.c applying side effects only. viewer_classic_queue remains mechanical queue/event storage. Added publisher policy tests for publish gates, throttling, pump full-refresh drop decisions, and latest-state unavailable snapshot metrics. clang-format, JSON validation, git diff --check, Debug build, and CTest passed on 2026-05-23."
     },
     {
       "id": "US-009",

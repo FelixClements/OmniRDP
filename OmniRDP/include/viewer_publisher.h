@@ -40,6 +40,41 @@ typedef enum {
   VIEWER_PUBLISHER_CLASSIC_DECISION_REPLACE_WITH_BASELINE = 1
 } ViewerPublisherClassicDecision;
 
+typedef enum {
+  VIEWER_PUBLISHER_BITMAP_PUBLISH_NOT_READY = 0,
+  VIEWER_PUBLISHER_BITMAP_PUBLISH_ENQUEUE = 1,
+  VIEWER_PUBLISHER_BITMAP_PUBLISH_CLEAR_FULL_REFRESH_AND_ENQUEUE = 2,
+  VIEWER_PUBLISHER_BITMAP_PUBLISH_THROTTLE_AND_REQUEST_REFRESH = 3
+} ViewerPublisherBitmapPublishAction;
+
+typedef struct {
+  ViewerPublisherBitmapPublishAction action;
+  BOOL clear_full_refresh;
+  BOOL count_full_refresh_gate;
+  BOOL count_throttled;
+  BOOL request_full_refresh;
+  BOOL enqueue;
+} ViewerPublisherBitmapPublishDecision;
+
+typedef enum {
+  VIEWER_PUBLISHER_SURFACE_BITS_PUBLISH_NOT_READY = 0,
+  VIEWER_PUBLISHER_SURFACE_BITS_PUBLISH_ENQUEUE = 1
+} ViewerPublisherSurfaceBitsPublishAction;
+
+typedef struct {
+  ViewerPublisherSurfaceBitsPublishAction action;
+  BOOL clear_full_refresh;
+  BOOL count_full_refresh_gate;
+  BOOL count_throttled;
+  BOOL request_full_refresh;
+  BOOL enqueue;
+} ViewerPublisherSurfaceBitsPublishDecision;
+
+typedef enum {
+  VIEWER_PUBLISHER_CLASSIC_PUMP_SEND_BITMAPS = 0,
+  VIEWER_PUBLISHER_CLASSIC_PUMP_DROP_BITMAPS_FOR_FULL_REFRESH = 1
+} ViewerPublisherClassicPumpDecision;
+
 typedef struct {
   BOOL initialized;
   BOOL lock_initialized;
@@ -68,6 +103,17 @@ void viewer_publisher_set_classic_policy(
     const ViewerPublisherClassicPolicyConfig *config);
 ViewerPublisherClassicDecision viewer_publisher_classic_queue_decision(
     ViewerPublisher *publisher, UINT32 queue_depth, UINT64 queued_bytes);
+ViewerPublisherBitmapPublishDecision
+viewer_publisher_bitmap_publish_decision(BOOL ready, BOOL needs_full_refresh,
+                                         BOOL refresh_in_flight,
+                                         BOOL throttled);
+ViewerPublisherSurfaceBitsPublishDecision
+viewer_publisher_surface_bits_publish_decision(BOOL ready,
+                                               BOOL needs_full_refresh,
+                                               BOOL throttled);
+ViewerPublisherClassicPumpDecision
+viewer_publisher_classic_pump_decision(BOOL needs_full_refresh,
+                                       UINT32 bitmap_queue_depth);
 BOOL viewer_publisher_classic_latest_snapshot(
     ViewerPublisher *publisher, ViewerFramebuffer *framebuffer,
     UINT64 viewer_last_generation_sent, ViewerFramebufferSnapshot *snapshot);

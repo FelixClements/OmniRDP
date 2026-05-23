@@ -11,7 +11,7 @@ Archived prior loop evidence:
 
 ## Current status
 
-US-001 through US-007 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
+US-001 through US-008 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
 
 ## Story backlog
 
@@ -22,7 +22,7 @@ US-001 through US-007 are complete. Do not mark another story complete until its
 5. `US-005` — complete — Move viewer-local RDPEGFX surface/reset state into pipeline. Activation no longer copies negotiated/backend dimensions into viewer GFX surface state; canonical framebuffer snapshots drive ResetGraphics/CreateSurface/MapSurfaceToOutput/full-frame baseline dimensions and successful baselines enable dirty updates. Backend layout changes now invalidate pipeline surface/dirty state and wait for the next canonical snapshot. Tests cover activation, baseline dimensions/recording, dirty denial before baseline and dimension mismatch, and invalidation. Debug build and CTest passed on 2026-05-23.
 6. `US-006` — complete — Shrink `viewer_server.h` public surface. `viewer_server.h` is now a public facade for lifecycle/config/backend-publish APIs with opaque server/backend declarations; internal viewer, RDPEGFX negotiation/pipeline state, queues, and full server storage moved to `src/viewer_server_internal.h`. `MonitorLayout` moved to `include/monitor_layout.h` for backend/main compatibility. CTest `test_public_viewer_server_facade` enforces forbidden internal tokens in the public facade. Debug build and CTest passed on 2026-05-23.
 7. `US-007` — complete — Extract classic queue data structures.
-8. `US-008` — pending — Move classic backlog policy out of viewer server.
+8. `US-008` — complete — Move classic backlog policy out of viewer server. Classic BitmapUpdate publish, SurfaceBits publish, pump full-refresh/drop, and latest-state threshold decisions now use pure `viewer_publisher` decision APIs; `viewer_server.c` applies side effects, queue operations, refresh requests, counters/logging, snapshots, and classic sends. `viewer_classic_queue` remains mechanical. Debug build and CTest passed on 2026-05-23.
 9. `US-009` — pending — Move classic FreeRDP sends into transport module.
 10. `US-010` — pending — Implement strict RDPEGFX capabilities whitelist.
 11. `US-011` — pending — Add frame epoch and backpressure-safe ACK handling.

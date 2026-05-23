@@ -182,6 +182,71 @@ ViewerPublisherClassicDecision viewer_publisher_classic_queue_decision(
   return decision;
 }
 
+ViewerPublisherBitmapPublishDecision
+viewer_publisher_bitmap_publish_decision(BOOL ready, BOOL needs_full_refresh,
+                                         BOOL refresh_in_flight,
+                                         BOOL throttled) {
+  ViewerPublisherBitmapPublishDecision decision = {0};
+
+  if (!ready) {
+    decision.action = VIEWER_PUBLISHER_BITMAP_PUBLISH_NOT_READY;
+    return decision;
+  }
+
+  if (needs_full_refresh) {
+    decision.action =
+        VIEWER_PUBLISHER_BITMAP_PUBLISH_CLEAR_FULL_REFRESH_AND_ENQUEUE;
+    decision.clear_full_refresh = TRUE;
+    decision.count_full_refresh_gate = !refresh_in_flight;
+    decision.enqueue = TRUE;
+    return decision;
+  }
+
+  if (throttled) {
+    decision.action =
+        VIEWER_PUBLISHER_BITMAP_PUBLISH_THROTTLE_AND_REQUEST_REFRESH;
+    decision.count_throttled = TRUE;
+    decision.request_full_refresh = TRUE;
+    return decision;
+  }
+
+  decision.action = VIEWER_PUBLISHER_BITMAP_PUBLISH_ENQUEUE;
+  decision.enqueue = TRUE;
+  return decision;
+}
+
+ViewerPublisherSurfaceBitsPublishDecision
+viewer_publisher_surface_bits_publish_decision(BOOL ready,
+                                               BOOL needs_full_refresh,
+                                               BOOL throttled) {
+  ViewerPublisherSurfaceBitsPublishDecision decision = {0};
+
+  if (!ready) {
+    decision.action = VIEWER_PUBLISHER_SURFACE_BITS_PUBLISH_NOT_READY;
+    return decision;
+  }
+
+  decision.action = VIEWER_PUBLISHER_SURFACE_BITS_PUBLISH_ENQUEUE;
+  decision.enqueue = TRUE;
+  if (needs_full_refresh) {
+    decision.clear_full_refresh = TRUE;
+    decision.count_full_refresh_gate = TRUE;
+  }
+  if (throttled) {
+    decision.count_throttled = TRUE;
+    decision.request_full_refresh = TRUE;
+  }
+  return decision;
+}
+
+ViewerPublisherClassicPumpDecision
+viewer_publisher_classic_pump_decision(BOOL needs_full_refresh,
+                                       UINT32 bitmap_queue_depth) {
+  if (needs_full_refresh && (bitmap_queue_depth > 0))
+    return VIEWER_PUBLISHER_CLASSIC_PUMP_DROP_BITMAPS_FOR_FULL_REFRESH;
+  return VIEWER_PUBLISHER_CLASSIC_PUMP_SEND_BITMAPS;
+}
+
 BOOL viewer_publisher_classic_latest_snapshot(
     ViewerPublisher *publisher, ViewerFramebuffer *framebuffer,
     UINT64 viewer_last_generation_sent, ViewerFramebufferSnapshot *snapshot) {

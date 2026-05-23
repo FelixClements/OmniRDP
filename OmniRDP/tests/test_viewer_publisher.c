@@ -274,6 +274,118 @@ static int test_classic_policy_reset_to_default_fifo(void) {
   return ok;
 }
 
+static int test_bitmap_publish_policy_decisions(void) {
+  ViewerPublisherBitmapPublishDecision decision = {0};
+  int ok = 1;
+
+  decision =
+      viewer_publisher_bitmap_publish_decision(FALSE, FALSE, FALSE, FALSE);
+  ok = ok &&
+       expect_int(decision.action, VIEWER_PUBLISHER_BITMAP_PUBLISH_NOT_READY,
+                  "bitmap not ready skips");
+  ok =
+      ok && expect_true(!decision.enqueue, "bitmap not ready does not enqueue");
+
+  decision = viewer_publisher_bitmap_publish_decision(TRUE, TRUE, FALSE, FALSE);
+  ok = ok && expect_int(
+                 decision.action,
+                 VIEWER_PUBLISHER_BITMAP_PUBLISH_CLEAR_FULL_REFRESH_AND_ENQUEUE,
+                 "bitmap clears completed full-refresh gate");
+  ok = ok && expect_true(decision.clear_full_refresh,
+                         "bitmap clears full-refresh flag");
+  ok = ok && expect_true(decision.count_full_refresh_gate,
+                         "bitmap counts non-inflight full-refresh gate");
+  ok = ok && expect_true(decision.enqueue, "bitmap gated update enqueues");
+
+  decision = viewer_publisher_bitmap_publish_decision(TRUE, TRUE, TRUE, FALSE);
+  ok = ok && expect_int(
+                 decision.action,
+                 VIEWER_PUBLISHER_BITMAP_PUBLISH_CLEAR_FULL_REFRESH_AND_ENQUEUE,
+                 "bitmap enqueues in-flight full refresh data");
+  ok = ok && expect_true(decision.clear_full_refresh,
+                         "bitmap in-flight clears full-refresh flag");
+  ok = ok && expect_true(!decision.count_full_refresh_gate,
+                         "bitmap in-flight gate is not counted");
+  ok = ok && expect_true(decision.enqueue, "bitmap in-flight update enqueues");
+
+  decision = viewer_publisher_bitmap_publish_decision(TRUE, FALSE, FALSE, TRUE);
+  ok = ok &&
+       expect_int(decision.action,
+                  VIEWER_PUBLISHER_BITMAP_PUBLISH_THROTTLE_AND_REQUEST_REFRESH,
+                  "bitmap throttled requests refresh");
+  ok =
+      ok && expect_true(decision.count_throttled, "bitmap throttle is counted");
+  ok = ok && expect_true(decision.request_full_refresh,
+                         "bitmap throttle requests full refresh");
+  ok = ok && expect_true(!decision.enqueue, "bitmap throttle skips enqueue");
+
+  decision =
+      viewer_publisher_bitmap_publish_decision(TRUE, FALSE, FALSE, FALSE);
+  ok =
+      ok && expect_int(decision.action, VIEWER_PUBLISHER_BITMAP_PUBLISH_ENQUEUE,
+                       "bitmap normal enqueue");
+  ok = ok && expect_true(decision.enqueue, "bitmap normal enqueues");
+  return ok;
+}
+
+static int test_surface_bits_publish_policy_decisions(void) {
+  ViewerPublisherSurfaceBitsPublishDecision decision = {0};
+  int ok = 1;
+
+  decision =
+      viewer_publisher_surface_bits_publish_decision(FALSE, FALSE, FALSE);
+  ok = ok && expect_int(decision.action,
+                        VIEWER_PUBLISHER_SURFACE_BITS_PUBLISH_NOT_READY,
+                        "surfacebits not ready skips");
+  ok = ok &&
+       expect_true(!decision.enqueue, "surfacebits not ready does not enqueue");
+
+  decision = viewer_publisher_surface_bits_publish_decision(TRUE, TRUE, FALSE);
+  ok = ok && expect_int(decision.action,
+                        VIEWER_PUBLISHER_SURFACE_BITS_PUBLISH_ENQUEUE,
+                        "surfacebits full-refresh pending enqueues");
+  ok = ok && expect_true(decision.clear_full_refresh,
+                         "surfacebits clears full-refresh flag");
+  ok = ok && expect_true(decision.count_full_refresh_gate,
+                         "surfacebits counts full-refresh gate");
+  ok = ok && expect_true(decision.enqueue,
+                         "surfacebits full-refresh pending enqueues");
+
+  decision = viewer_publisher_surface_bits_publish_decision(TRUE, FALSE, TRUE);
+  ok = ok && expect_int(decision.action,
+                        VIEWER_PUBLISHER_SURFACE_BITS_PUBLISH_ENQUEUE,
+                        "surfacebits throttled still enqueues");
+  ok = ok &&
+       expect_true(decision.count_throttled, "surfacebits throttle is counted");
+  ok = ok && expect_true(decision.request_full_refresh,
+                         "surfacebits throttle requests full refresh");
+  ok = ok &&
+       expect_true(decision.enqueue, "surfacebits throttle still enqueues");
+
+  decision = viewer_publisher_surface_bits_publish_decision(TRUE, FALSE, FALSE);
+  ok = ok && expect_int(decision.action,
+                        VIEWER_PUBLISHER_SURFACE_BITS_PUBLISH_ENQUEUE,
+                        "surfacebits normal enqueue");
+  ok = ok && expect_true(decision.enqueue, "surfacebits normal enqueues");
+  return ok;
+}
+
+static int test_classic_pump_policy_decisions(void) {
+  int ok = 1;
+
+  ok = ok &&
+       expect_int(viewer_publisher_classic_pump_decision(TRUE, 1),
+                  VIEWER_PUBLISHER_CLASSIC_PUMP_DROP_BITMAPS_FOR_FULL_REFRESH,
+                  "pump drops queued bitmaps for full refresh");
+  ok = ok && expect_int(viewer_publisher_classic_pump_decision(TRUE, 0),
+                        VIEWER_PUBLISHER_CLASSIC_PUMP_SEND_BITMAPS,
+                        "pump with no queued bitmaps does not drop");
+  ok = ok && expect_int(viewer_publisher_classic_pump_decision(FALSE, 1),
+                        VIEWER_PUBLISHER_CLASSIC_PUMP_SEND_BITMAPS,
+                        "pump sends when no full refresh needed");
+  return ok;
+}
+
 static int test_classic_latest_snapshot_newer_generation(void) {
   ViewerPublisher publisher = {0};
   ViewerFramebuffer fb = {0};
@@ -325,6 +437,27 @@ static int test_classic_latest_snapshot_stale_suppression(void) {
   metrics = viewer_publisher_get_metrics(&publisher);
   ok = ok && expect_uint64(metrics.classic_latest_suppressed, 1,
                            "stale latest suppression counted");
+
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
+static int test_classic_latest_snapshot_unavailable_failure(void) {
+  ViewerPublisher publisher = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerPublisherMetrics metrics = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok && expect_true(viewer_framebuffer_init(&fb), "framebuffer init");
+  ok = ok && expect_true(!viewer_publisher_classic_latest_snapshot(
+                             &publisher, &fb, 0, &snapshot),
+                         "unavailable latest snapshot fails");
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.classic_latest_snapshot_failures, 1,
+                           "unavailable latest snapshot counted");
 
   viewer_framebuffer_uninit(&fb);
   viewer_publisher_uninit(&publisher);
@@ -800,9 +933,17 @@ int main(void) {
     return 1;
   if (!test_classic_policy_reset_to_default_fifo())
     return 1;
+  if (!test_bitmap_publish_policy_decisions())
+    return 1;
+  if (!test_surface_bits_publish_policy_decisions())
+    return 1;
+  if (!test_classic_pump_policy_decisions())
+    return 1;
   if (!test_classic_latest_snapshot_newer_generation())
     return 1;
   if (!test_classic_latest_snapshot_stale_suppression())
+    return 1;
+  if (!test_classic_latest_snapshot_unavailable_failure())
     return 1;
   if (!test_generation_and_metrics())
     return 1;

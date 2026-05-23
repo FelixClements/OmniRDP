@@ -854,19 +854,17 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
      * helper below. */
     EnterCriticalSection(&viewer->send_lock);
 
-    /* Skip if viewer needs full refresh (will resync via refresh path) */
-    if (viewer->needs_full_refresh) {
-      /* Drop all queued updates — they're stale relative to the
-       * upcoming full refresh */
+    if (viewer_publisher_classic_pump_decision(
+            viewer->needs_full_refresh,
+            viewer_classic_queue_depth_locked(&viewer->classic_queues)) ==
+        VIEWER_PUBLISHER_CLASSIC_PUMP_DROP_BITMAPS_FOR_FULL_REFRESH) {
       UINT32 classic_depth =
           viewer_classic_queue_depth_locked(&viewer->classic_queues);
-      if (classic_depth > 0) {
-        WLog_INFO(TAG,
-                  "Viewer %u pump-classic: dropping %" PRIu32
-                  " queued updates (needs full refresh)",
-                  viewer->id, classic_depth);
-        viewer_clear_classic_queue_locked(viewer);
-      }
+      WLog_INFO(TAG,
+                "Viewer %u pump-classic: dropping %" PRIu32
+                " queued updates (needs full refresh)",
+                viewer->id, classic_depth);
+      viewer_clear_classic_queue_locked(viewer);
       LeaveCriticalSection(&viewer->send_lock);
       break;
     }
@@ -3043,7 +3041,7 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
     BOOL classic_fallback = FALSE;
     BOOL ready_to_send = FALSE;
     BOOL enqueued = FALSE;
-    BOOL throttled = FALSE;
+    ViewerPublisherSurfaceBitsPublishDecision decision = {0};
     ViewerSurfaceBitsEvent *event = NULL;
 
     EnterCriticalSection(&viewer->gfx.lock);
@@ -3060,46 +3058,35 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
     ready_to_send = viewer->peer && viewer->connected && viewer->activated;
     LeaveCriticalSection(&viewer->send_lock);
 
-    if (!ready_to_send) {
+    decision = viewer_publisher_surface_bits_publish_decision(
+        ready_to_send, viewer->needs_full_refresh,
+        viewer->consecutive_lag_intervals >= VIEWER_THROTTLE_LAG_INTERVALS);
+    if (decision.action == VIEWER_PUBLISHER_SURFACE_BITS_PUBLISH_NOT_READY) {
       viewer_release_publish_ref(server, viewer);
       continue;
     }
 
-    if (viewer->consecutive_lag_intervals >= VIEWER_THROTTLE_LAG_INTERVALS) {
-      /* Per-viewer throttle: skip updates for slow viewers.
-       * However, SurfaceBits ARE the refresh data — even when throttled,
-       * we must still deliver them to allow the viewer to resync.
-       * Clear the throttle gate and enqueue. */
+    if (decision.count_throttled) {
       EnterCriticalSection(&viewer->send_lock);
       viewer->surface_bits_updates_skipped_throttle++;
-      /* Don't set needs_full_refresh for SurfaceBits — they ARE the
-       * refresh data. Setting it would cause the pump to drop them. */
       LeaveCriticalSection(&viewer->send_lock);
-      throttled = TRUE;
       throttled_count++;
       if (first_throttled_viewer_id == 0)
         first_throttled_viewer_id = viewer->id;
-      /* Fall through to enqueue — SurfaceBits must be delivered even
-       * for throttled viewers, because they carry the actual pixel data
-       * needed to resync. */
     }
 
-    /* Clear needs_full_refresh if set — SurfaceBits ARE the refresh data.
-     * Unlike BitmapUpdate where a full refresh is a separate mechanism,
-     * SurfaceBits tiles are the only way the viewer receives pixel data,
-     * so they must always be delivered. */
-    if (viewer->needs_full_refresh) {
+    if (decision.clear_full_refresh) {
       EnterCriticalSection(&viewer->send_lock);
       viewer->needs_full_refresh = FALSE;
       viewer->full_refresh_deadline_ts = 0;
       LeaveCriticalSection(&viewer->send_lock);
+    }
+    if (decision.count_full_refresh_gate) {
       gated_full_refresh_count++;
       if (first_gated_viewer_id == 0)
         first_gated_viewer_id = viewer->id;
     }
 
-    /* Always enqueue SurfaceBits — they carry pixel data that the viewer
-     * needs regardless of throttle or refresh state. */
     event = viewer_surface_bits_event_new(cmd);
     if (!event) {
       enqueue_failed_count++;
@@ -3119,7 +3106,7 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
     if (enqueued)
       sent_any = TRUE;
 
-    if (throttled)
+    if (decision.request_full_refresh)
       (void)backend_request_full_refresh(server->backend);
 
     viewer_release_publish_ref(server, viewer);
@@ -3193,7 +3180,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
     BOOL classic_fallback = FALSE;
     BOOL ready_to_send = FALSE;
     BOOL enqueued = FALSE;
-    BOOL throttled = FALSE;
+    ViewerPublisherBitmapPublishDecision decision = {0};
     ViewerClassicEvent *event = NULL;
 
     EnterCriticalSection(&viewer->gfx.lock);
@@ -3211,86 +3198,39 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
     ready_to_send = viewer->peer && viewer->connected && viewer->activated;
     LeaveCriticalSection(&viewer->send_lock);
 
-    if (!ready_to_send) {
+    decision = viewer_publisher_bitmap_publish_decision(
+        ready_to_send, viewer->needs_full_refresh, refresh_in_flight,
+        viewer->consecutive_lag_intervals >= VIEWER_THROTTLE_LAG_INTERVALS);
+    if (decision.action == VIEWER_PUBLISHER_BITMAP_PUBLISH_NOT_READY) {
       viewer_release_publish_ref(server, viewer);
       continue;
     }
 
-    if (viewer->needs_full_refresh && !refresh_in_flight) {
-      /* The viewer needs a full refresh but no refresh is in flight.
-       * This happens when:
-       * 1. The viewer just joined and the backend refresh has already
-       *    completed (backend_mark_full_refresh_complete was called)
-       * 2. The viewer was throttled and the refresh completed
-       * In the classic path there are no frame markers to clear
-       * needs_full_refresh, so we clear it here and enqueue the
-       * current bitmap update. The viewer will receive this and
-       * subsequent updates normally. */
+    if (decision.clear_full_refresh) {
       EnterCriticalSection(&viewer->send_lock);
       viewer->needs_full_refresh = FALSE;
       viewer->full_refresh_deadline_ts = 0;
       LeaveCriticalSection(&viewer->send_lock);
+    }
+    if (decision.count_full_refresh_gate) {
       gated_full_refresh_count++;
       if (first_gated_viewer_id == 0)
         first_gated_viewer_id = viewer->id;
+    }
 
-      /* Deep copy outside lock, then enqueue under lock */
-      event = viewer_classic_event_new(bitmap);
-      if (!event) {
-        enqueue_failed_count++;
-        viewer_release_publish_ref(server, viewer);
-        continue;
-      }
-      EnterCriticalSection(&viewer->send_lock);
-      enqueued = viewer_enqueue_classic_event_locked(viewer, event);
-      LeaveCriticalSection(&viewer->send_lock);
-      if (enqueued)
-        enqueued_count++;
-      else {
-        enqueue_failed_count++;
-        viewer_classic_event_free(event);
-      }
-    } else if (viewer->needs_full_refresh && refresh_in_flight) {
-      /* A full refresh is in flight — this bitmap IS the refresh data.
-       * Clear the gate and enqueue so the viewer receives it. */
-      EnterCriticalSection(&viewer->send_lock);
-      viewer->needs_full_refresh = FALSE;
-      viewer->full_refresh_deadline_ts = 0;
-      LeaveCriticalSection(&viewer->send_lock);
-
-      event = viewer_classic_event_new(bitmap);
-      if (!event) {
-        enqueue_failed_count++;
-        viewer_release_publish_ref(server, viewer);
-        continue;
-      }
-      EnterCriticalSection(&viewer->send_lock);
-      enqueued = viewer_enqueue_classic_event_locked(viewer, event);
-      LeaveCriticalSection(&viewer->send_lock);
-      if (enqueued)
-        enqueued_count++;
-      else {
-        enqueue_failed_count++;
-        viewer_classic_event_free(event);
-      }
-    } else if (viewer->consecutive_lag_intervals >=
-               VIEWER_THROTTLE_LAG_INTERVALS) {
-      /* Per-viewer throttle: skip updates for slow viewers.
-       * They will resync via full refresh when they recover. */
+    if (decision.count_throttled) {
       EnterCriticalSection(&viewer->send_lock);
       viewer->bitmap_updates_skipped_throttle++;
       viewer->needs_full_refresh = TRUE;
       viewer->full_refresh_deadline_ts =
           platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
       LeaveCriticalSection(&viewer->send_lock);
-      throttled = TRUE;
       throttled_count++;
       if (first_throttled_viewer_id == 0)
         first_throttled_viewer_id = viewer->id;
-    } else {
-      /* Option B: Enqueue the bitmap update for async delivery
-       * by the viewer thread. Deep copy outside lock, then
-       * enqueue under lock to minimize send_lock hold time. */
+    }
+
+    if (decision.enqueue) {
       event = viewer_classic_event_new(bitmap);
       if (!event) {
         enqueue_failed_count++;
@@ -3311,7 +3251,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
     if (enqueued)
       sent_any = TRUE;
 
-    if (throttled)
+    if (decision.request_full_refresh)
       (void)backend_request_full_refresh(server->backend);
 
     viewer_release_publish_ref(server, viewer);
