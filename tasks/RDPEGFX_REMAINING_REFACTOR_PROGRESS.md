@@ -11,7 +11,7 @@ Archived prior loop evidence:
 
 ## Current status
 
-US-001 through US-012 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
+US-001 through US-013 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
 
 ## Story backlog
 
@@ -27,7 +27,7 @@ US-001 through US-012 are complete. Do not mark another story complete until its
 10. `US-010` — complete — Implement strict RDPEGFX capabilities whitelist. Caps selection now admits only known-good official uncompressed-compatible RDPEGFX versions with an explicit safe flag mask, rejects unknown/future/AVC and other unsupported flags, downgrades to lower supported advertised caps, and avoids canonical poisoning from unsupported viewers. Unit tests cover supported selection, unsupported versions/flags, downgrade, canonical whitelist/mismatch behavior, and unsupported-first isolation. Debug build and CTest passed on 2026-05-23.
 11. `US-011` — complete — Add frame epoch and backpressure-safe ACK handling. Viewer dirty frame mappings now include epochs and payload bytes; reset/invalidation/baseline/wrap boundaries clear in-flight frame/byte state and advance epochs; nonzero ACKs only update accepted ACK and dirty pacing on current-epoch matches; frame ID wrap skips zero; and dirty sends are gated by an internal 4 MiB per-viewer byte limit. Tests cover stale ACK protection, baseline/invalidation epoch clearing, byte backpressure and ACK release, zero/unknown ACK compatibility, and wrap behavior. Debug build and CTest passed on 2026-05-23.
 12. `US-012` — complete — Harden resize/reset GFX sequencing. Resize/surface invalidation now acts as a strict per-viewer GFX epoch boundary, clearing dirty/ACK/surface state and disabling dirty updates until a fresh canonical framebuffer ResetGraphics/CreateSurface/Map/full-frame baseline succeeds. Already-live RDPEGFX viewers with an invalidated surface now schedule that baseline through `viewer_gfx_pipeline_step_join`; stale ACKs and dimension-mismatch dirty snapshots are deferred/ignored without recording frames. Tests cover idle live resize, in-flight dirty resize with stale ACK, late join during resize, and dimension mismatch deferral. Debug build and CTest passed on 2026-05-23.
-13. `US-013` — pending — Add pointer and cursor late-join baseline.
+13. `US-013` — complete — Add pointer and cursor late-join baseline. Pending RDPEGFX late-join framebuffer baseline success now returns a pointer-baseline action and `viewer_server.c` sends a forced pointer snapshot only after that framebuffer baseline succeeds; live resize/canonical refresh baselines and failed baselines do not request pointer baseline. RDPEGFX pending activation suppresses the immediate forced pointer send while classic activation remains unchanged. Backend pointer snapshot copy API deep-copies active shape data under the backend pointer lock before viewer transport sends it. Tests cover pending-vs-live baseline action split plus forced custom/default/hidden pointer transport planning and forced position despite matching generations. Debug build and CTest passed on 2026-05-23.
 14. `US-014` — pending — Add final boundary audit enforcement.
 15. `US-015` — pending — Record end-to-end RDPEGFX validation evidence.
 

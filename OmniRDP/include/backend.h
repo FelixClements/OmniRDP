@@ -233,6 +233,12 @@ void backend_get_pointer_snapshot(BackendClient *client, UINT16 *x, UINT16 *y,
                                   PointerShapeEntry **active_shape,
                                   UINT64 *position_gen, UINT64 *shape_gen);
 
+BOOL backend_get_pointer_snapshot_copy(BackendClient *client, UINT16 *x,
+                                       UINT16 *y, BOOL *visible, UINT32 *type,
+                                       PointerShapeEntry *active_shape_copy,
+                                       BOOL *has_active_shape,
+                                       UINT64 *position_gen, UINT64 *shape_gen);
+
 void backend_store_pointer_position(BackendClient *client, UINT16 x, UINT16 y);
 
 void backend_get_pointer_state(BackendClient *client, UINT16 *x, UINT16 *y,

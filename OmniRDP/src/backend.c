@@ -2206,6 +2206,62 @@ void backend_get_pointer_snapshot(BackendClient *client, UINT16 *x, UINT16 *y,
   LeaveCriticalSection(&client->pointer_lock);
 }
 
+BOOL backend_get_pointer_snapshot_copy(BackendClient *client, UINT16 *x,
+                                       UINT16 *y, BOOL *visible, UINT32 *type,
+                                       PointerShapeEntry *active_shape_copy,
+                                       BOOL *has_active_shape,
+                                       UINT64 *position_gen,
+                                       UINT64 *shape_gen) {
+  BOOL copied = TRUE;
+
+  if (active_shape_copy)
+    pointer_shape_entry_reset(active_shape_copy);
+  if (has_active_shape)
+    *has_active_shape = FALSE;
+
+  if (!client) {
+    if (x)
+      *x = 0;
+    if (y)
+      *y = 0;
+    if (visible)
+      *visible = FALSE;
+    if (type)
+      *type = SYSPTR_NULL;
+    if (position_gen)
+      *position_gen = 0;
+    if (shape_gen)
+      *shape_gen = 0;
+    return TRUE;
+  }
+
+  EnterCriticalSection(&client->pointer_lock);
+  if (x)
+    *x = client->pointer_x;
+  if (y)
+    *y = client->pointer_y;
+  if (visible)
+    *visible = client->pointer_visible;
+  if (type)
+    *type = client->pointer_type;
+  if (position_gen)
+    *position_gen = client->pointer_position_generation;
+  if (shape_gen)
+    *shape_gen = client->pointer_shape_generation;
+  if (client->active_pointer_shape) {
+    if (active_shape_copy) {
+      copied = pointer_shape_entry_copy(active_shape_copy,
+                                        client->active_pointer_shape);
+      if (copied && has_active_shape)
+        *has_active_shape = TRUE;
+    } else if (has_active_shape)
+      *has_active_shape = TRUE;
+  }
+  LeaveCriticalSection(&client->pointer_lock);
+
+  return copied;
+}
+
 void backend_get_pointer_state(BackendClient *client, UINT16 *x, UINT16 *y,
                                BOOL *visible, UINT32 *type,
                                UINT64 *generation) {

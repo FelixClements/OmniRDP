@@ -4,6 +4,7 @@
 #include "viewer_classic_transport.h"
 #include "viewer_gfx_pipeline.h"
 #include "viewer_internal.h"
+#include "viewer_pointer.h"
 #include "viewer_server_internal.h"
 
 #include <freerdp/channels/drdynvc.h>
@@ -1077,54 +1078,6 @@ static BOOL viewer_slot_available_locked(Viewer *viewer) {
   return TRUE;
 }
 
-static void viewer_pointer_shape_entry_reset(PointerShapeEntry *shape) {
-  if (!shape)
-    return;
-
-  free(shape->xorMaskData);
-  free(shape->andMaskData);
-  memset(shape, 0, sizeof(*shape));
-}
-
-static BOOL viewer_pointer_shape_entry_copy(PointerShapeEntry *destination,
-                                            const PointerShapeEntry *source) {
-  if (!destination || !source)
-    return FALSE;
-
-  memset(destination, 0, sizeof(*destination));
-  *destination = *source;
-  destination->xorMaskData = NULL;
-  destination->andMaskData = NULL;
-
-  if (source->xorMaskLength > 0) {
-    if (!source->xorMaskData)
-      return FALSE;
-    destination->xorMaskData = (BYTE *)malloc(source->xorMaskLength);
-    if (!destination->xorMaskData) {
-      viewer_pointer_shape_entry_reset(destination);
-      return FALSE;
-    }
-    memmove(destination->xorMaskData, source->xorMaskData,
-            source->xorMaskLength);
-  }
-
-  if (source->andMaskLength > 0) {
-    if (!source->andMaskData) {
-      viewer_pointer_shape_entry_reset(destination);
-      return FALSE;
-    }
-    destination->andMaskData = (BYTE *)malloc(source->andMaskLength);
-    if (!destination->andMaskData) {
-      viewer_pointer_shape_entry_reset(destination);
-      return FALSE;
-    }
-    memmove(destination->andMaskData, source->andMaskData,
-            source->andMaskLength);
-  }
-
-  return TRUE;
-}
-
 static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   ViewerServer *server = g_viewer_server;
   freerdp_peer *peer = viewer ? viewer->peer : NULL;
@@ -1133,18 +1086,12 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   UINT16 pointer_y = 0;
   UINT32 pointer_type = SYSPTR_DEFAULT;
   BOOL pointer_visible = TRUE;
-  PointerShapeEntry *active_shape = NULL;
   PointerShapeEntry shape_copy = {0};
-  POINTER_SYSTEM_UPDATE pointer_system = {0};
-  POINTER_POSITION_UPDATE pointer_position = {0};
-  POINTER_COLOR_UPDATE pointer_color = {0};
-  POINTER_NEW_UPDATE pointer_new = {0};
+  BOOL has_active_shape = FALSE;
+  ViewerPointerSnapshot pointer_snapshot = {0};
+  ViewerPointerUpdatePlan pointer_plan = {0};
   UINT64 position_generation = 0;
   UINT64 shape_generation = 0;
-  BOOL shape_changed = FALSE;
-  BOOL position_changed = FALSE;
-  BOOL send_shape = FALSE;
-  BOOL send_position = FALSE;
   BOOL sent = TRUE;
 
   if (!viewer || !server || !backend || !peer || !peer->context ||
@@ -1155,90 +1102,88 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   if (!viewer_update_ready(viewer, "pointer"))
     return FALSE;
 
-  backend_get_pointer_snapshot(backend, &pointer_x, &pointer_y,
-                               &pointer_visible, &pointer_type, &active_shape,
-                               &position_generation, &shape_generation);
+  if (!backend_get_pointer_snapshot_copy(
+          backend, &pointer_x, &pointer_y, &pointer_visible, &pointer_type,
+          &shape_copy, &has_active_shape, &position_generation,
+          &shape_generation))
+    return FALSE;
   WLog_INFO(TAG, "viewer_forward_pointer: x=%u y=%u visible=%d gen=%llu->%llu",
             pointer_x, pointer_y, pointer_visible,
             (unsigned long long)viewer->last_pointer_position_generation,
             (unsigned long long)position_generation);
-  if (active_shape &&
-      !viewer_pointer_shape_entry_copy(&shape_copy, active_shape))
+  pointer_snapshot.x = pointer_x;
+  pointer_snapshot.y = pointer_y;
+  pointer_snapshot.visible = pointer_visible;
+  pointer_snapshot.type = pointer_type;
+  pointer_snapshot.active_shape = &shape_copy;
+  pointer_snapshot.has_active_shape = has_active_shape;
+  pointer_snapshot.position_generation = position_generation;
+  pointer_snapshot.shape_generation = shape_generation;
+  if (!viewer_pointer_plan_from_snapshot(
+          &pointer_snapshot, viewer->last_pointer_position_generation,
+          viewer->last_pointer_shape_generation, force, &pointer_plan)) {
+    pointer_shape_entry_reset(&shape_copy);
     return FALSE;
-
-  shape_changed =
-      force || (shape_generation != viewer->last_pointer_shape_generation);
-  position_changed = force || (position_generation !=
-                               viewer->last_pointer_position_generation);
-  send_shape = shape_changed;
-  send_position = position_changed && pointer_visible;
+  }
   /* disabled: (void)viewer_forward_pointer; logging kept for debug */
-  WLog_INFO(TAG, "  shape=%d pos=%d send_shape=%d send_position=%d",
-            shape_changed, position_changed, send_shape, send_position);
+  WLog_INFO(
+      TAG, "  shape=%d pos=%d send_shape=%d send_position=%d",
+      force || (shape_generation != viewer->last_pointer_shape_generation),
+      force ||
+          (position_generation != viewer->last_pointer_position_generation),
+      pointer_plan.send_system || pointer_plan.send_color ||
+          pointer_plan.send_new,
+      pointer_plan.send_position);
 
-  if (!send_shape && !send_position) {
-    viewer_pointer_shape_entry_reset(&shape_copy);
+  if (!pointer_plan.send_system && !pointer_plan.send_color &&
+      !pointer_plan.send_new && !pointer_plan.send_position) {
+    pointer_shape_entry_reset(&shape_copy);
     return TRUE;
   }
 
   if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
     if (!peer->DrainOutputBuffer || (peer->DrainOutputBuffer(peer) < 0) ||
         peer->IsWriteBlocked(peer)) {
-      viewer_pointer_shape_entry_reset(&shape_copy);
+      pointer_shape_entry_reset(&shape_copy);
       return FALSE;
     }
   }
-
-  pointer_position.xPos = pointer_x;
-  pointer_position.yPos = pointer_y;
-  pointer_system.type = pointer_visible ? pointer_type : SYSPTR_NULL;
-  pointer_color.cacheIndex = shape_copy.cacheIndex;
-  pointer_color.hotSpotX = shape_copy.hotSpotX;
-  pointer_color.hotSpotY = shape_copy.hotSpotY;
-  pointer_color.width = shape_copy.width;
-  pointer_color.height = shape_copy.height;
-  pointer_color.lengthAndMask = shape_copy.andMaskLength;
-  pointer_color.lengthXorMask = shape_copy.xorMaskLength;
-  pointer_color.xorMaskData = shape_copy.xorMaskData;
-  pointer_color.andMaskData = shape_copy.andMaskData;
-  pointer_new.xorBpp = shape_copy.xorBpp;
-  pointer_new.colorPtrAttr = pointer_color;
 
   {
     ViewerClassicTransport transport =
         viewer_classic_transport_from_viewer(viewer);
     (void)viewer_classic_transport_begin_batch(&transport);
   }
-  if (send_shape) {
-    if (!pointer_visible || !active_shape) {
-      IFCALLRET(peer->context->update->pointer->PointerSystem, sent,
-                peer->context, &pointer_system);
-    } else if ((shape_copy.xorBpp > 0) &&
-               peer->context->update->pointer->PointerNew) {
-      IFCALLRET(peer->context->update->pointer->PointerNew, sent, peer->context,
-                &pointer_new);
-    } else {
-      IFCALLRET(peer->context->update->pointer->PointerColor, sent,
-                peer->context, &pointer_color);
-    }
+  if (pointer_plan.send_system) {
+    IFCALLRET(peer->context->update->pointer->PointerSystem, sent,
+              peer->context, &pointer_plan.system);
+  } else if (pointer_plan.send_new &&
+             peer->context->update->pointer->PointerNew) {
+    IFCALLRET(peer->context->update->pointer->PointerNew, sent, peer->context,
+              &pointer_plan.pointer_new);
+  } else if (pointer_plan.send_new || pointer_plan.send_color) {
+    IFCALLRET(peer->context->update->pointer->PointerColor, sent, peer->context,
+              &pointer_plan.color);
   }
 
-  if (sent && send_position && peer->context->update->pointer->PointerPosition)
+  if (sent && pointer_plan.send_position &&
+      peer->context->update->pointer->PointerPosition)
     IFCALLRET(peer->context->update->pointer->PointerPosition, sent,
-              peer->context, &pointer_position);
+              peer->context, &pointer_plan.position);
   {
     ViewerClassicTransport transport =
         viewer_classic_transport_from_viewer(viewer);
     viewer_classic_transport_end_batch(&transport);
   }
 
-  viewer_pointer_shape_entry_reset(&shape_copy);
+  pointer_shape_entry_reset(&shape_copy);
   if (!sent)
     return FALSE;
 
-  WLog_INFO(TAG, "  sending: send_pos=%d sent=%d final_gen=%llu", send_position,
-            sent, (unsigned long long)position_generation);
-  if (send_position)
+  WLog_INFO(TAG, "  sending: send_pos=%d sent=%d final_gen=%llu",
+            pointer_plan.send_position, sent,
+            (unsigned long long)position_generation);
+  if (pointer_plan.send_position)
     viewer->last_pointer_position_generation = position_generation;
   viewer->last_pointer_shape_generation = shape_generation;
   return TRUE;
@@ -1393,6 +1338,7 @@ static void viewer_gfx_reject_join(Viewer *viewer, const char *reason) {
 static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
                                                  Viewer *viewer, UINT64 now) {
   ViewerFramebufferSnapshot snapshot = {0};
+  ViewerGfxJoinResult result = {0};
   BOOL sent = FALSE;
 
   if (!server || !viewer)
@@ -1416,7 +1362,7 @@ static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
         server, viewer, now, "RDPEGFX framebuffer baseline send failed");
   }
 
-  viewer_gfx_pipeline_on_baseline_result(viewer, now, TRUE, NULL);
+  viewer_gfx_pipeline_on_baseline_result(viewer, now, TRUE, &result);
 
   EnterCriticalSection(&viewer->send_lock);
   viewer->needs_full_refresh = FALSE;
@@ -1424,6 +1370,8 @@ static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
   LeaveCriticalSection(&viewer->send_lock);
 
   WLog_INFO(TAG, "Viewer %u RDPEGFX framebuffer baseline sent", viewer->id);
+  if (result.actions & VIEWER_GFX_JOIN_ACTION_SEND_POINTER_BASELINE)
+    (void)viewer_forward_pointer(viewer, TRUE);
   return TRUE;
 }
 
@@ -1910,6 +1858,7 @@ static BOOL peer_activate(freerdp_peer *peer) {
   ViewerGfxNegotiationOutcome negotiation_outcome =
       VIEWER_GFX_NEGOTIATION_PENDING;
   BOOL classic_activation = FALSE;
+  BOOL suppress_activation_pointer = FALSE;
 
   if (!viewer)
     return FALSE;
@@ -1934,6 +1883,10 @@ static BOOL peer_activate(freerdp_peer *peer) {
   }
   EnterCriticalSection(&viewer->gfx.lock);
   negotiation_outcome = viewer->gfx.negotiation_outcome;
+  suppress_activation_pointer =
+      g_viewer_server && g_viewer_server->viewer_gfx_enabled &&
+      (viewer->gfx.join_state == VIEWER_JOIN_STATE_PENDING) &&
+      (viewer->gfx.join_strategy != VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK);
   LeaveCriticalSection(&viewer->gfx.lock);
   if (classic_activation && g_viewer_server &&
       viewer_enqueue_classic_baseline_from_framebuffer(g_viewer_server,
@@ -1967,7 +1920,8 @@ static BOOL peer_activate(freerdp_peer *peer) {
     }
   }
 
-  (void)viewer_forward_pointer(viewer, TRUE);
+  if (!suppress_activation_pointer)
+    (void)viewer_forward_pointer(viewer, TRUE);
   return TRUE;
 }
 

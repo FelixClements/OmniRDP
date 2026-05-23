@@ -42,6 +42,7 @@ set(SOURCES
     src/viewer_classic_transport.c
     src/viewer_gfx_pipeline.c
     src/viewer_gfx_codec_uncompressed.c
+    src/viewer_pointer.c
     src/viewer_server.c
     src/platform_compat.c
     src/pointer_shape.c
@@ -64,6 +65,7 @@ set(HEADERS
     src/viewer_classic_transport.h
     include/viewer_gfx_pipeline.h
     include/viewer_gfx_codec_uncompressed.h
+    src/viewer_pointer.h
     include/platform_compat.h
     src/pointer_shape.h
     src/viewer_server_internal.h

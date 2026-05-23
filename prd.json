@@ -282,8 +282,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 13,
-      "passes": false,
-      "notes": "Use existing pointer snapshot/cache as source of truth; no backend replay dependency."
+      "passes": true,
+      "notes": "Completed: Pending RDPEGFX late-join framebuffer baseline success now returns a pointer-baseline coordinator action and viewer_server sends the forced backend pointer snapshot after that successful framebuffer baseline; live resize/canonical refresh baselines do not request pointer baseline and failed baselines keep fallback behavior. RDPEGFX pending activation suppresses the immediate forced pointer send so classic activation behavior remains unchanged. Pointer forwarding now uses a backend snapshot-copy API that deep-copies the active shape under backend pointer lock before transport send. Tests cover pending-vs-live baseline action split, forced custom/default/hidden pointer transport planning, forced position despite matching generations, unforced generation suppression, and reusable pointer shape deep-copy/reset safety. clang-format, JSON validation, git diff --check, Debug build, and CTest passed on 2026-05-23."
     },
     {
       "id": "US-014",

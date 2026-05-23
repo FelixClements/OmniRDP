@@ -398,8 +398,10 @@ static int test_step_join_and_baseline_result_transitions(void) {
                          "successful baseline makes join live");
   ok = ok && expect_true(viewer.gfx.join_strategy == VIEWER_JOIN_STRATEGY_NONE,
                          "successful baseline clears join strategy");
-  ok = ok && expect_uint32(result.actions, VIEWER_GFX_JOIN_ACTION_NONE,
-                           "successful baseline has no fallback action");
+  ok = ok &&
+       expect_uint32(
+           result.actions, VIEWER_GFX_JOIN_ACTION_SEND_POINTER_BASELINE,
+           "successful baseline requests pointer baseline after framebuffer");
 
   viewer.gfx.join_state = VIEWER_JOIN_STATE_PENDING;
   viewer.gfx.join_strategy = VIEWER_JOIN_STRATEGY_NONE;
@@ -424,6 +426,14 @@ static int test_step_join_and_baseline_result_transitions(void) {
                            "classic fallback join requests fallback action");
 
   configure_join_ready_viewer(&server, &viewer);
+  viewer.gfx.join_state = VIEWER_JOIN_STATE_LIVE;
+  viewer.gfx.dirty_updates_enabled = FALSE;
+  viewer.gfx.dirty_baseline_required = TRUE;
+  viewer_gfx_pipeline_on_baseline_result(&viewer, 550, TRUE, &result);
+  ok = ok && expect_uint32(result.actions, VIEWER_GFX_JOIN_ACTION_NONE,
+                           "successful live resize baseline does not request "
+                           "late-join pointer baseline");
+
   viewer.gfx.join_state = VIEWER_JOIN_STATE_LIVE;
   viewer.gfx.dirty_updates_enabled = FALSE;
   viewer.gfx.dirty_baseline_required = TRUE;

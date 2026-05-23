@@ -328,11 +328,16 @@ void viewer_gfx_pipeline_enter_classic_fallback(Viewer *viewer, UINT64 now,
 void viewer_gfx_pipeline_on_baseline_result(Viewer *viewer, UINT64 now,
                                             BOOL sent,
                                             ViewerGfxJoinResult *result) {
+  ViewerJoinState prior_state = VIEWER_JOIN_STATE_NONE;
+  ViewerJoinStrategy prior_strategy = VIEWER_JOIN_STRATEGY_NONE;
+
   viewer_gfx_pipeline_join_result_clear(result);
   if (!viewer)
     return;
 
   EnterCriticalSection(&viewer->gfx.lock);
+  prior_state = viewer->gfx.join_state;
+  prior_strategy = viewer->gfx.join_strategy;
   if (sent) {
     viewer_gfx_pipeline_finish_join_locked(
         viewer, "RDPEGFX framebuffer full-frame baseline sent");
@@ -344,6 +349,13 @@ void viewer_gfx_pipeline_on_baseline_result(Viewer *viewer, UINT64 now,
   if (!sent && result) {
     result->actions = VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK;
     result->classic_fallback_reason = "RDPEGFX framebuffer baseline failed";
+  } else if (sent && result) {
+    if ((prior_state == VIEWER_JOIN_STATE_PENDING) &&
+        (prior_strategy != VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK)) {
+      result->actions = VIEWER_GFX_JOIN_ACTION_SEND_POINTER_BASELINE;
+      result->log_reason =
+          "RDPEGFX pointer baseline after late-join framebuffer baseline";
+    }
   }
 }
 
