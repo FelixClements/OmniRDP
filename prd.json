@@ -329,7 +329,7 @@
       ],
       "priority": 15,
       "passes": false,
-      "notes": "Documentation/validation evidence story. Do not silently defer failures; create follow-up stories."
+      "notes": "Automated validation evidence recorded in tasks/RDPEGFX_US015_VALIDATION_EVIDENCE.md: JSON validation, git diff --check, Debug build, full CTest, and static boundary checks passed on 2026-05-24. Required manual real-client/runtime validation was NOT_RUN/blocked because no MSTSC/FreeRDP viewer session, backend Windows RDP server, multi-viewer lab, or controlled slow/no-ACK environment was available. Follow-ups are documented; do not mark complete until runtime evidence is added."
     }
   ]
 }
