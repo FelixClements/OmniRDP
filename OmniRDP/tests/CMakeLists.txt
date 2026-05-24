@@ -315,3 +315,10 @@ add_test(NAME test_viewer_server_classic_transport_boundary
         -P ${CMAKE_CURRENT_SOURCE_DIR}/CheckViewerServerClassicTransportBoundary.cmake
 )
 set_tests_properties(test_viewer_server_classic_transport_boundary PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_refactor_boundaries
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/CheckRefactorBoundaries.cmake
+)
+set_tests_properties(test_refactor_boundaries PROPERTIES TIMEOUT 120)

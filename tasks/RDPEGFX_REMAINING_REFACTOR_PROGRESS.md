@@ -11,7 +11,7 @@ Archived prior loop evidence:
 
 ## Current status
 
-US-001 through US-013 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
+US-001 through US-014 are complete. Do not mark another story complete until its implementation, tests, and validation checklist pass and `prd.json` is updated with `passes: true` for that story.
 
 ## Story backlog
 
@@ -28,7 +28,7 @@ US-001 through US-013 are complete. Do not mark another story complete until its
 11. `US-011` — complete — Add frame epoch and backpressure-safe ACK handling. Viewer dirty frame mappings now include epochs and payload bytes; reset/invalidation/baseline/wrap boundaries clear in-flight frame/byte state and advance epochs; nonzero ACKs only update accepted ACK and dirty pacing on current-epoch matches; frame ID wrap skips zero; and dirty sends are gated by an internal 4 MiB per-viewer byte limit. Tests cover stale ACK protection, baseline/invalidation epoch clearing, byte backpressure and ACK release, zero/unknown ACK compatibility, and wrap behavior. Debug build and CTest passed on 2026-05-23.
 12. `US-012` — complete — Harden resize/reset GFX sequencing. Resize/surface invalidation now acts as a strict per-viewer GFX epoch boundary, clearing dirty/ACK/surface state and disabling dirty updates until a fresh canonical framebuffer ResetGraphics/CreateSurface/Map/full-frame baseline succeeds. Already-live RDPEGFX viewers with an invalidated surface now schedule that baseline through `viewer_gfx_pipeline_step_join`; stale ACKs and dimension-mismatch dirty snapshots are deferred/ignored without recording frames. Tests cover idle live resize, in-flight dirty resize with stale ACK, late join during resize, and dimension mismatch deferral. Debug build and CTest passed on 2026-05-23.
 13. `US-013` — complete — Add pointer and cursor late-join baseline. Pending RDPEGFX late-join framebuffer baseline success now returns a pointer-baseline action and `viewer_server.c` sends a forced pointer snapshot only after that framebuffer baseline succeeds; live resize/canonical refresh baselines and failed baselines do not request pointer baseline. RDPEGFX pending activation suppresses the immediate forced pointer send while classic activation remains unchanged. Backend pointer snapshot copy API deep-copies active shape data under the backend pointer lock before viewer transport sends it. Tests cover pending-vs-live baseline action split plus forced custom/default/hidden pointer transport planning and forced position despite matching generations. Debug build and CTest passed on 2026-05-23.
-14. `US-014` — pending — Add final boundary audit enforcement.
+14. `US-014` — complete — Add final boundary audit enforcement. Added CTest `test_refactor_boundaries` covering production replay resurrection, backend GFX quarantine, RDPEGFX/classic sends in `viewer_server.c`, framebuffer send/context ownership, codec send/session ownership, and public facade drift. Existing backend replay, backend quarantine, and classic transport static checks were strengthened. Debug build and CTest passed on 2026-05-24.
 15. `US-015` — pending — Record end-to-end RDPEGFX validation evidence.
 
 ## Per-story validation checklist
@@ -57,3 +57,5 @@ US-001 through US-013 are complete. Do not mark another story complete until its
 - Backend RDPEGFX callbacks must not call any `viewer_server_publish_gfx_*` function.
 - Production code must not contain `ViewerGfxCompleteFrame`, `ViewerGfxFrameBuffer`, or `viewer_gfx_replay_frame` after `US-002`.
 - Replay-dependent late-join states/actions and replay ACK release behavior were removed with `US-002`; later ACK/late-join stories must cover only canonical framebuffer baseline and dirty-update responsibilities.
+- `viewer_server.c` must not contain direct RDPEGFX send calls or direct classic FreeRDP send/update-lock calls.
+- `viewer_framebuffer` and `viewer_gfx_codec_uncompressed` must remain free of transport/session/context ownership; CTest `test_refactor_boundaries` enforces these module boundaries.

@@ -8,6 +8,7 @@ set(FORBIDDEN_PATTERNS
     "viewer_gfx_replay_frame"
     "viewer_server_publish_gfx_"
     "viewer_gfx_try_schedule_late_join_replay"
+    "backend_gfx_pdu_publish_allowed"
 )
 
 file(GLOB_RECURSE PRODUCTION_FILES

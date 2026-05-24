@@ -305,8 +305,8 @@
         "No generated/build artifacts are committed."
       ],
       "priority": 14,
-      "passes": false,
-      "notes": "Boundary check must block replay resurrection and coordinator drift. Keep patterns narrow and actionable."
+      "passes": true,
+      "notes": "Completed: Added CTest-backed final boundary audit test_refactor_boundaries / CheckRefactorBoundaries.cmake. It scans production include/src files for replay/publish resurrection tokens, checks backend.c for forbidden viewer GFX publish/replay/pipeline-send tokens, blocks direct RDPEGFX and classic send/update-lock tokens in viewer_server.c, verifies viewer_framebuffer and viewer_gfx_codec_uncompressed do not own send/session/context behavior, and extends public facade drift coverage. Existing no-backend-replay and backend-quarantine static checks were strengthened. VIEWER_SERVER_REFACTOR_PLAN.md now documents current architecture, ownership rules, static enforcement, and US-015-only remaining validation. JSON validation, git diff --check, Debug build, and full CTest passed on 2026-05-24. No C/H files changed, so clang-format was not required."
     },
     {
       "id": "US-015",

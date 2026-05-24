@@ -15,3 +15,15 @@ if(BACKEND_C MATCHES "backend_gfx_pdu_publish_allowed")
         "backend.c must not use a backend GFX PDU publish gate; backend PDU "
         "forwarding is quarantined.")
 endif()
+
+if(BACKEND_C MATCHES "viewer_gfx_replay")
+    message(FATAL_ERROR
+        "backend.c must not use viewer GFX replay; backend RDPEGFX callbacks "
+        "remain decode-only.")
+endif()
+
+if(BACKEND_C MATCHES "viewer_gfx_pipeline_send")
+    message(FATAL_ERROR
+        "backend.c must not send through the viewer GFX pipeline; backend "
+        "RDPEGFX callbacks remain decode-only.")
+endif()
