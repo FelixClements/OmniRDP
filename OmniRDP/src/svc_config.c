@@ -52,6 +52,7 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->viewer_late_join_replay_max_frames = 4;
   cfg->viewer_throttle_max_updates_per_sec = 0;
   cfg->viewer_gfx_enabled = 0;
+  cfg->viewer_gfx_codec = SVC_VIEWER_GFX_CODEC_UNCOMPRESSED;
   cfg->viewer_classic_latest_state_enabled = 0;
   cfg->viewer_classic_latest_state_max_queue_depth = 0;
   cfg->viewer_classic_latest_state_max_queue_bytes = 0;
@@ -116,6 +117,45 @@ static uint16_t svc_config_get_port(const IniFile *ini, const char *section,
     return default_val;
   }
   return (uint16_t)result;
+}
+
+static int svc_config_str_equal_ci(const char *left, const char *right) {
+  unsigned char left_ch = 0;
+  unsigned char right_ch = 0;
+
+  if (!left || !right)
+    return 0;
+
+  while (*left && *right) {
+    left_ch = (unsigned char)*left;
+    right_ch = (unsigned char)*right;
+    if (tolower(left_ch) != tolower(right_ch))
+      return 0;
+    left++;
+    right++;
+  }
+
+  return *left == *right;
+}
+
+static int svc_config_get_viewer_gfx_codec(const IniFile *ini,
+                                           const char *section, const char *key,
+                                           int default_value) {
+  const char *value = ini_get(ini, section, key, NULL);
+
+  if (!value)
+    return default_value;
+  if (svc_config_str_equal_ci(value, "uncompressed"))
+    return SVC_VIEWER_GFX_CODEC_UNCOMPRESSED;
+  if (svc_config_str_equal_ci(value, "rfx") ||
+      svc_config_str_equal_ci(value, "remote_fx"))
+    return SVC_VIEWER_GFX_CODEC_RFX;
+
+  fprintf(stderr,
+          "Warning: [%s] %s=%s is not a supported viewer GFX codec; using "
+          "uncompressed\n",
+          section, key, value);
+  return SVC_VIEWER_GFX_CODEC_UNCOMPRESSED;
 }
 
 /* ── Helper: parse a single instance from an [instance:<name>] section ─ */
@@ -202,6 +242,8 @@ static int parse_one_instance(const IniFile *ini, const char *name,
                    inst->viewer_throttle_max_updates_per_sec);
   inst->viewer_gfx_enabled = ini_get_bool(ini, section, "viewer.gfx.enabled",
                                           inst->viewer_gfx_enabled);
+  inst->viewer_gfx_codec = svc_config_get_viewer_gfx_codec(
+      ini, section, "viewer.gfx.codec", inst->viewer_gfx_codec);
   inst->viewer_classic_latest_state_enabled =
       ini_get_bool(ini, section, "viewer.classic_latest_state_enabled",
                    inst->viewer_classic_latest_state_enabled);

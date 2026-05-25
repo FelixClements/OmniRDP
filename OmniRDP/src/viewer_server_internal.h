@@ -4,6 +4,7 @@
 #include "monitor_layout.h"
 #include "viewer_classic_queue.h"
 #include "viewer_framebuffer.h"
+#include "viewer_gfx_codec_rfx.h"
 #include "viewer_publisher.h"
 #include "viewer_server.h"
 
@@ -99,6 +100,7 @@ typedef struct {
   UINT32 dirty_in_flight_frames;
   UINT32 dirty_max_in_flight_frames;
   BOOL dirty_suspended_for_no_ack;
+  BOOL dirty_acknowledgements_suspended;
   BOOL dirty_updates_enabled;
   BOOL dirty_baseline_required;
   UINT32 dirty_frame_ids[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
@@ -107,6 +109,15 @@ typedef struct {
   UINT64 dirty_frame_payload_bytes[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
   UINT64 dirty_frame_sent_ts[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
   BOOL dirty_frame_valid[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
+  ViewerGfxCodec preferred_codec;
+  ViewerGfxCodec selected_codec;
+  ViewerGfxRfxContext *rfx_context;
+  UINT64 dirty_last_sent_rect_count;
+  UINT64 dirty_last_sent_area;
+  UINT64 gfx_send_time_total_us;
+  UINT64 gfx_send_time_max_us;
+  UINT64 last_gfx_send_start_us;
+  UINT64 last_gfx_send_end_us;
   ViewerServer *pipeline_server;
   UINT32 pending_caps_actions;
   UINT pending_caps_channel_rc;
@@ -159,6 +170,8 @@ typedef struct {
   UINT64 surface_bits_send_time_total_us;
   UINT64 surface_bits_send_time_max_us;
   UINT64 surface_bits_payload_bytes_sent;
+  UINT64 last_viewer_send_start_us;
+  UINT64 last_viewer_send_end_us;
   ViewerGraphicsContext gfx;
 } Viewer;
 
@@ -184,6 +197,7 @@ struct ViewerServer {
   char *key_path;  /* TLS key path (config or NULL for default) */
   ViewerSecurityConfig security;
   BOOL viewer_gfx_enabled;
+  ViewerGfxCodec viewer_gfx_codec;
 };
 
 #ifdef __cplusplus

@@ -106,6 +106,41 @@ static void test_viewer_ids_start_at_one(void) {
   assert(viewer_slot_index_to_id(1) == 2);
 }
 
+static void test_gfx_failure_policy_pre_activation_allows_fallback(void) {
+  ViewerGraphicsContext gfx = {0};
+
+  gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_RDPEGFX_READY;
+  gfx.join_state = VIEWER_JOIN_STATE_PENDING;
+  gfx.join_strategy = VIEWER_JOIN_STRATEGY_NONE;
+  gfx.use_rdpgfx = TRUE;
+
+  assert(!viewer_gfx_failure_requires_disconnect(&gfx, FALSE));
+  assert(!viewer_gfx_failure_requires_disconnect(&gfx, TRUE));
+}
+
+static void test_gfx_failure_policy_live_rdpgfx_disconnects(void) {
+  ViewerGraphicsContext gfx = {0};
+
+  gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_RDPEGFX_READY;
+  gfx.join_state = VIEWER_JOIN_STATE_LIVE;
+  gfx.join_strategy = VIEWER_JOIN_STRATEGY_NONE;
+  gfx.use_rdpgfx = TRUE;
+
+  assert(viewer_gfx_failure_requires_disconnect(&gfx, TRUE));
+}
+
+static void test_gfx_failure_policy_classic_fallback_stays_classic(void) {
+  ViewerGraphicsContext gfx = {0};
+
+  gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
+  gfx.join_state = VIEWER_JOIN_STATE_LIVE;
+  gfx.join_strategy = VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK;
+  gfx.use_rdpgfx = FALSE;
+  gfx.rdpgfx_temporarily_disabled = TRUE;
+
+  assert(!viewer_gfx_failure_requires_disconnect(&gfx, TRUE));
+}
+
 #ifdef RDPGFX_CAPVERSION_8
 static RDPGFX_CAPSET test_gfx_cap(UINT32 version, UINT32 flags) {
   RDPGFX_CAPSET cap = {0};
@@ -255,6 +290,9 @@ int main(void) {
   test_sustained_lag_timer_resets_after_clear();
   test_repeated_lag_requires_fresh_full_window();
   test_viewer_ids_start_at_one();
+  test_gfx_failure_policy_pre_activation_allows_fallback();
+  test_gfx_failure_policy_live_rdpgfx_disconnects();
+  test_gfx_failure_policy_classic_fallback_stays_classic();
 #ifdef RDPGFX_CAPVERSION_8
   test_gfx_supported_clean_cap_selected();
   test_gfx_highest_unsupported_version_rejected_without_downgrade();

@@ -205,6 +205,17 @@ BOOL viewer_gfx_pending_activation_timeout_due(const ViewerGraphicsContext *gfx,
   return (now - gfx->join_start_ts) >= timeout_ms;
 }
 
+BOOL viewer_gfx_failure_requires_disconnect(const ViewerGraphicsContext *gfx,
+                                            BOOL viewer_activated) {
+  if (!viewer_activated || !gfx)
+    return FALSE;
+
+  return (gfx->negotiation_outcome == VIEWER_GFX_NEGOTIATION_RDPEGFX_READY) &&
+         (gfx->join_state == VIEWER_JOIN_STATE_LIVE) &&
+         (gfx->join_strategy == VIEWER_JOIN_STRATEGY_NONE) && gfx->use_rdpgfx &&
+         !gfx->rdpgfx_temporarily_disabled;
+}
+
 BOOL viewer_input_try_acquire(ViewerInputOwnershipState *state,
                               UINT32 viewer_id, BOOL viewer_connected,
                               BOOL viewer_activated, BOOL owner_alive,

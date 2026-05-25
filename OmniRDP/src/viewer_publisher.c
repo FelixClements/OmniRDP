@@ -1,6 +1,49 @@
 #include "viewer_publisher.h"
 
+#include "platform_compat.h"
+
 #include <string.h>
+
+static UINT64 viewer_publisher_dirty_area(const RECTANGLE_16 *dirty_rects,
+                                          UINT32 dirty_rect_count) {
+  UINT64 area = 0;
+  UINT32 i = 0;
+
+  if (!dirty_rects)
+    return 0;
+
+  for (i = 0; i < dirty_rect_count; i++) {
+    const RECTANGLE_16 *rect = &dirty_rects[i];
+    UINT32 width = 0;
+    UINT32 height = 0;
+
+    if ((rect->left > rect->right) || (rect->top > rect->bottom))
+      continue;
+
+    width = (UINT32)rect->right - (UINT32)rect->left + 1U;
+    height = (UINT32)rect->bottom - (UINT32)rect->top + 1U;
+    area += (UINT64)width * (UINT64)height;
+  }
+
+  return area;
+}
+
+static void viewer_publisher_record_snapshot_metrics_locked(
+    ViewerPublisher *publisher, const ViewerFramebufferSnapshot *snapshot) {
+  UINT64 dirty_area = 0;
+
+  if (!publisher || !snapshot)
+    return;
+
+  dirty_area = viewer_publisher_dirty_area(snapshot->dirty_rects,
+                                           snapshot->dirty_rect_count);
+  publisher->metrics.latest_generation_available = snapshot->generation;
+  publisher->metrics.latest_dirty_rect_count = snapshot->dirty_rect_count;
+  publisher->metrics.latest_dirty_overflow = snapshot->dirty_overflow;
+  publisher->metrics.latest_dirty_area = dirty_area;
+  publisher->metrics.last_framebuffer_update_ts_ms =
+      snapshot->last_update_ts_ms;
+}
 
 static BOOL
 viewer_publisher_normalize_dirty_rects(ViewerFramebufferSnapshot *snapshot) {
@@ -108,6 +151,8 @@ void viewer_publisher_note_framebuffer_update(ViewerPublisher *publisher,
   publisher->metrics.latest_generation_available = generation;
   publisher->metrics.latest_dirty_rect_count = dirty_rect_count;
   publisher->metrics.latest_dirty_overflow = dirty_overflow;
+  publisher->metrics.last_framebuffer_update_ts_ms =
+      platform_get_timestamp_ms();
   publisher->metrics.observed_framebuffer_updates++;
   publisher->metrics.observed_dirty_rects += dirty_rect_count;
   LeaveCriticalSection(&publisher->lock);
@@ -135,6 +180,18 @@ void viewer_publisher_note_classic_drop(ViewerPublisher *publisher) {
 
   EnterCriticalSection(&publisher->lock);
   publisher->metrics.classic_queue_dropped_events++;
+  LeaveCriticalSection(&publisher->lock);
+}
+
+void viewer_publisher_note_classic_drop_bytes(ViewerPublisher *publisher,
+                                              UINT32 dropped_count,
+                                              UINT64 dropped_bytes) {
+  if (!publisher || !publisher->initialized || (dropped_count == 0))
+    return;
+
+  EnterCriticalSection(&publisher->lock);
+  publisher->metrics.classic_queue_dropped_events += dropped_count;
+  publisher->metrics.classic_queue_dropped_bytes += dropped_bytes;
   LeaveCriticalSection(&publisher->lock);
 }
 
@@ -270,9 +327,7 @@ BOOL viewer_publisher_classic_latest_snapshot(
   }
 
   EnterCriticalSection(&publisher->lock);
-  publisher->metrics.latest_generation_available = snapshot->generation;
-  publisher->metrics.latest_dirty_rect_count = snapshot->dirty_rect_count;
-  publisher->metrics.latest_dirty_overflow = snapshot->dirty_overflow;
+  viewer_publisher_record_snapshot_metrics_locked(publisher, snapshot);
   if (snapshot->generation <= viewer_last_generation_sent) {
     publisher->metrics.classic_latest_suppressed++;
     LeaveCriticalSection(&publisher->lock);
@@ -282,6 +337,7 @@ BOOL viewer_publisher_classic_latest_snapshot(
 
   publisher->metrics.queued_updates++;
   publisher->metrics.queued_bytes += (UINT64)snapshot->pixel_bytes;
+  publisher->metrics.last_publisher_enqueue_ts_ms = platform_get_timestamp_ms();
   LeaveCriticalSection(&publisher->lock);
   return TRUE;
 }
@@ -301,9 +357,7 @@ BOOL viewer_publisher_gfx_dirty_snapshot(ViewerPublisher *publisher,
   }
 
   EnterCriticalSection(&publisher->lock);
-  publisher->metrics.latest_generation_available = snapshot->generation;
-  publisher->metrics.latest_dirty_rect_count = snapshot->dirty_rect_count;
-  publisher->metrics.latest_dirty_overflow = snapshot->dirty_overflow;
+  viewer_publisher_record_snapshot_metrics_locked(publisher, snapshot);
   if (snapshot->generation <= viewer_last_generation_sent) {
     LeaveCriticalSection(&publisher->lock);
     viewer_framebuffer_snapshot_free(snapshot);
@@ -325,10 +379,10 @@ BOOL viewer_publisher_gfx_dirty_snapshot(ViewerPublisher *publisher,
   }
 
   EnterCriticalSection(&publisher->lock);
-  publisher->metrics.latest_dirty_rect_count = snapshot->dirty_rect_count;
-  publisher->metrics.latest_dirty_overflow = snapshot->dirty_overflow;
+  viewer_publisher_record_snapshot_metrics_locked(publisher, snapshot);
   publisher->metrics.queued_updates++;
   publisher->metrics.queued_bytes += (UINT64)snapshot->pixel_bytes;
+  publisher->metrics.last_publisher_enqueue_ts_ms = platform_get_timestamp_ms();
   LeaveCriticalSection(&publisher->lock);
   return TRUE;
 }
@@ -354,9 +408,7 @@ BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
   }
 
   EnterCriticalSection(&publisher->lock);
-  publisher->metrics.latest_generation_available = snapshot->generation;
-  publisher->metrics.latest_dirty_rect_count = snapshot->dirty_rect_count;
-  publisher->metrics.latest_dirty_overflow = snapshot->dirty_overflow;
+  viewer_publisher_record_snapshot_metrics_locked(publisher, snapshot);
   if (snapshot->generation <= publisher->metrics.last_generation_sent) {
     LeaveCriticalSection(&publisher->lock);
     viewer_framebuffer_snapshot_free(snapshot);
@@ -367,10 +419,14 @@ BOOL viewer_publisher_snapshot(ViewerPublisher *publisher,
     publisher->has_pending_snapshot = TRUE;
     publisher->pending_generation = snapshot->generation;
     publisher->metrics.queued_updates++;
+    publisher->metrics.last_publisher_enqueue_ts_ms =
+        platform_get_timestamp_ms();
     accepted = TRUE;
   } else if (snapshot->generation > publisher->pending_generation) {
     publisher->pending_generation = snapshot->generation;
     publisher->metrics.coalesced_updates++;
+    publisher->metrics.last_publisher_enqueue_ts_ms =
+        platform_get_timestamp_ms();
     accepted = TRUE;
   }
 
@@ -402,11 +458,10 @@ BOOL viewer_publisher_classic_baseline_snapshot(
   }
 
   EnterCriticalSection(&publisher->lock);
-  publisher->metrics.latest_generation_available = snapshot->generation;
-  publisher->metrics.latest_dirty_rect_count = snapshot->dirty_rect_count;
-  publisher->metrics.latest_dirty_overflow = snapshot->dirty_overflow;
+  viewer_publisher_record_snapshot_metrics_locked(publisher, snapshot);
   publisher->metrics.queued_updates++;
   publisher->metrics.queued_bytes += (UINT64)snapshot->pixel_bytes;
+  publisher->metrics.last_publisher_enqueue_ts_ms = platform_get_timestamp_ms();
   LeaveCriticalSection(&publisher->lock);
   return TRUE;
 }

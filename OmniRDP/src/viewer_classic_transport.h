@@ -29,6 +29,8 @@ typedef struct {
   UINT64 *surface_bits_send_time_max_us;
   UINT64 *surface_bits_payload_bytes_sent;
   UINT64 *surface_bits_updates_skipped_writeblock;
+  UINT64 *last_viewer_send_start_us;
+  UINT64 *last_viewer_send_end_us;
 } ViewerClassicTransport;
 
 BOOL viewer_classic_transport_begin_batch(

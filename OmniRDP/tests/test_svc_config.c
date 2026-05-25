@@ -91,6 +91,29 @@ static int write_viewer_gfx_config(const char *path, int enabled) {
   return 1;
 }
 
+static int write_viewer_gfx_codec_config(const char *path,
+                                         const char *codec_value) {
+  FILE *fp = NULL;
+  if (fopen_s(&fp, path, "w") != 0 || !fp)
+    return 0;
+
+  fprintf(fp,
+          "[instances]\n"
+          "names = Test\n"
+          "\n"
+          "[instance:Test]\n"
+          "backend.hostname = 127.0.0.1\n"
+          "backend.port = 3389\n"
+          "backend.username = alice\n"
+          "backend.password = secret\n"
+          "viewer.port = 3390\n"
+          "viewer.gfx.codec = %s\n",
+          codec_value);
+
+  fclose(fp);
+  return 1;
+}
+
 static int write_backend_gfx_config(const char *path, int backend_gfx,
                                     int codec_gfx) {
   FILE *fp = NULL;
@@ -122,6 +145,11 @@ int main(void) {
   const char *viewer_gfx_path = "test_svc_config_viewer_gfx.ini";
   const char *backend_gfx_path = "test_svc_config_backend_gfx.ini";
   const char *codec_gfx_path = "test_svc_config_codec_gfx.ini";
+  const char *viewer_gfx_codec_rfx_path = "test_svc_config_gfx_codec_rfx.ini";
+  const char *viewer_gfx_codec_remote_fx_path =
+      "test_svc_config_gfx_codec_remote_fx.ini";
+  const char *viewer_gfx_codec_invalid_path =
+      "test_svc_config_gfx_codec_invalid.ini";
   SvcLogLevel level = SVC_LOG_INFO;
   SvcConfig *config = NULL;
   const InstanceConfig *inst = NULL;
@@ -149,6 +177,7 @@ int main(void) {
       inst->viewer_classic_latest_state_max_queue_depth != 0 ||
       inst->viewer_classic_latest_state_max_queue_bytes != 0 ||
       inst->viewer_gfx_enabled != 0 ||
+      inst->viewer_gfx_codec != SVC_VIEWER_GFX_CODEC_UNCOMPRESSED ||
       inst->backend_gfx_decode_only_enabled != 0)
     ok = 0;
 
@@ -242,6 +271,89 @@ int main(void) {
 
   svc_config_free(config);
 
+  if (!write_viewer_gfx_codec_config(viewer_gfx_codec_rfx_path, "rfx")) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    return 1;
+  }
+
+  config = svc_config_load(viewer_gfx_codec_rfx_path);
+  if (!config) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    return 1;
+  }
+
+  inst = svc_config_find_instance(config, "Test");
+  if (!inst || inst->viewer_gfx_codec != SVC_VIEWER_GFX_CODEC_RFX)
+    ok = 0;
+  svc_config_free(config);
+
+  if (!write_viewer_gfx_codec_config(viewer_gfx_codec_remote_fx_path,
+                                     "remote_fx")) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    return 1;
+  }
+
+  config = svc_config_load(viewer_gfx_codec_remote_fx_path);
+  if (!config) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    return 1;
+  }
+
+  inst = svc_config_find_instance(config, "Test");
+  if (!inst || inst->viewer_gfx_codec != SVC_VIEWER_GFX_CODEC_RFX)
+    ok = 0;
+  svc_config_free(config);
+
+  if (!write_viewer_gfx_codec_config(viewer_gfx_codec_invalid_path,
+                                     "not_a_codec")) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    return 1;
+  }
+
+  config = svc_config_load(viewer_gfx_codec_invalid_path);
+  if (!config) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_invalid_path);
+    return 1;
+  }
+
+  inst = svc_config_find_instance(config, "Test");
+  if (!inst || inst->viewer_gfx_codec != SVC_VIEWER_GFX_CODEC_UNCOMPRESSED)
+    ok = 0;
+  svc_config_free(config);
+
   if (!write_viewer_port_config(bad_viewer_path)) {
     remove(path);
     return 1;
@@ -259,5 +371,8 @@ int main(void) {
   remove(viewer_gfx_path);
   remove(backend_gfx_path);
   remove(codec_gfx_path);
+  remove(viewer_gfx_codec_rfx_path);
+  remove(viewer_gfx_codec_remote_fx_path);
+  remove(viewer_gfx_codec_invalid_path);
   return ok ? 0 : 1;
 }

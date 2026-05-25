@@ -23,7 +23,12 @@ typedef struct {
   UINT64 latest_generation_available;
   UINT64 observed_framebuffer_updates;
   UINT64 observed_dirty_rects;
+  UINT64 observed_dirty_area;
+  UINT64 latest_dirty_area;
+  UINT64 last_framebuffer_update_ts_ms;
+  UINT64 last_publisher_enqueue_ts_ms;
   UINT64 classic_queue_bytes;
+  UINT64 classic_queue_dropped_bytes;
   UINT64 classic_queue_dropped_events;
   UINT64 classic_queue_max_bytes;
   UINT64 classic_latest_replacements;
@@ -98,6 +103,9 @@ void viewer_publisher_note_classic_queue_state(ViewerPublisher *publisher,
                                                UINT32 queue_depth,
                                                UINT64 queued_bytes);
 void viewer_publisher_note_classic_drop(ViewerPublisher *publisher);
+void viewer_publisher_note_classic_drop_bytes(ViewerPublisher *publisher,
+                                              UINT32 dropped_count,
+                                              UINT64 dropped_bytes);
 void viewer_publisher_set_classic_policy(
     ViewerPublisher *publisher,
     const ViewerPublisherClassicPolicyConfig *config);

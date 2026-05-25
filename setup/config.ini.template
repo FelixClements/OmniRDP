@@ -50,6 +50,8 @@ backend.username = localadmin
 backend.password = password
 backend.domain =
 backend.connect_timeout_ms = 30000
+; Experimental backend RDPEGFX decode-only path. Default off and independent of viewer GFX.
+backend.gfx.decode_only_enabled = false
 
 ; Backend security (OmniRDP -> backend VM)
 backend.security.nla_enabled = true
@@ -66,7 +68,7 @@ reconnect.max_delay_ms = 60000
 reconnect.backoff_multiplier = 2.0
 
 ; Viewer listener/security (RDP clients connect to OmniRDP here)
-viewer.bind_address = 192.168.1.207
+viewer.bind_address = 127.0.0.1
 viewer.port = 3390
 viewer.max_viewers = 10
 viewer.cert_path = C:\server.crt
@@ -90,6 +92,16 @@ viewer.late_join_timeout_ms = 15000
 viewer.late_join_refresh_deadline_ms = 5000
 viewer.late_join_replay_max_frames = 4
 viewer.throttle_max_updates_per_sec = 0
+; Experimental viewer RDPEGFX path. Default off. Uses canonical framebuffer
+; snapshots, not backend GFX. Currently only uncompressed is supported.
+viewer.gfx.enabled = false
+viewer.gfx.codec = uncompressed
+; Default off. When enabled, slow classic viewers whose queued BitmapUpdate
+; backlog exceeds either nonzero limit may have stale FIFO entries replaced
+; with one latest framebuffer baseline.
+viewer.classic_latest_state_enabled = false
+viewer.classic_latest_state_max_queue_depth = 0
+viewer.classic_latest_state_max_queue_bytes = 0
 
 ; Display
 display.monitor_count = 1
@@ -98,8 +110,8 @@ display.monitor_height = 1080
 display.color_depth = 32
 
 ; Codecs
-codec.nscodec = false
-codec.remote_fx = false
+codec.nscodec = true
+codec.remote_fx = true
 codec.graphics_pipeline = false
 codec.h264 = false
 codec.avc444 = false
@@ -109,7 +121,7 @@ codec.frame_acknowledge = 4
 ; Legacy compatibility security keys. Prefer backend.security.* for backend VM connection settings.
 ; Retained for older configs and may populate backend security if backend.security.* is absent.
 security.tls_enabled = true
-security.nla_enabled = false
+security.nla_enabled = true
 security.tls_min_version = 1.2
 security.server_authentication = true
 security.ignore_certificate = false

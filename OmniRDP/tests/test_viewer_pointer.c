@@ -121,6 +121,64 @@ static void test_unforced_matching_generations_send_nothing(void) {
   assert(!plan.send_position);
 }
 
+static void test_unforced_shape_generation_change_sends_shape_only(void) {
+  BYTE xorMask[] = {9, 8, 7, 6};
+  BYTE andMask[] = {5, 4};
+  PointerShapeEntry shape = {
+      .width = 24,
+      .height = 28,
+      .hotSpotX = 4,
+      .hotSpotY = 5,
+      .xorBpp = 32,
+      .xorMaskData = xorMask,
+      .andMaskData = andMask,
+      .xorMaskLength = sizeof(xorMask),
+      .andMaskLength = sizeof(andMask),
+      .cacheIndex = 3,
+  };
+  ViewerPointerSnapshot snapshot = {
+      .x = 70,
+      .y = 80,
+      .visible = TRUE,
+      .type = SYSPTR_DEFAULT,
+      .active_shape = &shape,
+      .has_active_shape = TRUE,
+      .position_generation = 12,
+      .shape_generation = 14,
+  };
+  ViewerPointerUpdatePlan plan = {0};
+
+  assert(viewer_pointer_plan_from_snapshot(&snapshot, 12, 13, FALSE, &plan));
+  assert(plan.send_new);
+  assert(!plan.send_color);
+  assert(!plan.send_system);
+  assert(!plan.send_position);
+  assert(plan.pointer_new.xorBpp == 32);
+  assert(plan.pointer_new.colorPtrAttr.cacheIndex == 3);
+  assert(plan.pointer_new.colorPtrAttr.xorMaskData == xorMask);
+}
+
+static void test_unforced_position_generation_change_sends_position_only(void) {
+  ViewerPointerSnapshot snapshot = {
+      .x = 90,
+      .y = 100,
+      .visible = TRUE,
+      .type = SYSPTR_DEFAULT,
+      .has_active_shape = FALSE,
+      .position_generation = 22,
+      .shape_generation = 24,
+  };
+  ViewerPointerUpdatePlan plan = {0};
+
+  assert(viewer_pointer_plan_from_snapshot(&snapshot, 21, 24, FALSE, &plan));
+  assert(!plan.send_system);
+  assert(!plan.send_color);
+  assert(!plan.send_new);
+  assert(plan.send_position);
+  assert(plan.position.xPos == 90);
+  assert(plan.position.yPos == 100);
+}
+
 int main(void) {
   test_suppress_crt_dialogs();
   test_forced_custom_shape_and_position_when_generations_match();
@@ -128,5 +186,7 @@ int main(void) {
   test_hidden_cursor_sends_null_and_no_position();
   test_forced_visible_position_when_generation_matches();
   test_unforced_matching_generations_send_nothing();
+  test_unforced_shape_generation_change_sends_shape_only();
+  test_unforced_position_generation_change_sends_position_only();
   return 0;
 }

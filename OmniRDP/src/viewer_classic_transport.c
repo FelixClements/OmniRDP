@@ -57,6 +57,11 @@ static void viewer_counter_add(UINT64 *counter, UINT64 value) {
     *counter += value;
 }
 
+static void viewer_counter_set(UINT64 *counter, UINT64 value) {
+  if (counter)
+    *counter = value;
+}
+
 static BOOL viewer_bitmap_bpp_sane(UINT32 bpp) {
   return (bpp == 8) || (bpp == 15) || (bpp == 16) || (bpp == 24) || (bpp == 32);
 }
@@ -218,6 +223,8 @@ static BOOL viewer_send_bitmap_update_chunks(ViewerClassicTransport *transport,
     UINT64 send_us = 0;                                                        \
     if (chunk.number > 0) {                                                    \
       send_started_us = viewer_classic_transport_now_us();                     \
+      viewer_counter_set(transport->last_viewer_send_start_us,                 \
+                         send_started_us);                                     \
       if (!update_lock_held)                                                   \
         rdp_update_lock(peer->context->update);                                \
       IFCALLRET(peer->context->update->BitmapUpdate, chunk_ret, peer->context, \
@@ -225,6 +232,8 @@ static BOOL viewer_send_bitmap_update_chunks(ViewerClassicTransport *transport,
       if (!update_lock_held)                                                   \
         rdp_update_unlock(peer->context->update);                              \
       send_us = viewer_classic_transport_now_us() - send_started_us;           \
+      viewer_counter_set(transport->last_viewer_send_end_us,                   \
+                         send_started_us + send_us);                           \
       send_time_total_us += send_us;                                           \
       if (transport->bitmap_send_time_max_us &&                                \
           (send_us > *transport->bitmap_send_time_max_us))                     \
@@ -360,12 +369,15 @@ BOOL viewer_classic_transport_send_surface_bits(
   }
 
   send_started_us = viewer_classic_transport_now_us();
+  viewer_counter_set(transport->last_viewer_send_start_us, send_started_us);
   if (!update_lock_held)
     rdp_update_lock(peer->context->update);
   IFCALLRET(peer->context->update->SurfaceBits, ret, peer->context, cmd);
   if (!update_lock_held)
     rdp_update_unlock(peer->context->update);
   send_us = viewer_classic_transport_now_us() - send_started_us;
+  viewer_counter_set(transport->last_viewer_send_end_us,
+                     send_started_us + send_us);
   viewer_counter_add(transport->surface_bits_send_time_total_us, send_us);
   if (transport->surface_bits_send_time_max_us &&
       (send_us > *transport->surface_bits_send_time_max_us))

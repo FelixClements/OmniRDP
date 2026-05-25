@@ -19,6 +19,11 @@ typedef enum {
   VIEWER_AUTH_MODE_BACKEND_CREDENTIALS
 } ViewerAuthMode;
 
+typedef enum {
+  VIEWER_GFX_CODEC_UNCOMPRESSED = 0,
+  VIEWER_GFX_CODEC_RFX
+} ViewerGfxCodec;
+
 typedef struct {
   BOOL nla_enabled;
   BOOL tls_enabled;
@@ -45,6 +50,8 @@ void viewer_server_set_classic_policy(
     const ViewerPublisherClassicPolicyConfig *classic_policy);
 
 void viewer_server_set_gfx_enabled(ViewerServer *server, BOOL enabled);
+
+void viewer_server_set_gfx_codec(ViewerServer *server, ViewerGfxCodec codec);
 
 void viewer_server_stop(ViewerServer *server);
 

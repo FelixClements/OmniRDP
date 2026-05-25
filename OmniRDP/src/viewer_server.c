@@ -5,6 +5,7 @@
 #include "viewer_gfx_pipeline.h"
 #include "viewer_internal.h"
 #include "viewer_pointer.h"
+#include "viewer_pointer_transport.h"
 #include "viewer_server_internal.h"
 
 #include <freerdp/channels/drdynvc.h>
@@ -86,6 +87,8 @@ static BOOL viewer_domain_matches_local_alias(const char *viewer_domain) {
 static BOOL viewer_gfx_enter_classic_fallback(ViewerServer *server,
                                               Viewer *viewer, UINT64 now,
                                               const char *reason);
+static BOOL viewer_gfx_handle_failure(ViewerServer *server, Viewer *viewer,
+                                      UINT64 now, const char *reason);
 static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
                                                  Viewer *viewer, UINT64 now);
 static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
@@ -237,6 +240,8 @@ viewer_classic_transport_from_viewer(Viewer *viewer) {
       &viewer->surface_bits_payload_bytes_sent;
   transport.surface_bits_updates_skipped_writeblock =
       &viewer->surface_bits_updates_skipped_writeblock;
+  transport.last_viewer_send_start_us = &viewer->last_viewer_send_start_us;
+  transport.last_viewer_send_end_us = &viewer->last_viewer_send_end_us;
   return transport;
 }
 
@@ -400,10 +405,10 @@ static void viewer_apply_classic_drop_info_locked(
     return;
 
   viewer->bitmap_queue_dropped += drop_info->dropped_count;
-  for (UINT32 i = 0; i < drop_info->dropped_count; i++) {
-    if (g_viewer_server)
-      viewer_publisher_note_classic_drop(&g_viewer_server->publisher);
-  }
+  if (g_viewer_server)
+    viewer_publisher_note_classic_drop_bytes(&g_viewer_server->publisher,
+                                             drop_info->dropped_count,
+                                             drop_info->dropped_payload_bytes);
   if (mark_full_refresh) {
     viewer->needs_full_refresh = TRUE;
     viewer->full_refresh_deadline_ts =
@@ -417,6 +422,10 @@ static void viewer_apply_surface_bits_drop_info_locked(
     return;
 
   viewer->surface_bits_queue_dropped += drop_info->dropped_count;
+  if (g_viewer_server)
+    viewer_publisher_note_classic_drop_bytes(&g_viewer_server->publisher,
+                                             drop_info->dropped_count,
+                                             drop_info->dropped_payload_bytes);
 }
 
 static void viewer_note_classic_queue_state_locked(const Viewer *viewer) {
@@ -812,6 +821,8 @@ static BOOL viewer_graphics_context_init(ViewerGraphicsContext *gfx) {
     WLog_ERR(TAG, "Failed to initialize viewer RDPEGFX context lock");
     return FALSE;
   }
+  gfx->preferred_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
+  gfx->selected_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
   gfx->initialized = TRUE;
   return TRUE;
 }
@@ -825,6 +836,9 @@ static void viewer_graphics_context_reset(ViewerGraphicsContext *gfx,
 
   gfx->post_connect_complete = FALSE;
   gfx->ready = FALSE;
+  gfx->preferred_codec = g_viewer_server ? g_viewer_server->viewer_gfx_codec
+                                         : VIEWER_GFX_CODEC_UNCOMPRESSED;
+  gfx->selected_codec = gfx->preferred_codec;
   viewer_gfx_pipeline_invalidate_surface_locked(gfx);
   gfx->channel_opened = FALSE;
   gfx->vcm_progress_logged = FALSE;
@@ -1090,6 +1104,7 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   BOOL has_active_shape = FALSE;
   ViewerPointerSnapshot pointer_snapshot = {0};
   ViewerPointerUpdatePlan pointer_plan = {0};
+  ViewerPointerTransport pointer_transport = {0};
   UINT64 position_generation = 0;
   UINT64 shape_generation = 0;
   BOOL sent = TRUE;
@@ -1149,32 +1164,10 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
     }
   }
 
-  {
-    ViewerClassicTransport transport =
-        viewer_classic_transport_from_viewer(viewer);
-    (void)viewer_classic_transport_begin_batch(&transport);
-  }
-  if (pointer_plan.send_system) {
-    IFCALLRET(peer->context->update->pointer->PointerSystem, sent,
-              peer->context, &pointer_plan.system);
-  } else if (pointer_plan.send_new &&
-             peer->context->update->pointer->PointerNew) {
-    IFCALLRET(peer->context->update->pointer->PointerNew, sent, peer->context,
-              &pointer_plan.pointer_new);
-  } else if (pointer_plan.send_new || pointer_plan.send_color) {
-    IFCALLRET(peer->context->update->pointer->PointerColor, sent, peer->context,
-              &pointer_plan.color);
-  }
-
-  if (sent && pointer_plan.send_position &&
-      peer->context->update->pointer->PointerPosition)
-    IFCALLRET(peer->context->update->pointer->PointerPosition, sent,
-              peer->context, &pointer_plan.position);
-  {
-    ViewerClassicTransport transport =
-        viewer_classic_transport_from_viewer(viewer);
-    viewer_classic_transport_end_batch(&transport);
-  }
+  pointer_transport.peer = peer;
+  pointer_transport.classic_transport =
+      viewer_classic_transport_from_viewer(viewer);
+  sent = viewer_pointer_transport_send_plan(&pointer_transport, &pointer_plan);
 
   pointer_shape_entry_reset(&shape_copy);
   if (!sent)
@@ -1325,6 +1318,33 @@ static BOOL viewer_gfx_enter_classic_fallback(ViewerServer *server,
   return TRUE;
 }
 
+static BOOL viewer_gfx_handle_failure(ViewerServer *server, Viewer *viewer,
+                                      UINT64 now, const char *reason) {
+  BOOL disconnect = FALSE;
+  freerdp_peer *peer = NULL;
+
+  if (!viewer)
+    return FALSE;
+
+  EnterCriticalSection(&viewer->gfx.lock);
+  disconnect =
+      viewer_gfx_failure_requires_disconnect(&viewer->gfx, viewer->activated);
+  LeaveCriticalSection(&viewer->gfx.lock);
+
+  if (!disconnect)
+    return viewer_gfx_enter_classic_fallback(server, viewer, now, reason);
+
+  peer = viewer->peer;
+  viewer->stop_requested = TRUE;
+  WLog_ERR(TAG,
+           "Viewer %u post-activation RDPEGFX failure; disconnecting for "
+           "classic reconnect reason=%s",
+           viewer->id, reason ? reason : "unspecified");
+  if (peer && peer->Disconnect)
+    peer->Disconnect(peer);
+  return FALSE;
+}
+
 static void viewer_gfx_reject_join(Viewer *viewer, const char *reason) {
   if (!viewer)
     return;
@@ -1348,7 +1368,7 @@ static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
           &server->publisher, &server->framebuffer, &snapshot)) {
     WLog_WARN(TAG, "Viewer %u RDPEGFX baseline snapshot unavailable",
               viewer->id);
-    return viewer_gfx_enter_classic_fallback(
+    return viewer_gfx_handle_failure(
         server, viewer, now, "RDPEGFX framebuffer baseline unavailable");
   }
 
@@ -1358,7 +1378,7 @@ static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
   if (!sent) {
     WLog_WARN(TAG, "Viewer %u RDPEGFX framebuffer baseline send failed",
               viewer->id);
-    return viewer_gfx_enter_classic_fallback(
+    return viewer_gfx_handle_failure(
         server, viewer, now, "RDPEGFX framebuffer baseline send failed");
   }
 
@@ -1386,8 +1406,11 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
     return TRUE;
 
   if (viewer_gfx_pipeline_poll_dirty_pacing(viewer, now, &reason) !=
-      VIEWER_GFX_DIRTY_PACING_OK)
+      VIEWER_GFX_DIRTY_PACING_OK) {
+    if (reason && (strcmp(reason, "dirty ack timeout") == 0))
+      return viewer_gfx_handle_failure(server, viewer, now, reason);
     return TRUE;
+  }
 
   EnterCriticalSection(&viewer->gfx.lock);
   last_sent_generation = viewer->gfx.dirty_last_sent_generation;
@@ -1409,8 +1432,8 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
   viewer_framebuffer_snapshot_free(&snapshot);
 
   if (send_status == VIEWER_GFX_DIRTY_SEND_FAILED)
-    return viewer_gfx_enter_classic_fallback(
-        server, viewer, now, "RDPEGFX dirty update send failed");
+    return viewer_gfx_handle_failure(server, viewer, now,
+                                     "RDPEGFX dirty update send failed");
 
   return TRUE;
 }
@@ -1424,8 +1447,8 @@ static BOOL viewer_gfx_step_join(ViewerServer *server, Viewer *viewer,
 
   viewer_gfx_pipeline_step_join(server, viewer, now, &result);
   if (result.actions & VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK)
-    return viewer_gfx_enter_classic_fallback(server, viewer, now,
-                                             result.classic_fallback_reason);
+    return viewer_gfx_handle_failure(server, viewer, now,
+                                     result.classic_fallback_reason);
 
   if (result.actions & VIEWER_GFX_JOIN_ACTION_SEND_BASELINE)
     return viewer_gfx_send_framebuffer_baseline(server, viewer, now);
@@ -1628,10 +1651,9 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
 
       if (drdynvc_state == DRDYNVC_STATE_READY) {
         if (!viewer_gfx_pipeline_open_if_ready_locked(viewer)) {
-          viewer_gfx_pipeline_disable_rdpgfx_locked(viewer);
           LeaveCriticalSection(&viewer->gfx.lock);
-          (void)viewer_gfx_enter_classic_fallback(
-              g_viewer_server, viewer, now, "RDPEGFX channel open failed");
+          (void)viewer_gfx_handle_failure(g_viewer_server, viewer, now,
+                                          "RDPEGFX channel open failed");
           continue;
         }
       }
@@ -1645,14 +1667,13 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
     if (gfx_event && (WaitForSingleObject(gfx_event, 0) == WAIT_OBJECT_0)) {
       EnterCriticalSection(&viewer->gfx.lock);
       if (!viewer_gfx_pipeline_handle_messages_locked(viewer, &caps_result)) {
-        viewer_gfx_pipeline_disable_rdpgfx_locked(viewer);
         LeaveCriticalSection(&viewer->gfx.lock);
         WLog_WARN(TAG,
-                  "Viewer %u RDPEGFX message handling failed; falling back to "
-                  "classic path",
+                  "Viewer %u RDPEGFX message handling failed; applying "
+                  "failure policy",
                   viewer->id);
-        (void)viewer_gfx_enter_classic_fallback(
-            g_viewer_server, viewer, now, "RDPEGFX message handling failed");
+        (void)viewer_gfx_handle_failure(g_viewer_server, viewer, now,
+                                        "RDPEGFX message handling failed");
         continue;
       }
       viewer_gfx_apply_caps_result_locked(g_viewer_server, viewer, &caps_result,
@@ -1660,8 +1681,8 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
                                           &caps_classic_fallback_reason);
       LeaveCriticalSection(&viewer->gfx.lock);
       if (caps_enter_classic_fallback) {
-        (void)viewer_gfx_enter_classic_fallback(g_viewer_server, viewer, now,
-                                                caps_classic_fallback_reason);
+        (void)viewer_gfx_handle_failure(g_viewer_server, viewer, now,
+                                        caps_classic_fallback_reason);
         continue;
       }
     }
@@ -1680,13 +1701,11 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
     if (!viewer_pump_classic(viewer))
       break;
 
-    /* viewer_forward_pointer disabled: cursor position forwarding to viewers
-
-     * * without input lock is not reliable and causes complexity. Viewer
-     * cursor
-     * position comes from the RDP server via on_pointer_position
-     * callbacks. */
-    /* (void)viewer_forward_pointer(viewer, FALSE); */
+    // Ongoing pointer forwarding applies to activated classic and RDPEGFX
+    // viewers; viewer_forward_pointer uses pointer generation checks and the
+    // pointer transport boundary to avoid resending unchanged shape/position
+    // state.
+    (void)viewer_forward_pointer(viewer, FALSE);
 
     if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer) &&
         peer->DrainOutputBuffer) {
@@ -2373,6 +2392,7 @@ ViewerServer *viewer_server_init_ex(const char *bind_address, UINT16 port,
   server->key_path = key_path ? _strdup(key_path) : NULL;
   server->security = security ? *security : viewer_security_default();
   server->viewer_gfx_enabled = FALSE;
+  server->viewer_gfx_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
   if (backend)
     server->monitor_layout = backend->monitor_layout;
   server->slow_viewer_disconnect_enabled = TRUE;
@@ -2468,6 +2488,15 @@ void viewer_server_set_gfx_enabled(ViewerServer *server, BOOL enabled) {
     return;
 
   server->viewer_gfx_enabled = enabled ? TRUE : FALSE;
+}
+
+void viewer_server_set_gfx_codec(ViewerServer *server, ViewerGfxCodec codec) {
+  if (!server)
+    return;
+
+  server->viewer_gfx_codec = (codec == VIEWER_GFX_CODEC_RFX)
+                                 ? VIEWER_GFX_CODEC_RFX
+                                 : VIEWER_GFX_CODEC_UNCOMPRESSED;
 }
 
 void viewer_server_stop(ViewerServer *server) {
@@ -2631,6 +2660,7 @@ void viewer_server_notify_backend_layout_change(BackendClient *backend,
     return;
 
   EnterCriticalSection(&server->lock);
+  server->monitor_layout = backend->monitor_layout;
   for (int i = 0; i < MAX_VIEWERS; i++) {
     Viewer *viewer = &server->viewers[i];
     if (!viewer_try_add_layout_ref_locked(viewer))

@@ -18,6 +18,9 @@
 extern "C" {
 #endif
 
+#define SVC_VIEWER_GFX_CODEC_UNCOMPRESSED 0
+#define SVC_VIEWER_GFX_CODEC_RFX 1
+
 /* ── Service-level settings (from [service] section) ────────── */
 
 typedef struct {
@@ -68,7 +71,8 @@ typedef struct {
   unsigned int viewer_late_join_replay_max_frames;   /* default: 4 */
   unsigned int viewer_throttle_max_updates_per_sec; /* default: 0 (unlimited) */
   int viewer_gfx_enabled;                           /* default: 0 */
-  int viewer_classic_latest_state_enabled;          /* default: 0 */
+  int viewer_gfx_codec; /* default: SVC_VIEWER_GFX_CODEC_UNCOMPRESSED */
+  int viewer_classic_latest_state_enabled;                  /* default: 0 */
   unsigned int viewer_classic_latest_state_max_queue_depth; /* default: 0 */
   unsigned int viewer_classic_latest_state_max_queue_bytes; /* default: 0 */
   int viewer_security_nla_enabled;                          /* default: 1 */

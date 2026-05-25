@@ -66,6 +66,15 @@ static const char *svc_log_level_to_wlog(SvcLogLevel level) {
   }
 }
 
+static ViewerGfxCodec instance_viewer_gfx_codec(int codec) {
+  return (codec == SVC_VIEWER_GFX_CODEC_RFX) ? VIEWER_GFX_CODEC_RFX
+                                             : VIEWER_GFX_CODEC_UNCOMPRESSED;
+}
+
+static const char *instance_viewer_gfx_codec_name(int codec) {
+  return (codec == SVC_VIEWER_GFX_CODEC_RFX) ? "rfx" : "uncompressed";
+}
+
 static const char *svc_log_level_to_text(SvcLogLevel level) {
   switch (level) {
   case SVC_LOG_DEBUG:
@@ -682,6 +691,10 @@ int instance_runner_main(int argc, char *argv[]) {
                                 inst->viewer_gfx_enabled ? TRUE : FALSE);
   LOG_I("instance_runner", "Applied viewer GFX gate: enabled=%s",
         bool_str(inst->viewer_gfx_enabled));
+  viewer_server_set_gfx_codec(
+      server, instance_viewer_gfx_codec(inst->viewer_gfx_codec));
+  LOG_I("instance_runner", "Applied viewer GFX codec preference: %s",
+        instance_viewer_gfx_codec_name(inst->viewer_gfx_codec));
 
   /* Register FreeRDP WTS API */
   {

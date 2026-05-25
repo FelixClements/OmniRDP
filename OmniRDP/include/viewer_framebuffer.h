@@ -33,6 +33,7 @@ typedef struct {
   UINT32 stride;
   UINT32 pixel_format;
   UINT64 generation;
+  UINT64 last_update_ts_ms;
   BYTE *pixels;
   size_t pixel_bytes;
   RECTANGLE_16 dirty_rects[VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS];
@@ -48,6 +49,7 @@ typedef struct {
   UINT32 stride;
   UINT32 pixel_format;
   UINT64 generation;
+  UINT64 last_update_ts_ms;
   BYTE *pixels;
   size_t pixel_bytes;
   RECTANGLE_16 dirty_rects[VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS];

@@ -1,5 +1,7 @@
 #include "viewer_framebuffer.h"
 
+#include "platform_compat.h"
+
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -133,6 +135,7 @@ BOOL viewer_framebuffer_resize(ViewerFramebuffer *framebuffer, UINT32 width,
   framebuffer->stride = stride;
   framebuffer->pixel_format = pixel_format;
   framebuffer->generation++;
+  framebuffer->last_update_ts_ms = platform_get_timestamp_ms();
   viewer_framebuffer_clear_dirty_locked(framebuffer);
 
   full_rect.left = 0;
@@ -185,6 +188,7 @@ BOOL viewer_framebuffer_update_pixels(ViewerFramebuffer *framebuffer,
   }
 
   framebuffer->generation++;
+  framebuffer->last_update_ts_ms = platform_get_timestamp_ms();
   LeaveCriticalSection(&framebuffer->lock);
   return TRUE;
 }
@@ -228,6 +232,7 @@ BOOL viewer_framebuffer_snapshot(ViewerFramebuffer *framebuffer,
   snapshot->stride = framebuffer->stride;
   snapshot->pixel_format = framebuffer->pixel_format;
   snapshot->generation = framebuffer->generation;
+  snapshot->last_update_ts_ms = framebuffer->last_update_ts_ms;
   snapshot->dirty_rect_count = framebuffer->dirty_rect_count;
   snapshot->dirty_overflow = framebuffer->dirty_overflow;
   memmove(snapshot->dirty_rects, framebuffer->dirty_rects,

@@ -55,6 +55,9 @@ BOOL viewer_gfx_negotiation_is_classic_fallback(
 BOOL viewer_gfx_pending_activation_timeout_due(const ViewerGraphicsContext *gfx,
                                                UINT64 now, UINT32 timeout_ms);
 
+BOOL viewer_gfx_failure_requires_disconnect(const ViewerGraphicsContext *gfx,
+                                            BOOL viewer_activated);
+
 UINT32 viewer_slot_index_to_id(UINT32 slot_index);
 
 BOOL viewer_is_slow(UINT32 consecutive_lag_intervals, BOOL write_blocked);
