@@ -16,12 +16,14 @@ add_executable(test_viewer_pointer
 add_executable(test_viewer_framebuffer
     test_viewer_framebuffer.c
     ${CMAKE_SOURCE_DIR}/src/viewer_framebuffer.c
+    ${CMAKE_SOURCE_DIR}/src/platform_compat.c
 )
 
 add_executable(test_viewer_publisher
     test_viewer_publisher.c
     ${CMAKE_SOURCE_DIR}/src/viewer_publisher.c
     ${CMAKE_SOURCE_DIR}/src/viewer_framebuffer.c
+    ${CMAKE_SOURCE_DIR}/src/platform_compat.c
 )
 
 add_executable(test_viewer_classic_queue
@@ -33,6 +35,7 @@ add_executable(test_viewer_gfx_pipeline
     test_viewer_gfx_pipeline.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_pipeline.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_uncompressed.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_rfx.c
     ${CMAKE_SOURCE_DIR}/src/viewer_internal.c
     ${CMAKE_SOURCE_DIR}/src/platform_compat.c
 )
@@ -40,6 +43,11 @@ add_executable(test_viewer_gfx_pipeline
 add_executable(test_viewer_gfx_codec_uncompressed
     test_viewer_gfx_codec_uncompressed.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_uncompressed.c
+)
+
+add_executable(test_viewer_gfx_codec_rfx
+    test_viewer_gfx_codec_rfx.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_rfx.c
 )
 
 add_executable(test_backend_gfx_decode_only
@@ -159,6 +167,11 @@ target_include_directories(test_viewer_gfx_pipeline PRIVATE
 )
 
 target_link_libraries(test_viewer_gfx_pipeline ${WINPR_LIB})
+target_link_libraries(test_viewer_gfx_pipeline ${FREERDP_LIB})
+
+target_compile_definitions(test_viewer_gfx_pipeline PRIVATE
+    VIEWER_GFX_RFX_TESTING
+)
 
 target_include_directories(test_viewer_gfx_codec_uncompressed PRIVATE
     ${CMAKE_SOURCE_DIR}/include
@@ -167,6 +180,24 @@ target_include_directories(test_viewer_gfx_codec_uncompressed PRIVATE
     ${FREERDP_ROOT}/winpr/include
     ${FREERDP_BUILD}/include
     ${FREERDP_BUILD}/winpr/include
+)
+
+target_include_directories(test_viewer_gfx_codec_rfx PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${FREERDP_ROOT}/include
+    ${FREERDP_ROOT}/winpr/include
+    ${FREERDP_BUILD}/include
+    ${FREERDP_BUILD}/winpr/include
+)
+
+target_compile_definitions(test_viewer_gfx_codec_rfx PRIVATE
+    VIEWER_GFX_RFX_TESTING
+)
+
+target_link_libraries(test_viewer_gfx_codec_rfx
+    ${FREERDP_LIB}
+    ${WINPR_LIB}
 )
 
 if(MSVC)
@@ -179,6 +210,11 @@ set_target_properties(test_viewer_gfx_pipeline PROPERTIES
 )
 
 set_target_properties(test_viewer_gfx_codec_uncompressed PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+)
+
+set_target_properties(test_viewer_gfx_codec_rfx PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
 )
@@ -259,7 +295,7 @@ add_test(NAME test_viewer_gfx_pipeline
     COMMAND ${CMAKE_COMMAND}
         -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
         -DTEST_EXECUTABLE_NAME=test_viewer_gfx_pipeline${CMAKE_EXECUTABLE_SUFFIX}
-        -DTEST_DLL_DIR=${CMAKE_BINARY_DIR}/Release
+        "-DTEST_DLL_DIR=${FREERDP_BUILD}/libfreerdp/Release\;${FREERDP_BUILD}/winpr/libwinpr/Release\;${CMAKE_BINARY_DIR}/Release\;${CMAKE_SOURCE_DIR}/../artifacts/windows-Release/bin"
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_viewer_gfx_pipeline PROPERTIES TIMEOUT 120)
@@ -271,6 +307,15 @@ add_test(NAME test_viewer_gfx_codec_uncompressed
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_viewer_gfx_codec_uncompressed PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_viewer_gfx_codec_rfx
+    COMMAND ${CMAKE_COMMAND}
+        -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DTEST_EXECUTABLE_NAME=test_viewer_gfx_codec_rfx${CMAKE_EXECUTABLE_SUFFIX}
+        "-DTEST_DLL_DIR=${FREERDP_BUILD}/libfreerdp/Release\;${FREERDP_BUILD}/winpr/libwinpr/Release\;${CMAKE_SOURCE_DIR}/../artifacts/windows-Release/bin"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
+)
+set_tests_properties(test_viewer_gfx_codec_rfx PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_svc_config
     COMMAND ${CMAKE_COMMAND}

@@ -1,3 +1,10 @@
+/*
+ * Internal viewer-server RDPEGFX pipeline interface.
+ *
+ * This module coordinates concrete Viewer/ViewerServer state and is allowed to
+ * depend on viewer_server_internal.h. Do not expose this header from the public
+ * include tree.
+ */
 #ifndef VIEWER_GFX_PIPELINE_H
 #define VIEWER_GFX_PIPELINE_H
 
@@ -91,7 +98,12 @@ BOOL viewer_gfx_pipeline_send_dirty_update(
 ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot);
+BOOL viewer_gfx_pipeline_monitor_layout_snapshot(
+    ViewerServer *server, const ViewerFramebufferSnapshot *snapshot,
+    MonitorLayout *layout);
 UINT viewer_gfx_pipeline_handle_frame_ack(Viewer *viewer, UINT32 frame_id);
+UINT viewer_gfx_pipeline_handle_frame_ack_pdu(
+    Viewer *viewer, const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frame_acknowledge);
 BOOL viewer_gfx_pipeline_send_snapshot(
     ViewerServer *server, Viewer *viewer,
     const ViewerFramebufferSnapshot *snapshot);

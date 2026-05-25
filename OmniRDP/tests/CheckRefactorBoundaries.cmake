@@ -59,6 +59,12 @@ check_text_forbidden(VIEWER_SERVER_TEXT "${VIEWER_SERVER_SOURCE}"
     "->SurfaceFrameMarker"
     "rdp_update_lock"
     "rdp_update_unlock")
+check_text_forbidden(VIEWER_SERVER_TEXT "${VIEWER_SERVER_SOURCE}"
+    "viewer_server pointer transport boundary"
+    "PointerSystem"
+    "PointerNew"
+    "PointerColor"
+    "PointerPosition")
 
 set(FRAMEBUFFER_TOKENS
     "freerdp_peer"
@@ -103,10 +109,12 @@ set(CODEC_TOKENS
 
 foreach(CODEC_FILE
         "${SOURCE_DIR}/src/viewer_gfx_codec_uncompressed.c"
-        "${SOURCE_DIR}/include/viewer_gfx_codec_uncompressed.h")
+        "${SOURCE_DIR}/include/viewer_gfx_codec_uncompressed.h"
+        "${SOURCE_DIR}/src/viewer_gfx_codec_rfx.c"
+        "${SOURCE_DIR}/include/viewer_gfx_codec_rfx.h")
     file(READ "${CODEC_FILE}" CODEC_TEXT)
     check_text_forbidden(CODEC_TEXT "${CODEC_FILE}"
-        "uncompressed GFX codec ownership boundary" ${CODEC_TOKENS})
+        "GFX codec ownership boundary" ${CODEC_TOKENS})
 endforeach()
 
 set(VIEWER_SERVER_HEADER "${SOURCE_DIR}/include/viewer_server.h")
@@ -125,3 +133,21 @@ check_text_forbidden(VIEWER_SERVER_HEADER_TEXT "${VIEWER_SERVER_HEADER}"
     "ViewerGraphicsContext"
     "ViewerGfxPublisherState"
     "struct ViewerServer {")
+
+set(PUBLIC_VIEWER_GFX_PIPELINE_HEADER
+    "${SOURCE_DIR}/include/viewer_gfx_pipeline.h")
+if(EXISTS "${PUBLIC_VIEWER_GFX_PIPELINE_HEADER}")
+    message(FATAL_ERROR
+        "public include boundary: viewer_gfx_pipeline.h must stay internal, found ${PUBLIC_VIEWER_GFX_PIPELINE_HEADER}")
+endif()
+
+file(GLOB_RECURSE PUBLIC_HEADERS "${SOURCE_DIR}/include/*.h")
+foreach(PUBLIC_HEADER IN LISTS PUBLIC_HEADERS)
+    file(READ "${PUBLIC_HEADER}" PUBLIC_HEADER_TEXT)
+    check_text_forbidden(PUBLIC_HEADER_TEXT "${PUBLIC_HEADER}"
+        "public include boundary"
+        "#include \"viewer_server_internal.h\""
+        "#include <viewer_server_internal.h>"
+        "#include \"viewer_gfx_pipeline.h\""
+        "#include <viewer_gfx_pipeline.h>")
+endforeach()

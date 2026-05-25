@@ -1,3 +1,4 @@
+#include "viewer_gfx_codec_rfx.h"
 #include "viewer_gfx_pipeline.h"
 #include "viewer_server_internal.h"
 
@@ -24,7 +25,7 @@ static RDPGFX_CREATE_SURFACE_PDU g_last_create = {0};
 static RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU g_last_map = {0};
 static RDPGFX_SURFACE_COMMAND g_last_surface = {0};
 static const MONITOR_DEF *g_expected_reset_source = NULL;
-static MONITOR_DEF g_last_reset_monitor = {0};
+static MONITOR_DEF g_last_reset_monitors[OMNIRDP_MAX_MONITORS] = {0};
 
 static UINT test_record_send(TestSendOp op) {
   g_send_order[g_send_count++] = op;
@@ -36,13 +37,15 @@ static UINT test_record_send(TestSendOp op) {
 static UINT test_reset_graphics(RdpgfxServerContext *context,
                                 const RDPGFX_RESET_GRAPHICS_PDU *reset) {
   (void)context;
-  if (!reset || (reset->monitorCount != 1) || !reset->monitorDefArray)
+  if (!reset || (reset->monitorCount == 0) ||
+      (reset->monitorCount > OMNIRDP_MAX_MONITORS) || !reset->monitorDefArray)
     return ERROR_INTERNAL_ERROR;
   if (g_expected_reset_source &&
       (reset->monitorDefArray == g_expected_reset_source))
     return ERROR_INTERNAL_ERROR;
   g_last_reset = *reset;
-  g_last_reset_monitor = reset->monitorDefArray[0];
+  memcpy(g_last_reset_monitors, reset->monitorDefArray,
+         sizeof(MONITOR_DEF) * reset->monitorCount);
   return test_record_send(TEST_SEND_RESET);
 }
 
@@ -96,7 +99,7 @@ static void reset_send_recorder(void) {
   memset(&g_last_create, 0, sizeof(g_last_create));
   memset(&g_last_map, 0, sizeof(g_last_map));
   memset(&g_last_surface, 0, sizeof(g_last_surface));
-  memset(&g_last_reset_monitor, 0, sizeof(g_last_reset_monitor));
+  memset(g_last_reset_monitors, 0, sizeof(g_last_reset_monitors));
   g_expected_reset_source = NULL;
   g_send_count = 0;
   g_surface_count = 0;
@@ -170,6 +173,7 @@ static BOOL init_test_viewer(Viewer *viewer, UINT32 width, UINT32 height) {
 
 static void uninit_test_viewer(Viewer *viewer) {
   if (viewer && viewer->gfx.initialized) {
+    viewer_gfx_pipeline_uninit(viewer);
     DeleteCriticalSection(&viewer->send_lock);
     DeleteCriticalSection(&viewer->gfx.lock);
     memset(viewer, 0, sizeof(*viewer));
@@ -527,9 +531,11 @@ static int test_snapshot_sends_full_frame_baseline_order(void) {
   ok = ok && expect_uint32(g_last_reset.width, 2, "reset uses snapshot width");
   ok =
       ok && expect_uint32(g_last_reset.height, 2, "reset uses snapshot height");
-  ok = ok && expect_uint32((UINT32)g_last_reset_monitor.right, 1,
+  ok = ok && expect_uint32(g_last_reset.monitorCount, 1,
+                           "reset uses one fallback monitor");
+  ok = ok && expect_uint32((UINT32)g_last_reset_monitors[0].right, 1,
                            "reset monitor uses snapshot right");
-  ok = ok && expect_uint32((UINT32)g_last_reset_monitor.bottom, 1,
+  ok = ok && expect_uint32((UINT32)g_last_reset_monitors[0].bottom, 1,
                            "reset monitor uses snapshot bottom");
   ok =
       ok && expect_uint32(g_last_create.width, 2, "create uses snapshot width");
@@ -558,6 +564,84 @@ static int test_snapshot_sends_full_frame_baseline_order(void) {
                          "dirty updates enabled after baseline");
 
   viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_snapshot_rfx_codec_emits_cavideo(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[64] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+  snapshot.pixels = pixels;
+  snapshot.width = 4;
+  snapshot.height = 4;
+  snapshot.stride = 16;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixel_bytes = sizeof(pixels);
+  viewer.gfx.rdpgfx = &rdpgfx;
+  viewer.gfx.caps_ready = TRUE;
+  viewer.gfx.use_rdpgfx = TRUE;
+  viewer.gfx.channel_opened = TRUE;
+  viewer.gfx.preferred_codec = VIEWER_GFX_CODEC_RFX;
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+
+  reset_send_recorder();
+  ok = ok && expect_true(
+                 viewer_gfx_pipeline_send_snapshot(&server, &viewer, &snapshot),
+                 "RFX snapshot sends full-frame baseline");
+  ok = ok && expect_uint32(g_last_surface.codecId, RDPGFX_CODECID_CAVIDEO,
+                           "RFX baseline uses CAVIDEO");
+  ok = ok && expect_true(g_last_surface.length > 0, "RFX baseline payload set");
+  ok = ok && expect_uint32(viewer.gfx.selected_codec, VIEWER_GFX_CODEC_RFX,
+                           "RFX remains selected after success");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_snapshot_rfx_context_failure_downgrades_to_uncompressed(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[16] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 2, 2), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  snapshot.pixels = pixels;
+  snapshot.width = 2;
+  snapshot.height = 2;
+  snapshot.stride = 8;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixel_bytes = sizeof(pixels);
+  viewer.gfx.rdpgfx = &rdpgfx;
+  viewer.gfx.caps_ready = TRUE;
+  viewer.gfx.use_rdpgfx = TRUE;
+  viewer.gfx.channel_opened = TRUE;
+  viewer.gfx.preferred_codec = VIEWER_GFX_CODEC_RFX;
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+
+  viewer_gfx_rfx_test_set_force_context_new_failure(TRUE);
+  reset_send_recorder();
+  ok = ok && expect_true(
+                 viewer_gfx_pipeline_send_snapshot(&server, &viewer, &snapshot),
+                 "RFX init failure downgrades and sends baseline");
+  viewer_gfx_rfx_test_set_force_context_new_failure(FALSE);
+  ok = ok && expect_uint32(g_last_surface.codecId, RDPGFX_CODECID_UNCOMPRESSED,
+                           "downgraded baseline uses uncompressed");
+  ok = ok &&
+       expect_uint32(viewer.gfx.selected_codec, VIEWER_GFX_CODEC_UNCOMPRESSED,
+                     "viewer selected codec downgraded");
+
   uninit_test_viewer(&viewer);
   return ok;
 }
@@ -831,7 +915,7 @@ static int test_dirty_update_send_order_and_ack(void) {
   ViewerServer server = {0};
   Viewer viewer = {0};
   RdpgfxServerContext rdpgfx = {0};
-  BYTE pixels[64] = {0};
+  BYTE pixels[128] = {0};
   ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 30, 1);
   const char *reason = NULL;
   int ok = 1;
@@ -890,6 +974,152 @@ static int test_dirty_update_send_order_and_ack(void) {
                            "matching ack records epoch");
 
   viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_update_rfx_codec_emits_cavideo(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[128] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 31, 1);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 12;
+  viewer.gfx.preferred_codec = VIEWER_GFX_CODEC_RFX;
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+
+  reset_send_recorder();
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &snapshot),
+                         "RFX dirty update sends");
+  ok = ok && expect_uint32(g_surface_count, 1, "one RFX dirty command");
+  ok = ok && expect_uint32(g_last_surface.codecId, RDPGFX_CODECID_CAVIDEO,
+                           "RFX dirty uses CAVIDEO");
+  ok = ok && expect_uint32(g_last_surface.left, 1, "RFX dirty left");
+  ok = ok && expect_uint32(g_last_surface.top, 1, "RFX dirty top");
+  ok = ok && expect_true(viewer.gfx.dirty_in_flight_bytes > 0,
+                         "RFX dirty records payload bytes");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_monitor_layout_snapshot_uses_server_layout(void) {
+  ViewerServer server = {0};
+  MonitorLayout layout = {0};
+  BYTE pixels[128] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 210, 1);
+  int ok = 1;
+
+  server.monitor_layout.monitor_count = 2;
+  server.monitor_layout.total_width = 3840;
+  server.monitor_layout.total_height = 1080;
+  server.monitor_layout.monitors[0].left = 0;
+  server.monitor_layout.monitors[0].top = 0;
+  server.monitor_layout.monitors[0].right = 1919;
+  server.monitor_layout.monitors[0].bottom = 1079;
+  server.monitor_layout.monitors[0].flags = MONITOR_PRIMARY;
+  server.monitor_layout.monitors[1].left = 1920;
+  server.monitor_layout.monitors[1].top = 0;
+  server.monitor_layout.monitors[1].right = 3839;
+  server.monitor_layout.monitors[1].bottom = 1079;
+
+  ok = ok && expect_true(viewer_gfx_pipeline_monitor_layout_snapshot(
+                             &server, &snapshot, &layout),
+                         "monitor layout snapshot succeeds");
+  ok = ok &&
+       expect_uint32(layout.monitor_count, 2, "server monitor count copied");
+  ok = ok &&
+       expect_uint32(layout.total_width, 3840, "server total width copied");
+  ok = ok &&
+       expect_uint32(layout.total_height, 1080, "server total height copied");
+  ok = ok && expect_uint32((UINT32)layout.monitors[0].flags, MONITOR_PRIMARY,
+                           "primary flag copied");
+  ok = ok && expect_uint32((UINT32)layout.monitors[1].left, 1920,
+                           "second monitor copied");
+
+  return ok;
+}
+
+static int test_monitor_layout_snapshot_falls_back_to_framebuffer(void) {
+  ViewerServer server = {0};
+  MonitorLayout layout = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 211, 1);
+  int ok = 1;
+
+  snapshot.width = 4;
+  snapshot.height = 4;
+  ok = ok && expect_true(viewer_gfx_pipeline_monitor_layout_snapshot(
+                             &server, &snapshot, &layout),
+                         "fallback monitor layout succeeds");
+  ok = ok &&
+       expect_uint32(layout.monitor_count, 1, "fallback monitor count is one");
+  ok = ok && expect_uint32(layout.total_width, 4, "fallback width copied");
+  ok = ok && expect_uint32(layout.total_height, 4, "fallback height copied");
+  ok = ok && expect_uint32((UINT32)layout.monitors[0].right, 3,
+                           "fallback right is inclusive");
+  ok = ok && expect_uint32((UINT32)layout.monitors[0].bottom, 3,
+                           "fallback bottom is inclusive");
+  ok = ok && expect_uint32((UINT32)layout.monitors[0].flags, MONITOR_PRIMARY,
+                           "fallback primary flag set");
+
+  return ok;
+}
+
+static int test_snapshot_sends_server_monitor_layout(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[128] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 800, 600), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  snapshot.pixels = pixels;
+  snapshot.width = 8;
+  snapshot.height = 4;
+  snapshot.stride = 32;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixel_bytes = sizeof(pixels);
+  server.monitor_layout.monitor_count = 2;
+  server.monitor_layout.total_width = 8;
+  server.monitor_layout.total_height = 4;
+  server.monitor_layout.monitors[0].left = 0;
+  server.monitor_layout.monitors[0].top = 0;
+  server.monitor_layout.monitors[0].right = 3;
+  server.monitor_layout.monitors[0].bottom = 3;
+  server.monitor_layout.monitors[0].flags = MONITOR_PRIMARY;
+  server.monitor_layout.monitors[1].left = 4;
+  server.monitor_layout.monitors[1].top = 0;
+  server.monitor_layout.monitors[1].right = 7;
+  server.monitor_layout.monitors[1].bottom = 3;
+  viewer.gfx.rdpgfx = &rdpgfx;
+  viewer.gfx.caps_ready = TRUE;
+  viewer.gfx.use_rdpgfx = TRUE;
+  viewer.gfx.channel_opened = TRUE;
+
+  reset_send_recorder();
+  ok = ok && expect_true(
+                 viewer_gfx_pipeline_send_snapshot(&server, &viewer, &snapshot),
+                 "snapshot sends multi-monitor reset");
+  ok = ok && expect_uint32(g_last_reset.monitorCount, 2,
+                           "reset uses server monitor count");
+  ok = ok && expect_uint32((UINT32)g_last_reset_monitors[0].flags,
+                           MONITOR_PRIMARY, "primary flag sent");
+  ok = ok && expect_uint32((UINT32)g_last_reset_monitors[1].left, 4,
+                           "second monitor left sent");
+  ok = ok && expect_uint32((UINT32)g_last_reset_monitors[1].right, 7,
+                           "second monitor right sent");
+
   uninit_test_viewer(&viewer);
   return ok;
 }
@@ -973,6 +1203,87 @@ static int test_dirty_pacing_timeout_suspend_and_ack_recovery(void) {
 
   viewer.gfx.rdpgfx = NULL;
   uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_frame_ack_suspend_policy_is_per_viewer_and_reset_clears(void) {
+  ViewerServer server = {0};
+  Viewer viewer_a = {0};
+  Viewer viewer_b = {0};
+  RdpgfxServerContext rdpgfx_a = {0};
+  RdpgfxServerContext rdpgfx_b = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot dirty_a = make_dirty_snapshot(pixels, 82, 1);
+  ViewerFramebufferSnapshot dirty_b = make_dirty_snapshot(pixels, 83, 1);
+  RDPGFX_FRAME_ACKNOWLEDGE_PDU suspend_ack = {0};
+  RDPGFX_FRAME_ACKNOWLEDGE_PDU resume_ack = {0};
+  const char *reason = NULL;
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer_a, 4, 4), "viewer A init");
+  ok = ok && expect_true(init_test_viewer(&viewer_b, 4, 4), "viewer B init");
+  init_test_rdpgfx(&rdpgfx_a);
+  init_test_rdpgfx(&rdpgfx_b);
+  configure_dirty_eligible_viewer(&server, &viewer_a, &rdpgfx_a);
+  configure_dirty_eligible_viewer(&server, &viewer_b, &rdpgfx_b);
+  viewer_a.gfx.next_frame_id = 60;
+  viewer_b.gfx.next_frame_id = 70;
+
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(
+                             &server, &viewer_a, &dirty_a),
+                         "viewer A dirty sends");
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(
+                             &server, &viewer_b, &dirty_b),
+                         "viewer B dirty sends");
+
+  suspend_ack.queueDepth = SUSPEND_FRAME_ACKNOWLEDGEMENT;
+  suspend_ack.frameId = 60;
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack_pdu(
+                               &viewer_a, &suspend_ack),
+                           CHANNEL_RC_OK, "suspend ack accepted");
+  ok = ok && expect_true(viewer_a.gfx.dirty_acknowledgements_suspended,
+                         "viewer A records ack suspension");
+  ok = ok && expect_true(viewer_a.gfx.dirty_suspended_for_no_ack,
+                         "viewer A dirty suspended after suspend request");
+  ok = ok && expect_uint32(viewer_a.gfx.dirty_in_flight_frames, 0,
+                           "suspend ack still releases matching frame");
+  dirty_a.generation = 84;
+  ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
+                             &server, &viewer_a, &dirty_a, &reason),
+                         "viewer A denied while client suspended ACKs");
+  ok = ok && expect_true(!viewer_b.gfx.dirty_acknowledgements_suspended,
+                         "viewer B does not inherit ACK suspension");
+  ok =
+      ok && expect_uint32(viewer_gfx_pipeline_poll_dirty_pacing(
+                              &viewer_b, platform_get_timestamp_ms(), &reason),
+                          VIEWER_GFX_DIRTY_PACING_OK,
+                          "viewer B pacing remains independent before timeout");
+
+  resume_ack.queueDepth = 1;
+  resume_ack.frameId = 0;
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack_pdu(
+                               &viewer_a, &resume_ack),
+                           CHANNEL_RC_OK, "resume ack accepted");
+  ok = ok && expect_true(!viewer_a.gfx.dirty_acknowledgements_suspended,
+                         "nonzero queue depth clears ack suspension");
+  ok = ok &&
+       expect_true(!viewer_a.gfx.dirty_suspended_for_no_ack,
+                   "resume clears no-ack suspension when no frames remain");
+
+  suspend_ack.frameId = 0;
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack_pdu(
+                               &viewer_a, &suspend_ack),
+                           CHANNEL_RC_OK, "second suspend accepted");
+  viewer_gfx_pipeline_reset_dirty_state_locked(&viewer_a.gfx);
+  ok = ok && expect_true(!viewer_a.gfx.dirty_acknowledgements_suspended,
+                         "reset clears ack suspension");
+  ok = ok && expect_true(!viewer_a.gfx.dirty_suspended_for_no_ack,
+                         "reset clears dirty suspension");
+
+  viewer_a.gfx.rdpgfx = NULL;
+  viewer_b.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer_a);
+  uninit_test_viewer(&viewer_b);
   return ok;
 }
 
@@ -1517,6 +1828,10 @@ int main(void) {
     return 1;
   if (!test_snapshot_sends_full_frame_baseline_order())
     return 1;
+  if (!test_snapshot_rfx_codec_emits_cavideo())
+    return 1;
+  if (!test_snapshot_rfx_context_failure_downgrades_to_uncompressed())
+    return 1;
   if (!test_snapshot_send_failure_propagates())
     return 1;
   if (!test_dirty_update_eligibility_denials_and_allowed())
@@ -1526,6 +1841,14 @@ int main(void) {
   if (!test_dirty_update_eligibility_is_per_viewer())
     return 1;
   if (!test_dirty_update_send_order_and_ack())
+    return 1;
+  if (!test_dirty_update_rfx_codec_emits_cavideo())
+    return 1;
+  if (!test_monitor_layout_snapshot_uses_server_layout())
+    return 1;
+  if (!test_monitor_layout_snapshot_falls_back_to_framebuffer())
+    return 1;
+  if (!test_snapshot_sends_server_monitor_layout())
     return 1;
   if (!test_frame_ack_accepts_zero_without_dirty_state_change())
     return 1;
@@ -1550,6 +1873,8 @@ int main(void) {
   if (!test_frame_id_wrap_skips_zero_and_starts_epoch())
     return 1;
   if (!test_dirty_pacing_timeout_suspend_and_ack_recovery())
+    return 1;
+  if (!test_frame_ack_suspend_policy_is_per_viewer_and_reset_clears())
     return 1;
   if (!test_dirty_pacing_baseline_reset_and_per_viewer_isolation())
     return 1;
