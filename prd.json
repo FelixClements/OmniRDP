@@ -1,270 +1,216 @@
 {
   "project": "OmniRDP",
-  "name": "RDPEGFX Shortcomings Closure",
-  "branchName": "ralph/rdpegfx-shortcomings-closure",
-  "description": "Ralph-ready work plan generated from PLAN_IMPLEMENTATION_SHORTCOMINGS.md to close remaining RDPEGFX/viewer-server implementation gaps: ACK suspend handling, monitor layout fidelity, safer GFX fallback, pointer transport/forwarding, runtime metrics coverage, RFX codec work, validation evidence, and remaining deferred production TODOs.",
+  "branchName": "ralph/rdpegfx-shadow-alignment",
+  "description": "Ralph-ready RDPEGFX shadow alignment plan for OmniRDP. The work hardens the viewer-side RDPEGFX path so it behaves like a reliable shadow framebuffer publisher: per-viewer dirty accumulation, safe coalescing, producer/client race safety, conservative pacing and fallback behavior, coordinate validation, lifecycle cleanup, diagnostics, and validation evidence. Backend codec negotiation must remain unchanged; do not enable backend NSCodec, RemoteFX, or backend GFX.",
   "userStories": [
     {
       "id": "US-001",
-      "title": "Audit and complete RDPEGFX runtime metrics",
-      "description": "As a maintainer, I want the RDPEGFX and classic publishing paths to expose the metrics listed in the implementation plan so latency, stale updates, and slow-viewer behavior can be diagnosed with logs and counters.",
+      "title": "Harden per-viewer pending dirty accumulator",
+      "description": "As a maintainer, I want each RDPEGFX viewer to keep its own pending dirty region accumulator so skipped or deferred backend updates cannot lose invalid regions and leave stale or black fragments.",
       "acceptanceCriteria": [
-        "Audit existing metrics/logging against PLAN_IMPLEMENTATION_SHORTCOMINGS.md metric list: queued update count, queued bytes, dirty rect count/area, coalesced/dropped count, send start/end timestamp, max send-call duration, last framebuffer generation sent, latest framebuffer generation available, backend update timestamp, framebuffer update timestamp, publisher enqueue timestamp, and viewer send timestamp.",
-        "Add missing counters or timestamps in the owning modules without holding framebuffer or global server locks during FreeRDP sends.",
-        "Update or add unit tests for any new metric/counter behavior that can be tested without real clients.",
-        "Document any metric that cannot be captured reliably and explain why in a task or docs file.",
+        "RDPEGFX viewers accumulate dirty rectangles per viewer rather than relying only on the global latest framebuffer dirty list.",
+        "Classic viewers and viewer.gfx.enabled=false behavior remain unchanged.",
+        "Accumulator state tracks start generation, latest generation, rect count, full-frame/overflow state, and enough counters to diagnose pending work.",
+        "Accumulation ignores stale generations already sent to that viewer.",
+        "Unit tests cover multiple generations accumulated before send and latest-generation preservation.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Completed: added framebuffer last-update timestamps, publisher dirty area/enqueue/drop-byte/timestamp metrics, per-viewer last send start/end timestamps, classic transport send timestamp propagation, and RDPEGFX dirty/baseline send timing plus dirty rect count/area metrics. Updated test build wiring for platform timestamp dependency. clang-format, Debug build, CTest, and git diff --check passed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-002",
-      "title": "Handle RDPEGFX acknowledgement suspension",
-      "description": "As a maintainer, I want RDPEGFX acknowledgement suspension to be handled explicitly so a client that suspends frame acknowledgements cannot corrupt dirty pacing or block unrelated viewers.",
+      "title": "Add dirty region union/coalescing thresholds",
+      "description": "As a maintainer, I want dirty regions to be merged and bounded so RDPEGFX sends complete coverage without unbounded rect growth or excessive fragmentation.",
       "acceptanceCriteria": [
-        "Confirm the FreeRDP 3.26 RDPEGFX FrameAcknowledge callback semantics and identify how SUSPEND_FRAME_ACKNOWLEDGEMENT / 0xFFFFFFFF is exposed to OmniRDP.",
-        "Add explicit handling for acknowledgement suspension when the protocol exposes it, without treating the suspend value as a normal frame acknowledgement.",
-        "Suspended acknowledgement state must be per viewer only and must not disable GFX or dirty updates for unrelated viewers.",
-        "Resize, reconnect, baseline reset, or GFX session reset clears stale suspended-ACK state for that viewer.",
-        "Add tests covering suspend handling, stale suspend state across reset, and normal ACK behavior after suspension clears.",
+        "Dirty rectangles are validated, clamped, and merged when they overlap or are adjacent according to RECTANGLE_16 inclusive coordinates.",
+        "A configurable or documented maximum pending-rect threshold forces a full-frame dirty batch when exceeded.",
+        "A documented area threshold, initially around 60 percent of the surface, forces full-frame dirty coverage when incremental regions become too large.",
+        "Full-frame fallback uses one rect covering left=0, top=0, right=width-1, bottom=height-1.",
+        "Unit tests cover overlap/adjacency merge, max-rect overflow, area-threshold fallback, empty dirty input, and dirty-overflow input.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Completed: confirmed FreeRDP RDPGFX_FRAME_ACKNOWLEDGE_PDU exposes queueDepth with SUSPEND_FRAME_ACKNOWLEDGEMENT. Added explicit per-viewer acknowledgement-suspension state, PDU-level ACK handling, suspension-aware dirty pacing, reset clearing, and tests covering suspend handling, per-viewer isolation, resume via nonzero queue depth, and reset cleanup. clang-format, Debug build, CTest, and git diff --check passed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-003",
-      "title": "Expose monitor layout to viewer GFX baseline code",
-      "description": "As a maintainer, I want the RDPEGFX baseline path to have access to actual monitor layout data so ResetGraphics can represent one-monitor and multi-monitor sessions accurately.",
+      "title": "Fix producer/consumer move-remerge race safety",
+      "description": "As a maintainer, I want moving pending dirty work to a send batch and re-merging deferred work to be race-safe so new producer updates are not overwritten by an older deferred batch.",
       "acceptanceCriteria": [
-        "Identify the authoritative monitor layout source currently used by backend/viewer configuration.",
-        "Add a narrow internal API or snapshot structure that gives viewer_gfx_pipeline the current monitor count and monitor rectangles without exposing unrelated viewer_server internals.",
-        "The monitor layout snapshot must include primary-monitor flags and dimensions needed to build RDPGFX_RESET_GRAPHICS_PDU.",
-        "Existing one-monitor behavior remains unchanged when monitor count is one.",
-        "Add unit tests for monitor layout snapshot creation or translation where feasible.",
+        "The viewer loop moves pending dirty state under the viewer GFX lock only after pacing allows a send.",
+        "New dirty updates that arrive while a batch is being encoded/sent remain pending and are preserved.",
+        "Deferred sends re-merge the moved batch with any newer pending dirty regions instead of replacing them.",
+        "Denied-but-nonfatal dirty sends re-merge moved pending work and wake the viewer loop when appropriate.",
+        "Unit tests cover move preserving new updates added after move, deferred remerge, and empty pending move behavior.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Completed: identified server->monitor_layout as the viewer-side authoritative layout snapshot copied from backend monitor_layout. Added viewer_gfx_pipeline_monitor_layout_snapshot() to expose a narrow monitor layout snapshot to GFX pipeline code with framebuffer-derived single-monitor fallback. Backend layout change notification now refreshes server->monitor_layout from the backend before invalidating viewer GFX surfaces. Tests cover multi-monitor server layout copy, primary flag preservation, and single-monitor framebuffer fallback. clang-format, Debug build, CTest, git diff --check, and JSON validation passed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-004",
-      "title": "Send real monitor layout in RDPEGFX ResetGraphics",
-      "description": "As a viewer, I want RDPEGFX activation and resize baselines to use the real monitor layout so multi-monitor sessions are represented correctly instead of always sending one spanned monitor.",
+      "title": "Audit and enforce coordinate convention",
+      "description": "As a maintainer, I want all framebuffer, dirty-region, and RDPEGFX surface command paths to use one documented coordinate convention so off-by-one and clipping errors cannot corrupt incremental updates.",
       "acceptanceCriteria": [
-        "viewer_gfx_pipeline_send_snapshot or its replacement builds RDPGFX_RESET_GRAPHICS_PDU with the actual monitor count and monitor definitions from the layout snapshot added in US-003.",
-        "Single-monitor sessions still send one primary monitor matching the framebuffer dimensions.",
-        "Multi-monitor sessions send all configured monitor rectangles and preserve the primary monitor flag.",
-        "Resize/reset baseline sequencing remains ResetGraphics, CreateSurface, MapSurfaceToOutput, StartFrame, SurfaceCommand, EndFrame.",
-        "Add tests proving one-monitor and multi-monitor ResetGraphics monitor arrays are built correctly.",
+        "Document the repository convention for RECTANGLE_16 as inclusive left/top/right/bottom coordinates.",
+        "Audit framebuffer dirty collection, publisher snapshots, accumulator logic, and RDPEGFX surface command construction for consistent inclusive bounds.",
+        "Invalid or out-of-bounds rectangles are rejected or clamped before entering the RDPEGFX pending accumulator.",
+        "Tests cover edge rectangles at x=0/y=0, right=width-1, bottom=height-1, one-pixel rects, and invalid/out-of-bounds rects.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Completed: viewer_gfx_pipeline_send_snapshot now builds ResetGraphics from the monitor layout snapshot exposed by US-003. Single-monitor fallback still matches framebuffer dimensions, while multi-monitor server layouts send all monitor definitions and preserve the primary flag. Tests cover fallback monitor count and multi-monitor ResetGraphics monitor arrays. clang-format, Debug build, CTest, git diff --check, and JSON validation passed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-005",
-      "title": "Define safe post-activation GFX failure policy",
-      "description": "As a maintainer, I want failures after RDPEGFX activation to follow a documented safe policy so OmniRDP does not perform untested mid-session protocol switches that may break clients.",
+      "title": "Add RDPEGFX command bounds validation tests/logging",
+      "description": "As a maintainer, I want RDPEGFX command construction to validate source rectangles and payload bounds so invalid dirty regions are caught before they reach FreeRDP send callbacks.",
       "acceptanceCriteria": [
-        "Choose and document the supported policy for post-activation GFX failures: disconnect/reconnect into classic mode, or in-session classic fallback only for explicitly validated clients.",
-        "Update viewer_gfx_pipeline/viewer_server failure paths to follow the documented policy consistently for encoder failure, send failure, ACK timeout, resize/reset failure, and channel failure.",
-        "Pre-activation GFX fallback to classic remains per viewer and does not affect unrelated viewers.",
-        "Post-activation failure handling must not silently poison other viewers or backend decode.",
-        "Add tests for pre-activation fallback and post-activation failure action selection.",
+        "RDPEGFX dirty command builders verify width, height, stride, pixel buffer size, rect bounds, and payload length before send.",
+        "Invalid command input fails safely without sending partial RDPEGFX frames.",
+        "Debug logging identifies rejected command bounds with viewer id, generation, rect, surface size, and reason without INFO spam.",
+        "Unit tests cover invalid rects, zero-size rects, dimension mismatch, oversized payload prevention, and valid edge rects.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 5,
-      "passes": true,
-      "notes": "Completed: added explicit post-activation RDPEGFX failure policy. Pre-live failures still enter per-viewer classic fallback, while live activated RDPEGFX failures now request viewer disconnect for a clean classic reconnect instead of untested in-session protocol switching. Applied policy to baseline failure, dirty send failure, dirty ACK timeout, live join fallback action, channel open failure, message handling failure, and caps fallback after activation. Added unit tests for pre-activation fallback eligibility, live RDPEGFX disconnect policy, and classic-fallback non-disconnect behavior. clang-format, Debug build, CTest, git diff --check, and JSON validation passed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-006",
-      "title": "Extract pointer transport from viewer_server",
-      "description": "As a maintainer, I want FreeRDP pointer send calls owned by a pointer transport module so viewer_server.c remains a coordinator rather than a transport implementation.",
+      "title": "Strengthen ACK/backpressure pacing behavior",
+      "description": "As a maintainer, I want RDPEGFX dirty sending to respect ACK, in-flight, byte, and client-suspension backpressure without losing pending damage or blocking unrelated viewers.",
       "acceptanceCriteria": [
-        "Create a focused pointer transport module or extend an existing transport boundary to own PointerSystem, PointerNew, PointerColor, and PointerPosition sends.",
-        "viewer_server.c no longer directly calls FreeRDP pointer update send callbacks except through the new narrow transport API.",
-        "Existing viewer_pointer planning helpers remain responsible for deciding what pointer updates are needed.",
-        "Late-join forced pointer baseline behavior remains unchanged.",
-        "Add or update static boundary tests if pointer transport is intended to stay out of viewer_server.c permanently.",
+        "Dirty pacing checks happen before moving pending dirty work to a local batch.",
+        "ACK timeout, acknowledgement suspension, max in-flight frames, and max in-flight bytes defer sends without dropping pending damage.",
+        "Backpressure state is per viewer and does not affect classic forwarding or other RDPEGFX viewers.",
+        "Deferred sends leave a wake path so pending dirty work retries when pacing allows.",
+        "Metrics/logs capture defer reason, in-flight frame count, in-flight bytes, latest pending generation, and pending rect count.",
+        "Unit tests cover ACK timeout suspend, ACK resume, byte backpressure, frame-count backpressure, and per-viewer isolation.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 6,
-      "passes": true,
-      "notes": "Completed: added viewer_pointer_transport.c/.h to own FreeRDP PointerSystem, PointerNew, PointerColor, and PointerPosition sends. viewer_server.c now plans pointer updates and delegates final transport through ViewerPointerTransport instead of directly calling FreeRDP pointer callbacks. Production CMake wiring includes the new module. The final refactor boundary CTest now blocks pointer send callback tokens from returning to viewer_server.c. clang-format, Debug build, CTest, git diff --check, and JSON validation passed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-007",
-      "title": "Restore normal pointer forwarding",
-      "description": "As a viewer, I want pointer shape, visibility, and position changes to continue updating after activation so the cursor state stays current, not only correct at late join.",
+      "title": "Add bounded conservative full-frame fallback controls",
+      "description": "As an operator, I want conservative RDPEGFX fallback controls that can recover from suspicious incremental damage without making full-frame uncompressed updates the default.",
       "acceptanceCriteria": [
-        "Clarify in code comments and documentation whether periodic pointer forwarding is required for classic viewers, GFX viewers, or both.",
-        "If required, re-enable normal pointer forwarding through the pointer planning and transport APIs without busy-looping or sending unchanged pointer state.",
-        "Pointer forwarding uses generation checks so unchanged shape/position are not resent unless forced.",
-        "Forced late-join pointer baseline still sends even when generations match.",
-        "Add tests for unforced shape change, unforced position change, no-change suppression, and forced baseline behavior.",
+        "Existing viewer.gfx.diagnostic.full_frame_dirty remains diagnostic-only and default false.",
+        "Add or document bounded production-safe full-frame fallback triggers for extreme pending region count, high pending area, resize/reset, or repeated dirty-send deferrals.",
+        "Fallback controls are viewer-side only and do not alter backend codec negotiation or enable backend GFX/RemoteFX/NSCodec.",
+        "Logs clearly distinguish diagnostic forced full-frame dirty from threshold-based full-frame fallback.",
+        "Config defaults preserve current behavior unless a bounded fallback threshold is explicitly reached.",
+        "Tests cover default false behavior and threshold-triggered full-frame fallback.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 7,
-      "passes": true,
-      "notes": "Completed: restored ongoing pointer forwarding for activated classic and RDPEGFX viewers via viewer_forward_pointer, preserving generation-based no-change suppression and delegated pointer transport sends. Added planner tests for unforced shape-only and position-only updates alongside existing forced baseline and no-change coverage. clang-format, Debug build, CTest, git diff --check, and JSON validation passed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-008",
-      "title": "Narrow viewer_gfx_pipeline internal API boundaries",
-      "description": "As a maintainer, I want the RDPEGFX pipeline interface to expose only the coordinator data it needs so private viewer/server internals do not leak more than necessary.",
+      "title": "Harden RDPEGFX surface lifecycle on baseline/reset/resize/reconnect",
+      "description": "As a maintainer, I want RDPEGFX surface lifecycle transitions to clear stale dirty state so old generations cannot be sent after a baseline, reset, resize, fallback, disconnect, or reconnect.",
       "acceptanceCriteria": [
-        "Audit viewer_gfx_pipeline.h for dependencies on viewer_server_internal.h and private ViewerServer/Viewer fields.",
-        "Either document that viewer_gfx_pipeline is intentionally an internal module, or introduce narrower internal structs/functions that avoid unnecessary private dependency leakage.",
-        "No public viewer_server.h internals are expanded or leaked.",
-        "Existing pipeline tests compile and pass after any interface changes.",
-        "Static public facade tests still pass.",
+        "Successful RDPEGFX baseline send clears pending dirty accumulator and dirty frame mapping for that viewer.",
+        "Surface invalidation, resize, reconnect, viewer cleanup, dirty reset, and classic fallback clear pending accumulator state.",
+        "Dimension changes cannot re-use pending dirty rectangles from the previous surface size.",
+        "Stale ACKs from old surfaces or epochs cannot unsuspend or clear current dirty state incorrectly.",
+        "Tests cover baseline clear, resize clear, surface invalidation clear, cleanup/uninit clear, and stale ACK isolation.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 8,
-      "passes": true,
-      "notes": "Completed: moved viewer_gfx_pipeline.h out of the public include tree into src as an internal viewer-server pipeline interface documented as allowed to depend on viewer_server_internal.h. Updated CMake header wiring and extended refactor boundary CTest checks to fail if public headers include viewer_server_internal.h or viewer_gfx_pipeline.h, or if viewer_gfx_pipeline.h returns to include/. clang-format, Debug build, CTest, git diff --check, and JSON validation passed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-009",
-      "title": "Add disabled RFX codec module skeleton",
-      "description": "As a maintainer, I want a small build-tested RFX codec module skeleton so RemoteFX support can be implemented incrementally without disturbing the current uncompressed RDPEGFX path.",
+      "title": "Add RDPEGFX diagnostics and counters",
+      "description": "As a maintainer, I want runtime counters and targeted logs for RDPEGFX dirty accumulation and sends so corruption, lag, and fallback decisions can be diagnosed from logs.",
       "acceptanceCriteria": [
-        "Add viewer_gfx_codec_rfx.c/.h with a minimal disabled or unsupported implementation that does not change runtime behavior.",
-        "Wire the new files into CMake production and test builds without enabling RFX caps or changing current uncompressed output.",
-        "Add tests proving the RFX module reports unsupported/disabled cleanly until a real encoder is implemented.",
-        "Uncompressed RDPEGFX codec tests continue to pass unchanged.",
-        "No H.264, AVC, ClearCodec, or progressive codec support is enabled.",
+        "Expose or log per-viewer pending dirty rect count, pending area, start/latest pending generation, moved batch generation, sent generation, defer reason, full-frame fallback count, and remerge count.",
+        "Startup logs include relevant viewer GFX settings, including codec, RDPEGFX enabled state, diagnostic full-frame dirty, and any conservative fallback thresholds.",
+        "Dirty rejection/defer logs are WLog_DBG or otherwise rate-limited to avoid INFO spam during normal operation.",
+        "Important mode/fallback transitions are visible at INFO or WARN with viewer id and generation context.",
+        "Unit tests cover counter increments where feasible without a real RDP client.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 9,
-      "passes": true,
-      "notes": "Completed: added disabled encode-only viewer_gfx_codec_rfx module skeleton with unsupported build helpers, no transport/session ownership, production/test CMake wiring, RFX disabled-behavior tests, and codec boundary checks. Current viewer_gfx_pipeline uncompressed behavior remains unchanged. clang-format, Debug build, CTest, git diff --check, and JSON validation passed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-010",
-      "title": "Implement RFX surface command encoding",
-      "description": "As a maintainer, I want the RFX codec module to build RDPEGFX surface commands from canonical framebuffer snapshots so OmniRDP has its first practical compressed RDPEGFX codec.",
+      "title": "Add runtime/manual validation evidence for shadow-aligned RDPEGFX",
+      "description": "As a maintainer, I want repeatable runtime validation evidence proving uncompressed RDPEGFX stays visually aligned during common desktop interactions before considering the path production-ready.",
       "acceptanceCriteria": [
-        "Use FreeRDP 3.26-compatible RFX encoder APIs or documented local wrappers to encode BGRX32 framebuffer snapshots/dirty rectangles into RDPEGFX-compatible RFX/CAVIDEO payloads.",
-        "RFX encoding must read from canonical framebuffer snapshots and must not replay backend RDPEGFX PDUs.",
-        "The RFX codec owns encoding only and must not own peer/session/virtual-channel sends.",
-        "Add unit tests for successful encode, invalid pixel format, invalid rectangle, memory cleanup, and unsupported encoder initialization failure.",
-        "Uncompressed codec behavior remains unchanged.",
+        "Create or update a manual validation checklist covering initial baseline, Start menu open/close, window drag, window resize, overlapping windows, text editing, reconnect, and resize scenarios.",
+        "Checklist includes required config: viewer.gfx.enabled=true, viewer.gfx.codec=uncompressed, viewer.gfx.diagnostic.full_frame_dirty=false.",
+        "Validation confirms no ghosting, black fragments, stale window trails, or canvas fragmentation under normal interaction.",
+        "Validation captures relevant logs/counters showing accumulated pending dirty generations are sent or intentionally deferred.",
+        "Document any remaining known limitations or client-specific observations.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 10,
-      "passes": true,
-      "notes": "Completed: implemented reusable encode-only ViewerGfxRfxContext owning only FreeRDP RFX_CONTEXT, with RLGR3 BGRX32 deterministic encoder setup, full-frame and dirty-rect CAVIDEO surface command builders, snapshot/rect validation, safe command reset/replacement cleanup, and test hook coverage for encoder init failure. RFX remains unselected by viewer_gfx_pipeline and no caps/config integration was added. clang-format, Debug build, CTest, git diff --check, and JSON validation passed."
+      "passes": false,
+      "notes": ""
     },
     {
       "id": "US-011",
-      "title": "Integrate RFX codec selection behind configuration",
-      "description": "As an operator, I want RFX RDPEGFX encoding to be selectable only when explicitly configured and supported so clients are never offered codecs OmniRDP cannot encode.",
+      "title": "Validate RFX only after uncompressed RDPEGFX is clean",
+      "description": "As a maintainer, I want RFX/RemoteFX viewer codec work to remain secondary until uncompressed RDPEGFX proves visually correct, so codec artifacts are not confused with dirty-region bugs.",
       "acceptanceCriteria": [
-        "Add a configuration-controlled viewer GFX codec policy that defaults to the existing uncompressed behavior.",
-        "CapsConfirm only confirms RFX-compatible caps when the RFX encoder is available and the configuration allows RFX.",
-        "If RFX initialization or encoding fails before activation, the viewer falls back according to the pre-activation fallback policy without affecting other viewers.",
-        "If RFX fails after activation, the post-activation failure policy from US-005 is used.",
-        "Add tests for default uncompressed selection, explicit RFX selection, unsupported RFX fallback, and no backend caps mirroring.",
+        "Do not enable RFX by default and do not change backend codec negotiation.",
+        "Only test viewer.gfx.codec=rfx after US-010 uncompressed validation passes cleanly.",
+        "RFX validation uses the same dirty accumulation, coordinate, lifecycle, and pacing logic as uncompressed RDPEGFX.",
+        "Any RFX-specific artifacts are documented separately from dirty-region correctness issues.",
+        "Existing uncompressed RDPEGFX tests remain the primary gate.",
         "Typecheck passes",
         "Debug build passes",
         "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
+        "git diff --check passes"
       ],
       "priority": 11,
-      "passes": true,
-      "notes": "Completed: added viewer.gfx.codec preference parsing (uncompressed default, rfx/remote_fx aliases, invalid values default to uncompressed), viewer server codec preference plumbing, per-viewer selected codec state with private RFX context ownership, and pipeline codec dispatch for baseline/dirty RDPEGFX surface commands. Explicit RFX emits CAVIDEO when local encoding succeeds; local RFX init/build failure downgrades that viewer to uncompressed and retries before send. Caps negotiation/backend caps mirroring, config beyond the new key, ClearCodec/H.264/AVC/progressive, and US-012 runtime validation remain unchanged/out of scope. clang-format, Debug build, CTest, git diff --check, and JSON validation passed."
-    },
-    {
-      "id": "US-012",
-      "title": "Complete US-015 runtime validation evidence",
-      "description": "As a maintainer, I want documented real-client validation evidence so RDPEGFX and the viewer-server refactor are not considered complete based only on unit and static tests.",
-      "acceptanceCriteria": [
-        "Update tasks/RDPEGFX_US015_VALIDATION_EVIDENCE.md with exact commands, non-secret configuration, environment details, logs or screenshots where useful, and pass/fail results.",
-        "Validate classic first viewer, classic late viewer, reconnect, and resize with a real viewer client and reachable backend RDP server.",
-        "Validate RDPEGFX baseline and dirty updates with viewer.gfx.enabled=true using an RDPEGFX-capable real viewer client.",
-        "Validate backend.gfx.decode_only_enabled=true while confirming viewer output still comes from canonical framebuffer paths, not backend PDU replay.",
-        "Validate one-monitor and two-monitor RDPEGFX sessions after monitor-layout work is complete.",
-        "Validate slow/no-ACK or impaired-viewer isolation and record that unrelated viewers and backend decode continue operating.",
-        "Validate hidden, default, custom, and position pointer/cursor late-join and ongoing pointer update scenarios.",
-        "Convert any runtime failure into follow-up PRD stories instead of marking validation complete silently.",
-        "Typecheck passes",
-        "Debug build passes",
-        "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
-      ],
-      "priority": 12,
       "passes": false,
-      "notes": "Derived from shortcomings items 1, 10, and 11. This story requires real runtime infrastructure; if unavailable, record the blocker but do not mark passes true."
-    },
-    {
-      "id": "US-013",
-      "title": "Implement backend certificate validation policy hook",
-      "description": "As an operator, I want backend certificate validation configuration to be honored consistently so the existing production TODO in backend.c is resolved instead of deferred indefinitely.",
-      "acceptanceCriteria": [
-        "Inspect backend.c certificate verification flow and existing backend.security.* configuration fields.",
-        "Implement the documented certificate validation policy hook without weakening the existing default server authentication behavior.",
-        "backend.security.ignore_certificate=true and false behavior is explicit and tested where feasible.",
-        "Do not add AAD or KRB5 dependencies.",
-        "Add or update tests for certificate policy configuration behavior if the existing test harness can cover it.",
-        "Typecheck passes",
-        "Debug build passes",
-        "CTest passes",
-        "git diff --check passes",
-        "No generated/build artifacts are committed"
-      ],
-      "priority": 13,
-      "passes": false,
-      "notes": "Derived from shortcomings item 15. This is lower priority and not part of core RDPEGFX, but it is a deferred production TODO."
+      "notes": "Optional/low priority until uncompressed RDPEGFX visual validation is clean."
     }
   ]
 }
