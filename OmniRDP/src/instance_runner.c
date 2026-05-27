@@ -703,6 +703,11 @@ int instance_runner_main(int argc, char *argv[]) {
       server, instance_viewer_gfx_codec(inst->viewer_gfx_codec));
   LOG_I("instance_runner", "Applied viewer GFX codec preference: %s",
         instance_viewer_gfx_codec_name(inst->viewer_gfx_codec));
+  viewer_server_set_gfx_diagnostic_full_frame_dirty(
+      server, inst->viewer_gfx_diagnostic_full_frame_dirty ? TRUE : FALSE);
+  LOG_I("instance_runner",
+        "Applied viewer GFX diagnostic full-frame dirty: enabled=%s",
+        bool_str(inst->viewer_gfx_diagnostic_full_frame_dirty));
 
   /* Register FreeRDP WTS API */
   {

@@ -129,6 +129,8 @@ BOOL viewer_publisher_gfx_dirty_snapshot(ViewerPublisher *publisher,
                                          ViewerFramebuffer *framebuffer,
                                          UINT64 viewer_last_generation_sent,
                                          ViewerFramebufferSnapshot *snapshot);
+BOOL viewer_publisher_make_full_frame_dirty(
+    ViewerFramebufferSnapshot *snapshot);
 /* Returns FALSE without counting a drop when snapshot generation is already
  * consumed (generation <= last_generation_sent). Dirty rectangles use inclusive
  * left/top/right/bottom coordinates. Empty or overflow dirty lists normalize to

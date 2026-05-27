@@ -3,6 +3,7 @@
 #include "test_utils.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static int write_backend_port_config(const char *path) {
   FILE *fp = NULL;
@@ -91,6 +92,29 @@ static int write_viewer_gfx_config(const char *path, int enabled) {
   return 1;
 }
 
+static int write_viewer_gfx_full_frame_dirty_config(const char *path,
+                                                    int enabled) {
+  FILE *fp = NULL;
+  if (fopen_s(&fp, path, "w") != 0 || !fp)
+    return 0;
+
+  fprintf(fp,
+          "[instances]\n"
+          "names = Test\n"
+          "\n"
+          "[instance:Test]\n"
+          "backend.hostname = 127.0.0.1\n"
+          "backend.port = 3389\n"
+          "backend.username = alice\n"
+          "backend.password = secret\n"
+          "viewer.port = 3390\n"
+          "viewer.gfx.diagnostic.full_frame_dirty = %s\n",
+          enabled ? "true" : "false");
+
+  fclose(fp);
+  return 1;
+}
+
 static int write_viewer_gfx_codec_config(const char *path,
                                          const char *codec_value) {
   FILE *fp = NULL;
@@ -109,6 +133,28 @@ static int write_viewer_gfx_codec_config(const char *path,
           "viewer.port = 3390\n"
           "viewer.gfx.codec = %s\n",
           codec_value);
+
+  fclose(fp);
+  return 1;
+}
+
+static int write_backend_credentials_without_nla_config(const char *path) {
+  FILE *fp = NULL;
+  if (fopen_s(&fp, path, "w") != 0 || !fp)
+    return 0;
+
+  fprintf(fp, "[instances]\n"
+              "names = Test\n"
+              "\n"
+              "[instance:Test]\n"
+              "backend.hostname = 127.0.0.1\n"
+              "backend.port = 3389\n"
+              "backend.username = alice\n"
+              "backend.password = secret\n"
+              "viewer.port = 3390\n"
+              "viewer.security.nla_enabled = false\n"
+              "viewer.security.tls_enabled = true\n"
+              "viewer.auth.mode = backend_credentials\n");
 
   fclose(fp);
   return 1;
@@ -143,6 +189,8 @@ int main(void) {
   const char *bad_viewer_path = "test_svc_config_bad_viewer.ini";
   const char *classic_latest_path = "test_svc_config_classic_latest.ini";
   const char *viewer_gfx_path = "test_svc_config_viewer_gfx.ini";
+  const char *viewer_gfx_full_frame_dirty_path =
+      "test_svc_config_viewer_gfx_full_frame_dirty.ini";
   const char *backend_gfx_path = "test_svc_config_backend_gfx.ini";
   const char *codec_gfx_path = "test_svc_config_codec_gfx.ini";
   const char *viewer_gfx_codec_rfx_path = "test_svc_config_gfx_codec_rfx.ini";
@@ -150,6 +198,8 @@ int main(void) {
       "test_svc_config_gfx_codec_remote_fx.ini";
   const char *viewer_gfx_codec_invalid_path =
       "test_svc_config_gfx_codec_invalid.ini";
+  const char *backend_credentials_without_nla_path =
+      "test_svc_config_backend_credentials_without_nla.ini";
   SvcLogLevel level = SVC_LOG_INFO;
   SvcConfig *config = NULL;
   const InstanceConfig *inst = NULL;
@@ -178,6 +228,7 @@ int main(void) {
       inst->viewer_classic_latest_state_max_queue_bytes != 0 ||
       inst->viewer_gfx_enabled != 0 ||
       inst->viewer_gfx_codec != SVC_VIEWER_GFX_CODEC_UNCOMPRESSED ||
+      inst->viewer_gfx_diagnostic_full_frame_dirty != 0 ||
       inst->backend_gfx_decode_only_enabled != 0)
     ok = 0;
 
@@ -223,10 +274,34 @@ int main(void) {
 
   svc_config_free(config);
 
+  if (!write_viewer_gfx_full_frame_dirty_config(
+          viewer_gfx_full_frame_dirty_path, 1)) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    return 1;
+  }
+
+  config = svc_config_load(viewer_gfx_full_frame_dirty_path);
+  if (!config) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
+    return 1;
+  }
+
+  inst = svc_config_find_instance(config, "Test");
+  if (!inst || inst->viewer_gfx_diagnostic_full_frame_dirty != 1)
+    ok = 0;
+
+  svc_config_free(config);
+
   if (!write_backend_gfx_config(backend_gfx_path, 1, 0)) {
     remove(path);
     remove(classic_latest_path);
     remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
     return 1;
   }
 
@@ -235,6 +310,7 @@ int main(void) {
     remove(path);
     remove(classic_latest_path);
     remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
     remove(backend_gfx_path);
     return 1;
   }
@@ -250,6 +326,7 @@ int main(void) {
     remove(path);
     remove(classic_latest_path);
     remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
     remove(backend_gfx_path);
     return 1;
   }
@@ -259,6 +336,7 @@ int main(void) {
     remove(path);
     remove(classic_latest_path);
     remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
     remove(backend_gfx_path);
     remove(codec_gfx_path);
     return 1;
@@ -275,6 +353,7 @@ int main(void) {
     remove(path);
     remove(classic_latest_path);
     remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
     remove(backend_gfx_path);
     remove(codec_gfx_path);
     return 1;
@@ -285,6 +364,7 @@ int main(void) {
     remove(path);
     remove(classic_latest_path);
     remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
     remove(backend_gfx_path);
     remove(codec_gfx_path);
     remove(viewer_gfx_codec_rfx_path);
@@ -301,6 +381,7 @@ int main(void) {
     remove(path);
     remove(classic_latest_path);
     remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
     remove(backend_gfx_path);
     remove(codec_gfx_path);
     remove(viewer_gfx_codec_rfx_path);
@@ -312,6 +393,7 @@ int main(void) {
     remove(path);
     remove(classic_latest_path);
     remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
     remove(backend_gfx_path);
     remove(codec_gfx_path);
     remove(viewer_gfx_codec_rfx_path);
@@ -329,6 +411,7 @@ int main(void) {
     remove(path);
     remove(classic_latest_path);
     remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
     remove(backend_gfx_path);
     remove(codec_gfx_path);
     remove(viewer_gfx_codec_rfx_path);
@@ -341,6 +424,7 @@ int main(void) {
     remove(path);
     remove(classic_latest_path);
     remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
     remove(backend_gfx_path);
     remove(codec_gfx_path);
     remove(viewer_gfx_codec_rfx_path);
@@ -354,8 +438,46 @@ int main(void) {
     ok = 0;
   svc_config_free(config);
 
+  if (!write_backend_credentials_without_nla_config(
+          backend_credentials_without_nla_path)) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_invalid_path);
+    return 1;
+  }
+
+  config = svc_config_load(backend_credentials_without_nla_path);
+  if (!config) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_invalid_path);
+    remove(backend_credentials_without_nla_path);
+    return 1;
+  }
+
+  inst = svc_config_find_instance(config, "Test");
+  if (!inst || inst->viewer_security_nla_enabled != 0 ||
+      inst->viewer_security_tls_enabled != 1 ||
+      strcmp(inst->viewer_auth_mode, "backend_credentials") != 0)
+    ok = 0;
+  svc_config_free(config);
+
   if (!write_viewer_port_config(bad_viewer_path)) {
     remove(path);
+    remove(viewer_gfx_full_frame_dirty_path);
+    remove(backend_credentials_without_nla_path);
     return 1;
   }
 
@@ -369,10 +491,12 @@ int main(void) {
   remove(bad_viewer_path);
   remove(classic_latest_path);
   remove(viewer_gfx_path);
+  remove(viewer_gfx_full_frame_dirty_path);
   remove(backend_gfx_path);
   remove(codec_gfx_path);
   remove(viewer_gfx_codec_rfx_path);
   remove(viewer_gfx_codec_remote_fx_path);
   remove(viewer_gfx_codec_invalid_path);
+  remove(backend_credentials_without_nla_path);
   return ok ? 0 : 1;
 }

@@ -25,6 +25,7 @@ extern "C" {
 #define VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY 8U
 #define VIEWER_GFX_DIRTY_ACK_TIMEOUT_MS 2000U
 #define VIEWER_GFX_DIRTY_MAX_IN_FLIGHT_BYTES (4ULL * 1024ULL * 1024ULL)
+#define VIEWER_GFX_PENDING_DIRTY_MAX_RECTS 128U
 
 typedef enum {
   VIEWER_JOIN_STATE_NONE = 0,
@@ -116,6 +117,15 @@ typedef struct {
   UINT64 dirty_frame_payload_bytes[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
   UINT64 dirty_frame_sent_ts[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
   BOOL dirty_frame_valid[VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY];
+  RECTANGLE_16 pending_dirty_rects[VIEWER_GFX_PENDING_DIRTY_MAX_RECTS];
+  UINT32 pending_dirty_rect_count;
+  UINT64 pending_dirty_start_generation;
+  UINT64 pending_dirty_latest_generation;
+  UINT64 pending_dirty_area;
+  UINT64 pending_dirty_update_count;
+  UINT32 pending_dirty_width;
+  UINT32 pending_dirty_height;
+  BOOL pending_dirty_full_frame;
   ViewerGfxCodec preferred_codec;
   ViewerGfxCodec selected_codec;
   ViewerGfxRfxContext *rfx_context;
@@ -209,6 +219,7 @@ struct ViewerServer {
   ViewerSecurityConfig security;
   BOOL viewer_gfx_enabled;
   ViewerGfxCodec viewer_gfx_codec;
+  BOOL viewer_gfx_diagnostic_full_frame_dirty;
 };
 
 #ifdef __cplusplus

@@ -65,8 +65,8 @@ viewer_publisher_normalize_dirty_rects(ViewerFramebufferSnapshot *snapshot) {
   return TRUE;
 }
 
-static BOOL
-viewer_publisher_make_full_frame_dirty(ViewerFramebufferSnapshot *snapshot) {
+BOOL viewer_publisher_make_full_frame_dirty(
+    ViewerFramebufferSnapshot *snapshot) {
   RECTANGLE_16 full_rect = {0};
 
   if (!snapshot || (snapshot->width == 0) || (snapshot->height == 0))

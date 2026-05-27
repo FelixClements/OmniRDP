@@ -114,6 +114,11 @@ static void viewer_note_classic_queue_state_locked(const Viewer *viewer);
 static void viewer_classic_apply_latest_policy_locked(Viewer *viewer);
 static void viewer_clear_classic_queue_locked(Viewer *viewer);
 
+static void viewer_server_accumulate_gfx_dirty_viewers(
+    ViewerServer *server, const RECTANGLE_16 *dirty_rects,
+    UINT32 dirty_rect_count, BOOL dirty_overflow, UINT64 generation,
+    UINT32 width, UINT32 height);
+
 static void viewer_gfx_apply_caps_result_locked(
     ViewerServer *server, Viewer *viewer,
     const ViewerGfxPipelineCapsResult *caps_result, UINT64 now,
@@ -1066,6 +1071,51 @@ static void viewer_release_publish_ref(ViewerServer *server, Viewer *viewer) {
   LeaveCriticalSection(&server->lock);
 }
 
+static void viewer_server_accumulate_gfx_dirty_viewers(
+    ViewerServer *server, const RECTANGLE_16 *dirty_rects,
+    UINT32 dirty_rect_count, BOOL dirty_overflow, UINT64 generation,
+    UINT32 width, UINT32 height) {
+  Viewer *targets[MAX_VIEWERS] = {0};
+  size_t target_count = 0;
+
+  if (!server || (generation == 0) || (width == 0) || (height == 0))
+    return;
+
+  EnterCriticalSection(&server->lock);
+  for (int i = 0; i < MAX_VIEWERS; i++) {
+    Viewer *viewer = &server->viewers[i];
+
+    if (!viewer_try_add_publish_ref_locked(viewer))
+      continue;
+
+    targets[target_count++] = viewer;
+  }
+  LeaveCriticalSection(&server->lock);
+
+  for (size_t i = 0; i < target_count; i++) {
+    Viewer *viewer = targets[i];
+    BOOL signal_viewer = FALSE;
+
+    EnterCriticalSection(&viewer->gfx.lock);
+    if (viewer->gfx.initialized && viewer->gfx.use_rdpgfx &&
+        viewer->gfx.caps_ready && viewer->gfx.channel_opened &&
+        !viewer->gfx.rdpgfx_temporarily_disabled &&
+        (viewer->gfx.join_state == VIEWER_JOIN_STATE_LIVE) &&
+        viewer->gfx.dirty_updates_enabled &&
+        (generation > viewer->gfx.dirty_last_sent_generation)) {
+      signal_viewer = viewer_gfx_pipeline_pending_dirty_add_locked(
+          &viewer->gfx, dirty_rects, dirty_rect_count, dirty_overflow,
+          generation, width, height);
+    }
+    LeaveCriticalSection(&viewer->gfx.lock);
+
+    if (signal_viewer)
+      viewer_classic_queues_signal(&viewer->classic_queues);
+
+    viewer_release_publish_ref(server, viewer);
+  }
+}
+
 static BOOL viewer_slot_available_locked(Viewer *viewer) {
   if (!viewer || viewer->peer || viewer->context || viewer->cleanup_in_progress)
     return FALSE;
@@ -1141,6 +1191,16 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
 
   if (!pointer_plan.send_system && !pointer_plan.send_color &&
       !pointer_plan.send_new && !pointer_plan.send_position) {
+    pointer_shape_entry_reset(&shape_copy);
+    return TRUE;
+  }
+
+  if (pointer_plan.send_position && !pointer_plan.send_system &&
+      !pointer_plan.send_color && !pointer_plan.send_new) {
+    /* Position-only pointer updates are intentionally suppressed; acknowledge
+
+     * * them so this viewer does not retry that plan forever. */
+    viewer->last_pointer_position_generation = position_generation;
     pointer_shape_entry_reset(&shape_copy);
     return TRUE;
   }
@@ -2688,6 +2748,7 @@ ViewerServer *viewer_server_init_ex(const char *bind_address, UINT16 port,
   server->security = security ? *security : viewer_security_default();
   server->viewer_gfx_enabled = FALSE;
   server->viewer_gfx_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
+  server->viewer_gfx_diagnostic_full_frame_dirty = FALSE;
   if (backend)
     server->monitor_layout = backend->monitor_layout;
   server->slow_viewer_disconnect_enabled = TRUE;
@@ -2792,6 +2853,14 @@ void viewer_server_set_gfx_codec(ViewerServer *server, ViewerGfxCodec codec) {
   server->viewer_gfx_codec = (codec == VIEWER_GFX_CODEC_RFX)
                                  ? VIEWER_GFX_CODEC_RFX
                                  : VIEWER_GFX_CODEC_UNCOMPRESSED;
+}
+
+void viewer_server_set_gfx_diagnostic_full_frame_dirty(ViewerServer *server,
+                                                       BOOL enabled) {
+  if (!server)
+    return;
+
+  server->viewer_gfx_diagnostic_full_frame_dirty = enabled ? TRUE : FALSE;
 }
 
 void viewer_server_stop(ViewerServer *server) {
@@ -2928,9 +2997,10 @@ BOOL viewer_server_update_framebuffer_from_gdi(BackendClient *backend,
   updated = viewer_framebuffer_update_pixels(&server->framebuffer, pixels,
                                              stride, update_dirty_rects,
                                              update_dirty_rect_count);
-  free(valid_dirty_rects);
-  if (!updated)
+  if (!updated) {
+    free(valid_dirty_rects);
     return FALSE;
+  }
 
   EnterCriticalSection(&server->framebuffer.lock);
   generation = server->framebuffer.generation;
@@ -2938,6 +3008,11 @@ BOOL viewer_server_update_framebuffer_from_gdi(BackendClient *backend,
   viewer_publisher_note_framebuffer_update(
       &server->publisher, generation, update_dirty_rect_count,
       update_dirty_rect_count > VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS);
+  viewer_server_accumulate_gfx_dirty_viewers(
+      server, update_dirty_rects, update_dirty_rect_count,
+      update_dirty_rect_count > VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS, generation,
+      width, height);
+  free(valid_dirty_rects);
   return TRUE;
 }
 

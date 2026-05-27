@@ -916,6 +916,37 @@ static int test_gfx_dirty_snapshot_overflow_full_frame(void) {
   return ok;
 }
 
+static int test_make_full_frame_dirty_replaces_dirty_rects(void) {
+  ViewerFramebufferSnapshot snapshot = {0};
+  int ok = 1;
+
+  snapshot.width = 800;
+  snapshot.height = 600;
+  snapshot.dirty_rect_count = 2;
+  snapshot.dirty_overflow = TRUE;
+  snapshot.dirty_rects[0].left = 10;
+  snapshot.dirty_rects[0].top = 20;
+  snapshot.dirty_rects[0].right = 30;
+  snapshot.dirty_rects[0].bottom = 40;
+
+  ok = ok && expect_true(viewer_publisher_make_full_frame_dirty(&snapshot),
+                         "full frame dirty succeeds");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "full frame uses one dirty rect");
+  ok = ok && expect_true(!snapshot.dirty_overflow,
+                         "full frame clears dirty overflow");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 0,
+                           "full frame left is zero");
+  ok = ok &&
+       expect_uint32(snapshot.dirty_rects[0].top, 0, "full frame top is zero");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].right, 799,
+                           "full frame right is inclusive width minus one");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].bottom, 599,
+                           "full frame bottom is inclusive height minus one");
+
+  return ok;
+}
+
 int main(void) {
   if (!test_init_uninit_lock_state())
     return 1;
@@ -970,6 +1001,8 @@ int main(void) {
   if (!test_gfx_dirty_snapshot_too_many_rects_full_frame())
     return 1;
   if (!test_gfx_dirty_snapshot_overflow_full_frame())
+    return 1;
+  if (!test_make_full_frame_dirty_replaces_dirty_rects())
     return 1;
   return 0;
 }

@@ -56,6 +56,18 @@ typedef enum {
   VIEWER_GFX_DIRTY_SEND_FAILED
 } ViewerGfxDirtySendStatus;
 
+typedef struct {
+  RECTANGLE_16 rects[VIEWER_GFX_PENDING_DIRTY_MAX_RECTS];
+  UINT32 rect_count;
+  UINT64 start_generation;
+  UINT64 latest_generation;
+  UINT64 area;
+  UINT64 update_count;
+  UINT32 width;
+  UINT32 height;
+  BOOL full_frame;
+} ViewerGfxPendingDirtyBatch;
+
 BOOL viewer_gfx_pipeline_post_connect_locked(ViewerServer *server,
                                              Viewer *viewer, freerdp_peer *peer,
                                              BOOL gfx_enabled);
@@ -89,6 +101,19 @@ BOOL viewer_gfx_pipeline_dirty_update_allowed(
     const ViewerFramebufferSnapshot *snapshot, const char **reason);
 void viewer_gfx_pipeline_reset_dirty_state_locked(ViewerGraphicsContext *gfx);
 void viewer_gfx_pipeline_invalidate_surface_locked(ViewerGraphicsContext *gfx);
+void viewer_gfx_pipeline_pending_dirty_clear_locked(ViewerGraphicsContext *gfx);
+BOOL viewer_gfx_pipeline_pending_dirty_add_locked(
+    ViewerGraphicsContext *gfx, const RECTANGLE_16 *dirty_rects,
+    UINT32 dirty_rect_count, BOOL dirty_overflow, UINT64 generation,
+    UINT32 width, UINT32 height);
+BOOL viewer_gfx_pipeline_pending_dirty_move_locked(
+    ViewerGraphicsContext *gfx, ViewerGfxPendingDirtyBatch *batch);
+BOOL viewer_gfx_pipeline_pending_dirty_remerge_locked(
+    ViewerGraphicsContext *gfx, const ViewerGfxPendingDirtyBatch *batch,
+    UINT32 width, UINT32 height);
+BOOL viewer_gfx_pipeline_snapshot_apply_pending_dirty(
+    ViewerFramebufferSnapshot *snapshot,
+    const ViewerGfxPendingDirtyBatch *batch);
 ViewerGfxDirtyPacingStatus
 viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
                                       const char **reason);

@@ -1809,6 +1809,133 @@ static int test_frame_id_wrap_skips_zero_and_starts_epoch(void) {
   return ok;
 }
 
+static int test_pending_dirty_accumulates_and_moves_latest_generation(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  RECTANGLE_16 first = {0, 0, 9, 9};
+  RECTANGLE_16 second = {20, 20, 29, 29};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 100, 100), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &first, 1, FALSE, 10, 100, 100),
+                         "add first pending dirty");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &second, 1, FALSE, 11, 100, 100),
+                         "add second pending dirty");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move pending dirty");
+  ok = ok && expect_uint64(batch.start_generation, 10,
+                           "pending start generation preserved");
+  ok = ok && expect_uint64(batch.latest_generation, 11,
+                           "pending latest generation preserved");
+  ok = ok &&
+       expect_uint32(batch.rect_count, 2, "pending move returns both rects");
+  ok = ok && expect_true(!batch.full_frame, "pending move not full frame");
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "pending move clears accumulator");
+  LeaveCriticalSection(&viewer.gfx.lock);
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_pending_dirty_overflow_forces_full_frame(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  RECTANGLE_16 rect = {0, 0, 0, 0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 100, 100), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &rect, 1, TRUE, 20, 100, 100),
+                         "overflow pending dirty accepted");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move overflow pending dirty");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok && expect_true(batch.full_frame, "overflow becomes full frame");
+  ok = ok &&
+       expect_uint32(batch.rect_count, 1, "overflow full frame has one rect");
+  ok = ok && expect_uint32(batch.rects[0].right, 99,
+                           "overflow full frame right edge");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 99,
+                           "overflow full frame bottom edge");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_pending_dirty_remerge_preserves_new_updates(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch moved = {0};
+  ViewerGfxPendingDirtyBatch final_batch = {0};
+  RECTANGLE_16 first = {0, 0, 9, 9};
+  RECTANGLE_16 second = {40, 40, 49, 49};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 100, 100), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &first, 1, FALSE, 30, 100, 100),
+                         "add pending before move");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &moved),
+                         "move pending before deferred send");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &second, 1, FALSE, 31, 100, 100),
+                         "add new pending while batch moved");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_remerge_locked(
+                             &viewer.gfx, &moved, moved.width, moved.height),
+                         "remerge moved pending batch");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &final_batch),
+                         "move final pending dirty");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok && expect_uint64(final_batch.latest_generation, 31,
+                           "remerge keeps latest new generation");
+  ok = ok && expect_uint64(final_batch.start_generation, 30,
+                           "remerge restores moved start generation");
+  ok = ok && expect_uint32(final_batch.rect_count, 2,
+                           "remerge preserves moved and new rects");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_pending_dirty_snapshot_overrides_generation(void) {
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  int ok = 1;
+
+  snapshot.width = 100;
+  snapshot.height = 100;
+  snapshot.generation = 99;
+  batch.latest_generation = 40;
+  batch.rect_count = 1;
+  batch.rects[0].left = 1;
+  batch.rects[0].top = 2;
+  batch.rects[0].right = 3;
+  batch.rects[0].bottom = 4;
+
+  ok = ok && expect_true(viewer_gfx_pipeline_snapshot_apply_pending_dirty(
+                             &snapshot, &batch),
+                         "apply pending dirty to snapshot");
+  ok = ok && expect_uint64(snapshot.generation, 40,
+                           "pending latest generation overrides snapshot");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "pending rect count overrides snapshot");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 1,
+                           "pending rect copied to snapshot");
+
+  return ok;
+}
+
 int main(void) {
   if (!test_activate_rejects_null_inputs())
     return 1;
@@ -1877,6 +2004,14 @@ int main(void) {
   if (!test_frame_ack_suspend_policy_is_per_viewer_and_reset_clears())
     return 1;
   if (!test_dirty_pacing_baseline_reset_and_per_viewer_isolation())
+    return 1;
+  if (!test_pending_dirty_accumulates_and_moves_latest_generation())
+    return 1;
+  if (!test_pending_dirty_overflow_forces_full_frame())
+    return 1;
+  if (!test_pending_dirty_remerge_preserves_new_updates())
+    return 1;
+  if (!test_pending_dirty_snapshot_overrides_generation())
     return 1;
   return 0;
 }

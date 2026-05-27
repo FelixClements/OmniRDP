@@ -72,6 +72,7 @@ typedef struct {
   unsigned int viewer_throttle_max_updates_per_sec; /* default: 0 (unlimited) */
   int viewer_gfx_enabled;                           /* default: 0 */
   int viewer_gfx_codec; /* default: SVC_VIEWER_GFX_CODEC_UNCOMPRESSED */
+  int viewer_gfx_diagnostic_full_frame_dirty;               /* default: 0 */
   int viewer_classic_latest_state_enabled;                  /* default: 0 */
   unsigned int viewer_classic_latest_state_max_queue_depth; /* default: 0 */
   unsigned int viewer_classic_latest_state_max_queue_bytes; /* default: 0 */

@@ -101,6 +101,9 @@ viewer.throttle_max_updates_per_sec = 0
 ; snapshots, not backend GFX. Currently only uncompressed is supported.
 viewer.gfx.enabled = false
 viewer.gfx.codec = uncompressed
+; Diagnostic only. Default off. When true, every viewer RDPEGFX incremental
+; dirty update is sent as one full-frame dirty rect.
+viewer.gfx.diagnostic.full_frame_dirty = false
 ; Default off. When enabled, slow classic viewers whose queued BitmapUpdate
 ; backlog exceeds either nonzero limit may have stale FIFO entries replaced
 ; with one latest framebuffer baseline.

@@ -53,6 +53,7 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->viewer_throttle_max_updates_per_sec = 0;
   cfg->viewer_gfx_enabled = 0;
   cfg->viewer_gfx_codec = SVC_VIEWER_GFX_CODEC_UNCOMPRESSED;
+  cfg->viewer_gfx_diagnostic_full_frame_dirty = 0;
   cfg->viewer_classic_latest_state_enabled = 0;
   cfg->viewer_classic_latest_state_max_queue_depth = 0;
   cfg->viewer_classic_latest_state_max_queue_bytes = 0;
@@ -244,6 +245,9 @@ static int parse_one_instance(const IniFile *ini, const char *name,
                                           inst->viewer_gfx_enabled);
   inst->viewer_gfx_codec = svc_config_get_viewer_gfx_codec(
       ini, section, "viewer.gfx.codec", inst->viewer_gfx_codec);
+  inst->viewer_gfx_diagnostic_full_frame_dirty =
+      ini_get_bool(ini, section, "viewer.gfx.diagnostic.full_frame_dirty",
+                   inst->viewer_gfx_diagnostic_full_frame_dirty);
   inst->viewer_classic_latest_state_enabled =
       ini_get_bool(ini, section, "viewer.classic_latest_state_enabled",
                    inst->viewer_classic_latest_state_enabled);

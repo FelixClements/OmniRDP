@@ -53,6 +53,9 @@ void viewer_server_set_gfx_enabled(ViewerServer *server, BOOL enabled);
 
 void viewer_server_set_gfx_codec(ViewerServer *server, ViewerGfxCodec codec);
 
+void viewer_server_set_gfx_diagnostic_full_frame_dirty(ViewerServer *server,
+                                                       BOOL enabled);
+
 void viewer_server_stop(ViewerServer *server);
 
 void viewer_server_free(ViewerServer *server);
