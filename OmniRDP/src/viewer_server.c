@@ -2126,6 +2126,7 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
         viewer->context = NULL;
         viewer->counted_in_viewer_count = FALSE;
         viewer->cleanup_in_progress = FALSE;
+        viewer_auth_state_reset(viewer);
         viewer->publish_ref_count = 0;
         viewer = NULL;
         break;
@@ -2221,11 +2222,172 @@ static void peer_context_free(freerdp_peer *peer, rdpContext *context) {
  *
  * SupportMonitorLayoutPdu)
  */
+static const char *viewer_connection_state_name(CONNECTION_STATE state) {
+  switch (state) {
+  case CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_REQUEST:
+    return "CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_REQUEST";
+  case CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_RESPONSE:
+    return "CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_RESPONSE";
+  case CONNECTION_STATE_LICENSING:
+    return "CONNECTION_STATE_LICENSING";
+  case CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_REQUEST:
+    return "CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_REQUEST";
+  case CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_RESPONSE:
+    return "CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_RESPONSE";
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_DEMAND_ACTIVE:
+    return "CONNECTION_STATE_CAPABILITIES_EXCHANGE_DEMAND_ACTIVE";
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_MONITOR_LAYOUT:
+    return "CONNECTION_STATE_CAPABILITIES_EXCHANGE_MONITOR_LAYOUT";
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_CONFIRM_ACTIVE:
+    return "CONNECTION_STATE_CAPABILITIES_EXCHANGE_CONFIRM_ACTIVE";
+  case CONNECTION_STATE_FINALIZATION_SYNC:
+    return "CONNECTION_STATE_FINALIZATION_SYNC";
+  case CONNECTION_STATE_FINALIZATION_COOPERATE:
+    return "CONNECTION_STATE_FINALIZATION_COOPERATE";
+  case CONNECTION_STATE_FINALIZATION_REQUEST_CONTROL:
+    return "CONNECTION_STATE_FINALIZATION_REQUEST_CONTROL";
+  case CONNECTION_STATE_FINALIZATION_PERSISTENT_KEY_LIST:
+    return "CONNECTION_STATE_FINALIZATION_PERSISTENT_KEY_LIST";
+  case CONNECTION_STATE_FINALIZATION_FONT_LIST:
+    return "CONNECTION_STATE_FINALIZATION_FONT_LIST";
+  case CONNECTION_STATE_FINALIZATION_CLIENT_SYNC:
+    return "CONNECTION_STATE_FINALIZATION_CLIENT_SYNC";
+  case CONNECTION_STATE_FINALIZATION_CLIENT_COOPERATE:
+    return "CONNECTION_STATE_FINALIZATION_CLIENT_COOPERATE";
+  case CONNECTION_STATE_FINALIZATION_CLIENT_GRANTED_CONTROL:
+    return "CONNECTION_STATE_FINALIZATION_CLIENT_GRANTED_CONTROL";
+  case CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP:
+    return "CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP";
+  case CONNECTION_STATE_ACTIVE:
+    return "CONNECTION_STATE_ACTIVE";
+  default:
+    return "CONNECTION_STATE_BEFORE_CLIENT_INFO";
+  }
+}
+
+static BOOL viewer_state_is_after_client_info(CONNECTION_STATE state) {
+  switch (state) {
+  case CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_REQUEST:
+  case CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_RESPONSE:
+  case CONNECTION_STATE_LICENSING:
+  case CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_REQUEST:
+  case CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_RESPONSE:
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_DEMAND_ACTIVE:
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_MONITOR_LAYOUT:
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_CONFIRM_ACTIVE:
+  case CONNECTION_STATE_FINALIZATION_SYNC:
+  case CONNECTION_STATE_FINALIZATION_COOPERATE:
+  case CONNECTION_STATE_FINALIZATION_REQUEST_CONTROL:
+  case CONNECTION_STATE_FINALIZATION_PERSISTENT_KEY_LIST:
+  case CONNECTION_STATE_FINALIZATION_FONT_LIST:
+  case CONNECTION_STATE_FINALIZATION_CLIENT_SYNC:
+  case CONNECTION_STATE_FINALIZATION_CLIENT_COOPERATE:
+  case CONNECTION_STATE_FINALIZATION_CLIENT_GRANTED_CONTROL:
+  case CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP:
+  case CONNECTION_STATE_ACTIVE:
+    return TRUE;
+  default:
+    return FALSE;
+  }
+}
+
+static BOOL viewer_run_deferred_auth_if_ready(freerdp_peer *peer,
+                                              CONNECTION_STATE state) {
+  ViewerServer *server = g_viewer_server;
+  Viewer *viewer = NULL;
+  ViewerAuthCredentials settings_credentials = {0};
+  const char *viewer_user = "";
+  const char *viewer_domain = "";
+  const char *viewer_password = "";
+  BOOL settings_usable = FALSE;
+  BOOL accepted = FALSE;
+
+  if (!server || !peer)
+    return TRUE;
+
+  viewer = find_viewer_by_peer(peer);
+  if (!viewer)
+    return TRUE;
+
+  if (!viewer->auth_deferred_required || viewer->auth_deferred_checked)
+    return TRUE;
+
+  if (!viewer_state_is_after_client_info(state))
+    return TRUE;
+
+  viewer->auth_deferred_checked = TRUE;
+
+  if (!server->backend) {
+    viewer->auth_state = VIEWER_AUTH_STATE_REJECTED;
+    viewer->stop_requested = TRUE;
+    WLog_WARN(TAG,
+              "Deferred viewer auth rejected: missing backend credentials "
+              "auth_mode=%s nla_enabled=false credential_source=settings "
+              "state=%s",
+              viewer_auth_mode_name(server->security.auth_mode),
+              viewer_connection_state_name(state));
+    return FALSE;
+  }
+
+  settings_usable =
+      viewer_settings_credentials_to_utf8(peer, &settings_credentials);
+  if (settings_usable &&
+      !viewer_auth_normalize_domain_user(&settings_credentials))
+    settings_usable = FALSE;
+
+  viewer_user =
+      settings_credentials.username ? settings_credentials.username : "";
+  viewer_domain =
+      settings_credentials.domain ? settings_credentials.domain : "";
+  viewer_password =
+      settings_credentials.password ? settings_credentials.password : "";
+
+  if (settings_usable) {
+    accepted = viewer_backend_credentials_match(server->backend, viewer_user,
+                                                viewer_domain, viewer_password);
+  }
+
+  if (accepted) {
+    viewer->auth_state = VIEWER_AUTH_STATE_ACCEPTED;
+    viewer->auth_deferred_required = FALSE;
+    viewer->auth_deferred_accepted = TRUE;
+    WLog_INFO(TAG,
+              "Deferred viewer auth accepted auth_mode=%s nla_enabled=false "
+              "credential_source=settings username_present=%s "
+              "domain_present=%s password_present=%s state=%s",
+              viewer_auth_mode_name(server->security.auth_mode),
+              viewer_user[0] ? "true" : "false",
+              viewer_domain[0] ? "true" : "false",
+              viewer_password[0] ? "true" : "false",
+              viewer_connection_state_name(state));
+    viewer_auth_credentials_clear(&settings_credentials);
+    return TRUE;
+  }
+
+  viewer->auth_state = VIEWER_AUTH_STATE_REJECTED;
+  viewer->auth_deferred_accepted = FALSE;
+  viewer->stop_requested = TRUE;
+  WLog_WARN(TAG,
+            "Deferred viewer auth rejected auth_mode=%s nla_enabled=false "
+            "credential_source=settings username_present=%s domain_present=%s "
+            "password_present=%s state=%s",
+            viewer_auth_mode_name(server->security.auth_mode),
+            viewer_user[0] ? "true" : "false",
+            viewer_domain[0] ? "true" : "false",
+            viewer_password[0] ? "true" : "false",
+            viewer_connection_state_name(state));
+  viewer_auth_credentials_clear(&settings_credentials);
+  return FALSE;
+}
+
 static BOOL peer_reached_state(freerdp_peer *peer, CONNECTION_STATE state) {
   ViewerServer *server = NULL;
   const MonitorLayout *layout = NULL;
   rdpSettings *settings = NULL;
   UINT32 i = 0;
+
+  if (!viewer_run_deferred_auth_if_ready(peer, state))
+    return FALSE;
 
   if (state != CONNECTION_STATE_SECURE_SETTINGS_EXCHANGE)
     return TRUE;
