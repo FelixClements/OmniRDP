@@ -130,9 +130,20 @@ static BOOL viewer_gfx_pipeline_build_surface_command_rect(
     viewer_gfx_pipeline_surface_command_reset(command);
   }
 
-  if (!viewer_gfx_uncompressed_build_surface_command_rect(snapshot, surface_id,
-                                                          dirty_rect, command))
+  if (!viewer_gfx_uncompressed_build_surface_command_rect(
+          snapshot, surface_id, dirty_rect, command)) {
+    WLog_DBG(TAG,
+             "Viewer %u RDPEGFX dirty command bounds validation failed: "
+             "generation=%" PRIu64 " rect=(%u,%u)-(%u,%u) surface=%ux%u "
+             "reason=command bounds validation failed",
+             viewer ? viewer->id : 0U, snapshot ? snapshot->generation : 0,
+             dirty_rect ? dirty_rect->left : 0U,
+             dirty_rect ? dirty_rect->top : 0U,
+             dirty_rect ? dirty_rect->right : 0U,
+             dirty_rect ? dirty_rect->bottom : 0U,
+             snapshot ? snapshot->width : 0U, snapshot ? snapshot->height : 0U);
     return FALSE;
+  }
 
   EnterCriticalSection(&gfx->lock);
   selected_codec = gfx->selected_codec;

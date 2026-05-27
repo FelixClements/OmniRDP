@@ -127,6 +127,47 @@ static int test_dirty_rect_encode_builds_destination_bounds(void) {
   return ok;
 }
 
+static int test_dirty_rect_edge_bounds(void) {
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot snapshot = make_snapshot(pixels, 4, 4, 16, 64);
+  RECTANGLE_16 one_pixel_edge = {3, 3, 3, 3};
+  RECTANGLE_16 full_frame = {0, 0, 3, 3};
+  ViewerGfxRfxContext *context = viewer_gfx_rfx_context_new();
+  RDPGFX_SURFACE_COMMAND command = {0};
+  int ok = 1;
+
+  fill_pixels(pixels, sizeof(pixels));
+  ok = ok && expect_true(context != NULL, "RFX context creates for edge rects");
+  ok = ok && expect_true(viewer_gfx_rfx_build_surface_command_rect(
+                             context, &snapshot, 7, &one_pixel_edge, &command),
+                         "one-pixel edge RFX dirty rect builds");
+  ok = ok && expect_uint32(command.left, 3, "one-pixel RFX left");
+  ok = ok && expect_uint32(command.top, 3, "one-pixel RFX top");
+  ok = ok && expect_uint32(command.right, 4, "one-pixel RFX exclusive right");
+  ok = ok && expect_uint32(command.bottom, 4, "one-pixel RFX exclusive bottom");
+  ok = ok && expect_uint32(command.width, 1, "one-pixel RFX width");
+  ok = ok && expect_uint32(command.height, 1, "one-pixel RFX height");
+  ok = ok && expect_true(command.length > 0, "one-pixel RFX payload nonzero");
+  ok = ok && expect_true(command.data != NULL, "one-pixel RFX payload set");
+  viewer_gfx_rfx_surface_command_reset(&command);
+
+  ok = ok && expect_true(viewer_gfx_rfx_build_surface_command_rect(
+                             context, &snapshot, 8, &full_frame, &command),
+                         "full-width full-height RFX dirty rect builds");
+  ok = ok && expect_uint32(command.left, 0, "full RFX left");
+  ok = ok && expect_uint32(command.top, 0, "full RFX top");
+  ok = ok && expect_uint32(command.right, 4, "full RFX exclusive right");
+  ok = ok && expect_uint32(command.bottom, 4, "full RFX exclusive bottom");
+  ok = ok && expect_uint32(command.width, 4, "full RFX width");
+  ok = ok && expect_uint32(command.height, 4, "full RFX height");
+  ok = ok && expect_true(command.length > 0, "full RFX payload nonzero");
+  ok = ok && expect_true(command.data != NULL, "full RFX payload set");
+
+  viewer_gfx_rfx_surface_command_reset(&command);
+  viewer_gfx_rfx_context_free(context);
+  return ok;
+}
+
 static int test_invalid_inputs_are_rejected_and_reset(void) {
   BYTE pixels[64] = {0};
   ViewerFramebufferSnapshot snapshot = make_snapshot(pixels, 4, 4, 16, 64);
@@ -232,6 +273,7 @@ int main(void) {
   ok = ok && test_context_creation_and_status();
   ok = ok && test_full_frame_encode_builds_cavideo_command();
   ok = ok && test_dirty_rect_encode_builds_destination_bounds();
+  ok = ok && test_dirty_rect_edge_bounds();
   ok = ok && test_invalid_inputs_are_rejected_and_reset();
   ok = ok && test_replacement_and_reset_cleanup();
   ok = ok && test_context_new_failure_hook();

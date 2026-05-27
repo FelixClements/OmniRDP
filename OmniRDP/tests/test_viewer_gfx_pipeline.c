@@ -1936,6 +1936,85 @@ static int test_pending_dirty_snapshot_overrides_generation(void) {
   return ok;
 }
 
+static int test_dirty_update_command_bounds_validation(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 130, 1);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 21;
+  viewer.gfx.dirty_last_sent_generation = 77;
+
+  snapshot.dirty_rects[0].left = 3;
+  snapshot.dirty_rects[0].top = 3;
+  snapshot.dirty_rects[0].right = 3;
+  snapshot.dirty_rects[0].bottom = 3;
+  reset_send_recorder();
+  ok = ok &&
+       expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                         &server, &viewer, &snapshot),
+                     VIEWER_GFX_DIRTY_SEND_SENT, "one-pixel edge dirty sends");
+  ok = ok && expect_uint32(g_last_surface.left, 3, "one-pixel dirty left");
+  ok = ok && expect_uint32(g_last_surface.top, 3, "one-pixel dirty top");
+  ok = ok && expect_uint32(g_last_surface.right, 4,
+                           "one-pixel dirty exclusive right");
+  ok = ok && expect_uint32(g_last_surface.bottom, 4,
+                           "one-pixel dirty exclusive bottom");
+  ok = ok && expect_uint32(g_last_surface.width, 1, "one-pixel dirty width");
+  ok = ok && expect_uint32(g_last_surface.height, 1, "one-pixel dirty height");
+
+  (void)viewer_gfx_pipeline_handle_frame_ack(&viewer, 21);
+  snapshot.generation = 131;
+  snapshot.dirty_rects[0].left = 0;
+  snapshot.dirty_rects[0].top = 0;
+  snapshot.dirty_rects[0].right = 3;
+  snapshot.dirty_rects[0].bottom = 3;
+  reset_send_recorder();
+  ok = ok &&
+       expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                         &server, &viewer, &snapshot),
+                     VIEWER_GFX_DIRTY_SEND_SENT, "full bounds dirty sends");
+  ok = ok && expect_uint32(g_last_surface.left, 0, "full dirty left");
+  ok = ok && expect_uint32(g_last_surface.top, 0, "full dirty top");
+  ok = ok &&
+       expect_uint32(g_last_surface.right, 4, "full dirty exclusive right");
+  ok = ok &&
+       expect_uint32(g_last_surface.bottom, 4, "full dirty exclusive bottom");
+  ok = ok && expect_uint32(g_last_surface.width, 4, "full dirty width");
+  ok = ok && expect_uint32(g_last_surface.height, 4, "full dirty height");
+
+  (void)viewer_gfx_pipeline_handle_frame_ack(&viewer, 22);
+  snapshot.generation = 132;
+  snapshot.dirty_rects[0].left = 2;
+  snapshot.dirty_rects[0].top = 0;
+  snapshot.dirty_rects[0].right = 1;
+  snapshot.dirty_rects[0].bottom = 0;
+  reset_send_recorder();
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &snapshot),
+                           VIEWER_GFX_DIRTY_SEND_FAILED,
+                           "invalid dirty rect build fails");
+  ok = ok &&
+       expect_uint32(g_send_count, 0, "invalid dirty rect sends no frame PDUs");
+  ok = ok && expect_uint32(g_surface_count, 0,
+                           "invalid dirty rect sends no surface command");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "invalid dirty rect leaves in-flight unchanged");
+  ok = ok && expect_uint32(viewer.gfx.next_frame_id, 23,
+                           "invalid dirty rect leaves next frame unchanged");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_generation, 131,
+                           "invalid dirty rect leaves last generation");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
 static int test_pending_dirty_validation_and_clamping(void) {
   Viewer viewer = {0};
   ViewerGfxPendingDirtyBatch batch = {0};
@@ -1955,10 +2034,10 @@ static int test_pending_dirty_validation_and_clamping(void) {
   ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
                              &viewer.gfx, &batch),
                          "move clamped pending dirty");
-  ok = ok && expect_uint32(batch.rects[0].right, 99,
-                           "pending dirty right clamped");
-  ok = ok && expect_uint32(batch.rects[0].bottom, 99,
-                           "pending dirty bottom clamped");
+  ok = ok &&
+       expect_uint32(batch.rects[0].right, 99, "pending dirty right clamped");
+  ok = ok &&
+       expect_uint32(batch.rects[0].bottom, 99, "pending dirty bottom clamped");
 
   ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_add_locked(
                              &viewer.gfx, &reversed_x, 1, FALSE, 51, 100, 100),
@@ -2029,6 +2108,8 @@ int main(void) {
   if (!test_dirty_update_eligibility_is_per_viewer())
     return 1;
   if (!test_dirty_update_send_order_and_ack())
+    return 1;
+  if (!test_dirty_update_command_bounds_validation())
     return 1;
   if (!test_dirty_update_rfx_codec_emits_cavideo())
     return 1;

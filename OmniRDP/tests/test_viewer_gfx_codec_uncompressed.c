@@ -123,6 +123,50 @@ static int test_dirty_rect_builds_exclusive_bounds(void) {
   return ok;
 }
 
+static int test_dirty_rect_edge_bounds(void) {
+  BYTE pixels[64] = {0};
+  BYTE expected_pixel[4] = {0};
+  ViewerFramebufferSnapshot snapshot = make_snapshot(pixels, 4, 4, 16, 64);
+  RECTANGLE_16 one_pixel_edge = {3, 3, 3, 3};
+  RECTANGLE_16 full_frame = {0, 0, 3, 3};
+  RDPGFX_SURFACE_COMMAND command = {0};
+  int ok = 1;
+
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+  memmove(expected_pixel, pixels + 60, sizeof(expected_pixel));
+
+  ok = ok && expect_true(viewer_gfx_uncompressed_build_surface_command_rect(
+                             &snapshot, 5, &one_pixel_edge, &command),
+                         "one-pixel edge dirty rect builds");
+  ok = ok && expect_uint32(command.left, 3, "one-pixel left");
+  ok = ok && expect_uint32(command.top, 3, "one-pixel top");
+  ok = ok && expect_uint32(command.right, 4, "one-pixel exclusive right");
+  ok = ok && expect_uint32(command.bottom, 4, "one-pixel exclusive bottom");
+  ok = ok && expect_uint32(command.width, 1, "one-pixel width");
+  ok = ok && expect_uint32(command.height, 1, "one-pixel height");
+  ok = ok && expect_uint32(command.length, sizeof(expected_pixel),
+                           "one-pixel payload length");
+  ok = ok && expect_bytes(command.data, expected_pixel, sizeof(expected_pixel),
+                          "one-pixel payload copied");
+  viewer_gfx_uncompressed_surface_command_reset(&command);
+
+  ok = ok && expect_true(viewer_gfx_uncompressed_build_surface_command_rect(
+                             &snapshot, 6, &full_frame, &command),
+                         "full-width full-height dirty rect builds");
+  ok = ok && expect_uint32(command.left, 0, "full rect left");
+  ok = ok && expect_uint32(command.top, 0, "full rect top");
+  ok = ok && expect_uint32(command.right, 4, "full rect exclusive right");
+  ok = ok && expect_uint32(command.bottom, 4, "full rect exclusive bottom");
+  ok = ok && expect_uint32(command.width, 4, "full rect width");
+  ok = ok && expect_uint32(command.height, 4, "full rect height");
+  ok = ok && expect_uint32(command.length, sizeof(pixels),
+                           "full rect payload length");
+
+  viewer_gfx_uncompressed_surface_command_reset(&command);
+  return ok;
+}
+
 static int test_invalid_inputs(void) {
   BYTE pixels[16] = {0};
   ViewerFramebufferSnapshot snapshot = make_snapshot(pixels, 2, 2, 8, 16);
@@ -169,6 +213,12 @@ static int test_invalid_inputs(void) {
   ok = ok && expect_false(viewer_gfx_uncompressed_build_surface_command(
                               &invalid, 1, &command),
                           "short pixel buffer rejected");
+
+  invalid = snapshot;
+  invalid.height = 0;
+  ok = ok && expect_false(viewer_gfx_uncompressed_build_surface_command_rect(
+                              &invalid, 1, &valid_rect, &command),
+                          "dirty rect dimension mismatch rejected");
 
   invalid = snapshot;
   invalid.width = (UINT32)UINT16_MAX + 1U;
@@ -258,6 +308,7 @@ int main(void) {
 
   ok = ok && test_full_frame_repacks_padded_stride();
   ok = ok && test_dirty_rect_builds_exclusive_bounds();
+  ok = ok && test_dirty_rect_edge_bounds();
   ok = ok && test_invalid_inputs();
   ok = ok && test_reset_idempotent();
   ok = ok && test_build_resets_existing_command();
