@@ -47,6 +47,24 @@ static BOOL viewer_framebuffer_add_dirty_locked(ViewerFramebuffer *framebuffer,
   return TRUE;
 }
 
+static BOOL viewer_framebuffer_dirty_rects_valid(UINT32 width, UINT32 height,
+                                                 const RECTANGLE_16 *rects,
+                                                 UINT32 rect_count) {
+  UINT32 i = 0;
+
+  if (rect_count == 0)
+    return TRUE;
+  if (!rects)
+    return FALSE;
+
+  for (i = 0; i < rect_count; i++) {
+    if (!viewer_framebuffer_dirty_rect_valid(width, height, &rects[i]))
+      return FALSE;
+  }
+
+  return TRUE;
+}
+
 BOOL viewer_framebuffer_dirty_rect_valid(UINT32 width, UINT32 height,
                                          const RECTANGLE_16 *rect) {
   if ((width == 0) || (height == 0) || !rect)
@@ -167,6 +185,13 @@ BOOL viewer_framebuffer_update_pixels(ViewerFramebuffer *framebuffer,
     return FALSE;
   }
 
+  if (!viewer_framebuffer_dirty_rects_valid(framebuffer->width,
+                                            framebuffer->height, dirty_rects,
+                                            dirty_rect_count)) {
+    LeaveCriticalSection(&framebuffer->lock);
+    return FALSE;
+  }
+
   for (y = 0; y < framebuffer->height; y++) {
     memmove(framebuffer->pixels + ((size_t)y * framebuffer->stride),
             pixels + ((size_t)y * source_stride), framebuffer->stride);
@@ -201,6 +226,12 @@ BOOL viewer_framebuffer_mark_dirty(ViewerFramebuffer *framebuffer,
     return FALSE;
 
   EnterCriticalSection(&framebuffer->lock);
+  if (!viewer_framebuffer_dirty_rect_valid(framebuffer->width,
+                                           framebuffer->height, rect)) {
+    LeaveCriticalSection(&framebuffer->lock);
+    return FALSE;
+  }
+
   result = viewer_framebuffer_add_dirty_locked(framebuffer, rect);
   LeaveCriticalSection(&framebuffer->lock);
   return result;

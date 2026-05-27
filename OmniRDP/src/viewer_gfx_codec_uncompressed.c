@@ -55,6 +55,8 @@ static BOOL viewer_gfx_uncompressed_validate_rect(
       ((UINT32)dirty_rect->bottom >= snapshot->height))
     return FALSE;
 
+  /* Framebuffer dirty RECTANGLE_16 values are inclusive. RDPEGFX surface
+   * commands use exclusive bounds, so convert right/bottom with +1 here. */
   *left = (UINT32)dirty_rect->left;
   *top = (UINT32)dirty_rect->top;
   *right = (UINT32)dirty_rect->right + 1U;

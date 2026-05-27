@@ -68,7 +68,7 @@ static int test_resize_generation_and_dirty(void) {
 static int test_update_snapshot_copy_and_dirty(void) {
   ViewerFramebuffer fb = {0};
   ViewerFramebufferSnapshot snapshot = {0};
-  BYTE pixels[16] = {0};
+  BYTE pixels[36] = {0};
   RECTANGLE_16 dirty[2] = {{1, 1, 2, 2}, {0, 0, 1, 1}};
   int ok = 1;
 
@@ -76,10 +76,10 @@ static int test_update_snapshot_copy_and_dirty(void) {
     pixels[i] = (BYTE)(i + 1U);
 
   ok = ok && expect_true(viewer_framebuffer_init(&fb), "init update test");
-  ok = ok && expect_true(viewer_framebuffer_resize(&fb, 2, 2, 8, 32),
+  ok = ok && expect_true(viewer_framebuffer_resize(&fb, 3, 3, 12, 32),
                          "resize update test");
   ok = ok &&
-       expect_true(viewer_framebuffer_update_pixels(&fb, pixels, 8, dirty, 2),
+       expect_true(viewer_framebuffer_update_pixels(&fb, pixels, 12, dirty, 2),
                    "update pixels succeeds");
   ok = ok && expect_uint64(fb.generation, 2, "update increments generation");
   ok = ok && expect_true(viewer_framebuffer_snapshot(&fb, &snapshot),
@@ -103,6 +103,9 @@ static int test_update_snapshot_copy_and_dirty(void) {
 
 static int test_dirty_rect_validation(void) {
   RECTANGLE_16 valid = {1, 1, 2, 2};
+  RECTANGLE_16 one_pixel = {2, 2, 2, 2};
+  RECTANGLE_16 left_top_edge = {0, 0, 0, 0};
+  RECTANGLE_16 right_bottom_edge = {3, 2, 3, 2};
   RECTANGLE_16 reversed_x = {2, 1, 1, 2};
   RECTANGLE_16 reversed_y = {1, 2, 2, 1};
   RECTANGLE_16 out_of_bounds_x = {1, 1, 4, 2};
@@ -111,6 +114,14 @@ static int test_dirty_rect_validation(void) {
 
   ok = ok && expect_true(viewer_framebuffer_dirty_rect_valid(4, 3, &valid),
                          "valid dirty rect accepted");
+  ok = ok && expect_true(viewer_framebuffer_dirty_rect_valid(4, 3, &one_pixel),
+                         "one-pixel dirty rect accepted");
+  ok = ok &&
+       expect_true(viewer_framebuffer_dirty_rect_valid(4, 3, &left_top_edge),
+                   "left/top edge dirty rect accepted");
+  ok = ok && expect_true(
+                 viewer_framebuffer_dirty_rect_valid(4, 3, &right_bottom_edge),
+                 "right/bottom edge dirty rect accepted");
   ok = ok && expect_true(!viewer_framebuffer_dirty_rect_valid(4, 3, NULL),
                          "null dirty rect rejected");
   ok = ok && expect_true(!viewer_framebuffer_dirty_rect_valid(0, 3, &valid),
@@ -130,6 +141,81 @@ static int test_dirty_rect_validation(void) {
        expect_true(!viewer_framebuffer_dirty_rect_valid(4, 3, &out_of_bounds_y),
                    "out of bounds y dirty rect rejected");
 
+  return ok;
+}
+
+static int test_invalid_update_rejected_without_side_effects(void) {
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot before = {0};
+  ViewerFramebufferSnapshot after = {0};
+  BYTE pixels[16] = {0};
+  RECTANGLE_16 valid = {0, 0, 0, 0};
+  RECTANGLE_16 invalid = {0, 0, 2, 0};
+  int ok = 1;
+
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+
+  ok = ok && expect_true(viewer_framebuffer_init(&fb),
+                         "init invalid update side-effect test");
+  ok = ok && expect_true(viewer_framebuffer_resize(&fb, 2, 2, 8, 32),
+                         "resize invalid update side-effect test");
+  ok = ok &&
+       expect_true(viewer_framebuffer_update_pixels(&fb, pixels, 8, &valid, 1),
+                   "valid update before invalid update");
+  ok = ok && expect_true(viewer_framebuffer_snapshot(&fb, &before),
+                         "snapshot before invalid update");
+
+  pixels[0] = 0xFFU;
+  ok = ok && expect_true(
+                 !viewer_framebuffer_update_pixels(&fb, pixels, 8, &invalid, 1),
+                 "invalid update dirty rect rejected");
+  ok = ok && expect_true(viewer_framebuffer_snapshot(&fb, &after),
+                         "snapshot after invalid update");
+  ok = ok && expect_uint64(after.generation, before.generation,
+                           "invalid update preserves generation");
+  ok = ok && expect_uint32(after.dirty_rect_count, before.dirty_rect_count,
+                           "invalid update preserves dirty count");
+  ok = ok &&
+       expect_uint32(after.dirty_rects[0].right, before.dirty_rects[0].right,
+                     "invalid update preserves dirty rect");
+  ok = ok && expect_uint32(after.pixels[0], before.pixels[0],
+                           "invalid update preserves pixels");
+
+  viewer_framebuffer_snapshot_free(&before);
+  viewer_framebuffer_snapshot_free(&after);
+  viewer_framebuffer_uninit(&fb);
+  return ok;
+}
+
+static int test_invalid_mark_dirty_rejected_without_side_effects(void) {
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferSnapshot before = {0};
+  ViewerFramebufferSnapshot after = {0};
+  RECTANGLE_16 invalid = {1, 0, 0, 0};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_framebuffer_init(&fb),
+                         "init invalid mark side-effect test");
+  ok = ok && expect_true(viewer_framebuffer_resize(&fb, 2, 2, 8, 32),
+                         "resize invalid mark side-effect test");
+  ok = ok && expect_true(viewer_framebuffer_snapshot(&fb, &before),
+                         "snapshot before invalid mark");
+  ok = ok && expect_true(!viewer_framebuffer_mark_dirty(&fb, &invalid),
+                         "invalid mark dirty rejected");
+  ok = ok && expect_true(viewer_framebuffer_snapshot(&fb, &after),
+                         "snapshot after invalid mark");
+  ok = ok && expect_uint64(after.generation, before.generation,
+                           "invalid mark preserves generation");
+  ok = ok && expect_uint32(after.dirty_rect_count, before.dirty_rect_count,
+                           "invalid mark preserves dirty count");
+  ok = ok &&
+       expect_uint32(after.dirty_rects[0].bottom, before.dirty_rects[0].bottom,
+                     "invalid mark preserves dirty rect");
+
+  viewer_framebuffer_snapshot_free(&before);
+  viewer_framebuffer_snapshot_free(&after);
+  viewer_framebuffer_uninit(&fb);
   return ok;
 }
 
@@ -304,6 +390,10 @@ int main(void) {
   if (!test_update_snapshot_copy_and_dirty())
     return 1;
   if (!test_dirty_rect_validation())
+    return 1;
+  if (!test_invalid_update_rejected_without_side_effects())
+    return 1;
+  if (!test_invalid_mark_dirty_rejected_without_side_effects())
     return 1;
   if (!test_dirty_overflow())
     return 1;

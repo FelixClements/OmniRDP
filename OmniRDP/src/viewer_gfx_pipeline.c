@@ -258,9 +258,23 @@ BOOL viewer_gfx_pipeline_pending_dirty_add_locked(
     UINT32 width, UINT32 height) {
   UINT32 i = 0;
   UINT64 full_area = 0;
+  BOOL has_valid_rect = FALSE;
 
   if (!gfx || (generation == 0) || (width == 0) || (height == 0))
     return FALSE;
+
+  if (!dirty_overflow && (dirty_rect_count > 0) && dirty_rects) {
+    for (i = 0; i < dirty_rect_count; i++) {
+      RECTANGLE_16 rect = {0};
+      if (viewer_gfx_pipeline_clamp_rect(&dirty_rects[i], width, height,
+                                         &rect)) {
+        has_valid_rect = TRUE;
+        break;
+      }
+    }
+    if (!has_valid_rect)
+      return FALSE;
+  }
 
   if ((gfx->pending_dirty_latest_generation != 0) &&
       ((gfx->pending_dirty_width != width) ||

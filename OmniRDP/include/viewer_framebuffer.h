@@ -23,6 +23,9 @@ extern "C" {
  *   bytes. The initial RDPEGFX plan expects a 32-bit BGRX/XRGB-style format;
  *   alpha is not authoritative and should be treated as ignored/opaque by
  *   publishers/codecs unless a later story explicitly changes that contract.
+ * - Dirty RECTANGLE_16 values use inclusive left/top/right/bottom coordinates.
+ *   A full 800x600 framebuffer is represented as left=0, top=0, right=799,
+ *   bottom=599. Callers must not pass exclusive right/bottom bounds here.
  * - This module owns canonical pixels, generations, and dirty rectangles only.
  *   It must not call FreeRDP send APIs or own RDPEGFX protocol context state.
  */

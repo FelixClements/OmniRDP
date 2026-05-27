@@ -1936,6 +1936,67 @@ static int test_pending_dirty_snapshot_overrides_generation(void) {
   return ok;
 }
 
+static int test_pending_dirty_validation_and_clamping(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  RECTANGLE_16 clamp_rect = {90, 90, 120, 130};
+  RECTANGLE_16 reversed_x = {10, 10, 9, 10};
+  RECTANGLE_16 reversed_y = {10, 10, 10, 9};
+  RECTANGLE_16 left_oob = {100, 1, 100, 1};
+  RECTANGLE_16 top_oob = {1, 100, 1, 100};
+  RECTANGLE_16 mixed[2] = {{5, 6, 7, 8}, {200, 0, 201, 1}};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 100, 100), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &clamp_rect, 1, FALSE, 50, 100, 100),
+                         "pending dirty clamps right and bottom");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move clamped pending dirty");
+  ok = ok && expect_uint32(batch.rects[0].right, 99,
+                           "pending dirty right clamped");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 99,
+                           "pending dirty bottom clamped");
+
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &reversed_x, 1, FALSE, 51, 100, 100),
+                         "pending dirty rejects reversed x");
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &reversed_y, 1, FALSE, 52, 100, 100),
+                         "pending dirty rejects reversed y");
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &left_oob, 1, FALSE, 53, 100, 100),
+                         "pending dirty rejects left OOB");
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &top_oob, 1, FALSE, 54, 100, 100),
+                         "pending dirty rejects top OOB");
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "invalid-only input creates no pending dirty");
+
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, mixed, 2, FALSE, 55, 100, 100),
+                         "pending dirty accepts mixed valid and invalid");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move mixed pending dirty");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok && expect_uint32(batch.rect_count, 1,
+                           "mixed pending dirty preserves only valid rect");
+  ok = ok && expect_true(!batch.full_frame,
+                         "mixed pending dirty does not force full frame");
+  ok = ok && expect_uint32(batch.rects[0].left, 5,
+                           "mixed pending dirty valid left preserved");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 8,
+                           "mixed pending dirty valid bottom preserved");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
 int main(void) {
   if (!test_activate_rejects_null_inputs())
     return 1;
@@ -2012,6 +2073,8 @@ int main(void) {
   if (!test_pending_dirty_remerge_preserves_new_updates())
     return 1;
   if (!test_pending_dirty_snapshot_overrides_generation())
+    return 1;
+  if (!test_pending_dirty_validation_and_clamping())
     return 1;
   return 0;
 }
