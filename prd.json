@@ -119,7 +119,7 @@
       ],
       "priority": 6,
       "dependsOn": ["US-005"],
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

@@ -2191,23 +2191,139 @@ static int test_pending_dirty_snapshot_overrides_generation(void) {
   snapshot.width = 100;
   snapshot.height = 100;
   snapshot.generation = 99;
+  snapshot.dirty_rect_count = 2;
+  snapshot.dirty_overflow = TRUE;
+  snapshot.dirty_rects[0].left = 10;
+  snapshot.dirty_rects[0].top = 11;
+  snapshot.dirty_rects[0].right = 12;
+  snapshot.dirty_rects[0].bottom = 13;
+  snapshot.dirty_rects[1].left = 20;
+  snapshot.dirty_rects[1].top = 21;
+  snapshot.dirty_rects[1].right = 22;
+  snapshot.dirty_rects[1].bottom = 23;
   batch.latest_generation = 40;
-  batch.rect_count = 1;
+  batch.rect_count = 2;
   batch.rects[0].left = 1;
   batch.rects[0].top = 2;
   batch.rects[0].right = 3;
   batch.rects[0].bottom = 4;
+  batch.rects[1].left = 5;
+  batch.rects[1].top = 6;
+  batch.rects[1].right = 7;
+  batch.rects[1].bottom = 8;
 
   ok = ok && expect_true(viewer_gfx_pipeline_snapshot_apply_pending_dirty(
                              &snapshot, &batch),
                          "apply pending dirty to snapshot");
   ok = ok && expect_uint64(snapshot.generation, 40,
                            "pending latest generation overrides snapshot");
-  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 2,
                            "pending rect count overrides snapshot");
+  ok = ok && expect_true(!snapshot.dirty_overflow,
+                         "pending dirty clears snapshot overflow flag");
   ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 1,
-                           "pending rect copied to snapshot");
+                           "first pending rect copied to snapshot");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].bottom, 4,
+                           "first pending rect bottom copied to snapshot");
+  ok = ok && expect_uint32(snapshot.dirty_rects[1].left, 5,
+                           "second pending rect replaces original snapshot");
+  ok = ok && expect_uint32(snapshot.dirty_rects[1].bottom, 8,
+                           "second pending rect bottom copied to snapshot");
 
+  return ok;
+}
+
+static int test_pending_dirty_snapshot_full_frame_override(void) {
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  int ok = 1;
+
+  snapshot.width = 100;
+  snapshot.height = 80;
+  snapshot.generation = 99;
+  snapshot.dirty_rect_count = 2;
+  snapshot.dirty_overflow = TRUE;
+  snapshot.dirty_rects[0].left = 10;
+  snapshot.dirty_rects[0].top = 10;
+  snapshot.dirty_rects[0].right = 20;
+  snapshot.dirty_rects[0].bottom = 20;
+  snapshot.dirty_rects[1].left = 30;
+  snapshot.dirty_rects[1].top = 30;
+  snapshot.dirty_rects[1].right = 40;
+  snapshot.dirty_rects[1].bottom = 40;
+  batch.latest_generation = 41;
+  batch.rect_count = 1;
+  batch.full_frame = TRUE;
+  batch.rects[0].left = 3;
+  batch.rects[0].top = 4;
+  batch.rects[0].right = 5;
+  batch.rects[0].bottom = 6;
+
+  ok = ok && expect_true(viewer_gfx_pipeline_snapshot_apply_pending_dirty(
+                             &snapshot, &batch),
+                         "apply full-frame pending dirty to snapshot");
+  ok = ok && expect_uint64(snapshot.generation, 41,
+                           "full-frame pending overrides generation");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "full-frame pending uses one rect");
+  ok = ok && expect_true(!snapshot.dirty_overflow,
+                         "full-frame pending clears overflow flag");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 0,
+                           "full-frame pending left");
+  ok = ok &&
+       expect_uint32(snapshot.dirty_rects[0].top, 0, "full-frame pending top");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].right, 99,
+                           "full-frame pending right");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].bottom, 79,
+                           "full-frame pending bottom");
+
+  return ok;
+}
+
+static int test_pending_dirty_successful_send_leaves_pending_empty(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 140, 1);
+  ViewerGfxPendingDirtyBatch batch = {0};
+  RECTANGLE_16 pending = {1, 1, 1, 1};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 30;
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &pending, 1, FALSE, 140, 4, 4),
+                         "add pending before successful send");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move pending before successful send");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok && expect_true(viewer_gfx_pipeline_snapshot_apply_pending_dirty(
+                             &snapshot, &batch),
+                         "apply moved pending before successful send");
+  reset_send_recorder();
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &snapshot),
+                           VIEWER_GFX_DIRTY_SEND_SENT,
+                           "moved pending snapshot sends successfully");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "successful send leaves pending empty");
+  LeaveCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_generation, 140,
+                           "successful send records moved generation");
+  ok = ok && expect_uint32(g_surface_count, 1,
+                           "successful send emits one dirty surface");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
   return ok;
 }
 
@@ -2439,6 +2555,10 @@ int main(void) {
   if (!test_pending_dirty_denied_send_remerge_simulation())
     return 1;
   if (!test_pending_dirty_snapshot_overrides_generation())
+    return 1;
+  if (!test_pending_dirty_snapshot_full_frame_override())
+    return 1;
+  if (!test_pending_dirty_successful_send_leaves_pending_empty())
     return 1;
   if (!test_pending_dirty_validation_and_clamping())
     return 1;
