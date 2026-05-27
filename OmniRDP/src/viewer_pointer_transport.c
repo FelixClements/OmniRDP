@@ -11,8 +11,8 @@ BOOL viewer_pointer_transport_send_plan(ViewerPointerTransport *transport,
       !peer->context->update || !peer->context->update->pointer)
     return FALSE;
 
-  if (!plan->send_system && !plan->send_color && !plan->send_new &&
-      !plan->send_position)
+  /* PointerPosition is intentionally suppressed to avoid echo lag. */
+  if (!plan->send_system && !plan->send_color && !plan->send_new)
     return TRUE;
 
   (void)viewer_classic_transport_begin_batch(&transport->classic_transport);
@@ -27,10 +27,6 @@ BOOL viewer_pointer_transport_send_plan(ViewerPointerTransport *transport,
               &plan->color);
   }
 
-  if (sent && plan->send_position &&
-      peer->context->update->pointer->PointerPosition)
-    IFCALLRET(peer->context->update->pointer->PointerPosition, sent,
-              peer->context, &plan->position);
   viewer_classic_transport_end_batch(&transport->classic_transport);
 
   return sent;
