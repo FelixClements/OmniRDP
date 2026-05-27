@@ -1873,6 +1873,123 @@ static int test_pending_dirty_overflow_forces_full_frame(void) {
   return ok;
 }
 
+static int test_pending_dirty_region_union_and_thresholds(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  RECTANGLE_16 overlap[2] = {{0, 0, 9, 9}, {5, 5, 14, 14}};
+  RECTANGLE_16 adjacent[2] = {{0, 0, 9, 9}, {10, 0, 19, 9}};
+  RECTANGLE_16 separate[2] = {{0, 0, 9, 9}, {20, 20, 29, 29}};
+  RECTANGLE_16 area_rect = {0, 0, 60, 99};
+  RECTANGLE_16 sparse[VIEWER_GFX_PENDING_DIRTY_MAX_RECTS + 1U] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 1000, 1000), "viewer init");
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, overlap, 2, FALSE, 60, 1000, 1000),
+                         "overlapping dirty rects accepted");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move overlapping dirty rects");
+  LeaveCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_uint32(batch.rect_count, 1, "overlap merged to one rect");
+  ok = ok && expect_uint32(batch.rects[0].left, 0, "overlap left");
+  ok = ok && expect_uint32(batch.rects[0].top, 0, "overlap top");
+  ok = ok && expect_uint32(batch.rects[0].right, 14, "overlap right");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 14, "overlap bottom");
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, adjacent, 2, FALSE, 61, 1000, 1000),
+                         "edge-adjacent dirty rects accepted");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move edge-adjacent dirty rects");
+  LeaveCriticalSection(&viewer.gfx.lock);
+  ok = ok &&
+       expect_uint32(batch.rect_count, 1, "edge-adjacent merged to one rect");
+  ok = ok && expect_uint32(batch.rects[0].left, 0, "edge-adjacent left");
+  ok = ok && expect_uint32(batch.rects[0].top, 0, "edge-adjacent top");
+  ok = ok && expect_uint32(batch.rects[0].right, 19, "edge-adjacent right");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 9, "edge-adjacent bottom");
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, separate, 2, FALSE, 62, 1000, 1000),
+                         "non-overlapping dirty rects accepted");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move non-overlapping dirty rects");
+  LeaveCriticalSection(&viewer.gfx.lock);
+  ok = ok &&
+       expect_uint32(batch.rect_count, 2, "non-overlapping rects preserved");
+  ok = ok && expect_true(!batch.full_frame,
+                         "non-overlapping rects do not force full frame");
+
+  for (UINT32 i = 0; i < (VIEWER_GFX_PENDING_DIRTY_MAX_RECTS + 1U); i++) {
+    sparse[i].left = (UINT16)(i * 2U);
+    sparse[i].top = 0;
+    sparse[i].right = sparse[i].left;
+    sparse[i].bottom = 0;
+  }
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, sparse,
+                             VIEWER_GFX_PENDING_DIRTY_MAX_RECTS + 1U, FALSE, 63,
+                             1000, 1000),
+                         "129 sparse dirty rects accepted");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move 129 sparse dirty rects");
+  LeaveCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(batch.full_frame, "129 sparse rects force full frame");
+  ok = ok && expect_true(batch.overflow,
+                         "129 sparse rects preserve overflow metadata");
+  ok = ok && expect_uint32(batch.rect_count, 1,
+                           "129 sparse rects produce one full-frame rect");
+  ok = ok && expect_uint32(batch.rects[0].left, 0, "129 full-frame left");
+  ok = ok && expect_uint32(batch.rects[0].top, 0, "129 full-frame top");
+  ok = ok && expect_uint32(batch.rects[0].right, 999, "129 full-frame right");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 999, "129 full-frame bottom");
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &area_rect, 1, FALSE, 64, 100, 100),
+                         "greater-than-60-percent dirty rect accepted");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move greater-than-60-percent dirty rect");
+  LeaveCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(batch.full_frame, ">60 percent forces full frame");
+  ok = ok && expect_uint32(batch.rect_count, 1,
+                           ">60 percent produces one full-frame rect");
+  ok = ok &&
+       expect_uint32(batch.rects[0].right, 99, ">60 percent full-frame right");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 99,
+                           ">60 percent full-frame bottom");
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, NULL, 0, FALSE, 65, 100, 100),
+                         "empty dirty input accepted as full frame");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move empty dirty input full frame");
+  LeaveCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(batch.full_frame, "empty input forces full frame");
+  ok = ok && expect_uint32(batch.rect_count, 1,
+                           "empty input produces one full-frame rect");
+  ok = ok && expect_uint32(batch.rects[0].left, 0, "empty full-frame left");
+  ok = ok && expect_uint32(batch.rects[0].top, 0, "empty full-frame top");
+  ok = ok && expect_uint32(batch.rects[0].right, 99, "empty full-frame right");
+  ok =
+      ok && expect_uint32(batch.rects[0].bottom, 99, "empty full-frame bottom");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
 static int test_pending_dirty_stale_generation_ignored(void) {
   Viewer viewer = {0};
   ViewerGfxPendingDirtyBatch batch = {0};
@@ -2199,6 +2316,8 @@ int main(void) {
   if (!test_pending_dirty_accumulates_and_moves_latest_generation())
     return 1;
   if (!test_pending_dirty_overflow_forces_full_frame())
+    return 1;
+  if (!test_pending_dirty_region_union_and_thresholds())
     return 1;
   if (!test_pending_dirty_stale_generation_ignored())
     return 1;
