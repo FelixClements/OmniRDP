@@ -1946,41 +1946,57 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
     goto out;
   }
 
-  comparison_user = server->backend->username;
-  comparison_domain = server->backend->domain;
+  if (!viewer_auth_normalize_domain_user(&selected_credentials)) {
+    WLog_WARN(TAG,
+              "Viewer-side logon rejected: failed to normalize credentials "
+              "auth_mode=%s nla_enabled=%s credential_source=%s",
+              viewer_auth_mode_name(server->security.auth_mode),
+              server->security.nla_enabled ? "true" : "false",
+              credential_source);
+    goto out;
+  }
+
+  viewer_user =
+      selected_credentials.username ? selected_credentials.username : "";
+  viewer_domain =
+      selected_credentials.domain ? selected_credentials.domain : "";
+  viewer_password =
+      selected_credentials.password ? selected_credentials.password : "";
+
   accepted = viewer_backend_credentials_match(server->backend, viewer_user,
                                               viewer_domain, viewer_password);
   if (accepted) {
+    if (viewer)
+      viewer->auth_state = VIEWER_AUTH_STATE_ACCEPTED;
     WLog_INFO(TAG,
               "Viewer-side logon accepted auth_mode=%s nla_enabled=%s "
-              "credential_source=%s "
-              "username_present=%s domain_present=%s password_present=%s "
-              "viewer='%s%s%s' comparison_user='%s' comparison_domain='%s'",
+              "credential_source=%s username_present=%s domain_present=%s "
+              "password_present=%s",
               viewer_auth_mode_name(server->security.auth_mode),
               server->security.nla_enabled ? "true" : "false",
               credential_source, viewer_user[0] ? "true" : "false",
               viewer_domain[0] ? "true" : "false",
-              viewer_password[0] ? "true" : "false", viewer_domain,
-              viewer_domain[0] ? "\\" : "", viewer_user, comparison_user,
-              viewer_comparison_domain_label(comparison_domain));
+              viewer_password[0] ? "true" : "false");
   } else {
+    if (viewer)
+      viewer->auth_state = VIEWER_AUTH_STATE_REJECTED;
     WLog_WARN(TAG,
               "Viewer-side logon rejected: credentials mismatch auth_mode=%s "
               "nla_enabled=%s credential_source=%s username_present=%s "
-              "domain_present=%s "
-              "password_present=%s comparison_user='%s' comparison_domain='%s'",
+              "domain_present=%s password_present=%s",
               viewer_auth_mode_name(server->security.auth_mode),
               server->security.nla_enabled ? "true" : "false",
               credential_source, viewer_user[0] ? "true" : "false",
               viewer_domain[0] ? "true" : "false",
-              viewer_password[0] ? "true" : "false", comparison_user,
-              viewer_comparison_domain_label(comparison_domain));
+              viewer_password[0] ? "true" : "false");
   }
 
 out:
-  free(viewer_user);
-  free(viewer_domain);
-  free(viewer_password);
+  if (!accepted && viewer && (viewer->auth_state != VIEWER_AUTH_STATE_ACCEPTED))
+    viewer->auth_state = VIEWER_AUTH_STATE_REJECTED;
+  viewer_auth_credentials_clear(&identity_credentials);
+  viewer_auth_credentials_clear(&settings_credentials);
+  viewer_auth_credentials_clear(&selected_credentials);
   return accepted;
 }
 
@@ -2076,6 +2092,7 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
       viewer->activated = FALSE;
       viewer->counted_in_viewer_count = FALSE;
       viewer->cleanup_in_progress = FALSE;
+      viewer_auth_state_reset(viewer);
       viewer->publish_ref_count = 0;
       viewer->needs_full_refresh = FALSE;
       viewer->stop_requested = FALSE;
@@ -2086,6 +2103,7 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
         viewer->context = NULL;
         viewer->counted_in_viewer_count = FALSE;
         viewer->cleanup_in_progress = FALSE;
+        viewer_auth_state_reset(viewer);
         viewer->publish_ref_count = 0;
         viewer = NULL;
         break;
@@ -2096,6 +2114,7 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
         viewer->context = NULL;
         viewer->counted_in_viewer_count = FALSE;
         viewer->cleanup_in_progress = FALSE;
+        viewer_auth_state_reset(viewer);
         viewer->publish_ref_count = 0;
         viewer = NULL;
         break;
