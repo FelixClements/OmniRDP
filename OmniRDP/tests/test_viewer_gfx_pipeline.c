@@ -2067,8 +2067,117 @@ static int test_pending_dirty_remerge_preserves_new_updates(void) {
                            "remerge keeps latest new generation");
   ok = ok && expect_uint64(final_batch.start_generation, 30,
                            "remerge restores moved start generation");
+  ok = ok && expect_uint64(final_batch.update_count, 2,
+                           "remerge combines update counts");
   ok = ok && expect_uint32(final_batch.rect_count, 2,
                            "remerge preserves moved and new rects");
+  ok = ok && expect_uint32(final_batch.rects[0].left, second.left,
+                           "remerge preserves newer rect left");
+  ok = ok && expect_uint32(final_batch.rects[0].bottom, second.bottom,
+                           "remerge preserves newer rect bottom");
+  ok = ok && expect_uint32(final_batch.rects[1].left, first.left,
+                           "remerge preserves moved rect left");
+  ok = ok && expect_uint32(final_batch.rects[1].bottom, first.bottom,
+                           "remerge preserves moved rect bottom");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_pending_dirty_remerge_full_frame_with_newer_update(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch moved = {0};
+  ViewerGfxPendingDirtyBatch final_batch = {0};
+  RECTANGLE_16 full = {0, 0, 99, 99};
+  RECTANGLE_16 newer = {40, 40, 49, 49};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 100, 100), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &full, 1, FALSE, 40, 100, 100),
+                         "add moved full-frame-equivalent batch");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &moved),
+                         "move full-frame batch");
+  ok = ok && expect_true(moved.full_frame, "moved batch is full frame");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &newer, 1, FALSE, 41, 100, 100),
+                         "add newer small pending while full-frame moved");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_remerge_locked(
+                             &viewer.gfx, &moved, moved.width, moved.height),
+                         "remerge moved full-frame batch");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &final_batch),
+                         "move final full-frame batch");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok && expect_true(final_batch.full_frame,
+                         "remerged full-frame remains full frame");
+  ok = ok && expect_uint64(final_batch.latest_generation, 41,
+                           "full-frame remerge keeps newer generation");
+  ok = ok && expect_uint64(final_batch.start_generation, 40,
+                           "full-frame remerge restores moved start");
+  ok = ok && expect_uint64(final_batch.update_count, 2,
+                           "full-frame remerge combines update counts");
+  ok = ok && expect_uint32(final_batch.rect_count, 1,
+                           "full-frame remerge has one rect");
+  ok = ok &&
+       expect_uint32(final_batch.rects[0].left, 0, "full-frame remerge left");
+  ok = ok &&
+       expect_uint32(final_batch.rects[0].top, 0, "full-frame remerge top");
+  ok = ok && expect_uint32(final_batch.rects[0].right, 99,
+                           "full-frame remerge right");
+  ok = ok && expect_uint32(final_batch.rects[0].bottom, 99,
+                           "full-frame remerge bottom");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_pending_dirty_denied_send_remerge_simulation(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch moved = {0};
+  ViewerGfxPendingDirtyBatch final_batch = {0};
+  RECTANGLE_16 moved_rect = {0, 0, 9, 9};
+  RECTANGLE_16 newer_rect = {30, 30, 39, 39};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 100, 100), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &moved_rect, 1, FALSE, 50, 100, 100),
+                         "add moved denied-send batch");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &moved),
+                         "move denied-send batch");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &newer_rect, 1, FALSE, 51, 100, 100),
+                         "add newer pending before denied remerge");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_remerge_locked(
+                             &viewer.gfx, &moved, moved.width, moved.height),
+                         "denied-send path remerges moved batch");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &final_batch),
+                         "move denied-send final pending");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok && expect_uint64(final_batch.latest_generation, 51,
+                           "denied remerge keeps newest generation");
+  ok = ok && expect_uint64(final_batch.start_generation, 50,
+                           "denied remerge restores moved start");
+  ok = ok && expect_uint64(final_batch.update_count, 2,
+                           "denied remerge combines update counts");
+  ok = ok && expect_uint32(final_batch.rect_count, 2,
+                           "denied remerge preserves both rects");
+  ok = ok && expect_uint32(final_batch.rects[0].left, newer_rect.left,
+                           "denied remerge keeps existing newer rect first");
+  ok = ok && expect_uint32(final_batch.rects[0].bottom, newer_rect.bottom,
+                           "denied remerge preserves newer rect bottom");
+  ok = ok && expect_uint32(final_batch.rects[1].left, moved_rect.left,
+                           "denied remerge appends moved rect");
+  ok = ok && expect_uint32(final_batch.rects[1].bottom, moved_rect.bottom,
+                           "denied remerge preserves moved rect bottom");
 
   uninit_test_viewer(&viewer);
   return ok;
@@ -2324,6 +2433,10 @@ int main(void) {
   if (!test_pending_dirty_empty_move_behavior())
     return 1;
   if (!test_pending_dirty_remerge_preserves_new_updates())
+    return 1;
+  if (!test_pending_dirty_remerge_full_frame_with_newer_update())
+    return 1;
+  if (!test_pending_dirty_denied_send_remerge_simulation())
     return 1;
   if (!test_pending_dirty_snapshot_overrides_generation())
     return 1;
