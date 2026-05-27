@@ -3,6 +3,11 @@ add_executable(test_viewer_state
     ${CMAKE_SOURCE_DIR}/src/viewer_internal.c
 )
 
+add_executable(test_viewer_auth
+    test_viewer_auth.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_auth.c
+)
+
 add_executable(test_pointer_shape
     test_pointer_shape.c
     ${CMAKE_SOURCE_DIR}/src/pointer_shape.c
@@ -76,7 +81,17 @@ target_include_directories(test_viewer_state PRIVATE
     ${FREERDP_BUILD}/winpr/include
 )
 
+target_include_directories(test_viewer_auth PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+)
+
 set_target_properties(test_viewer_state PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+)
+
+set_target_properties(test_viewer_auth PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
 )
@@ -250,6 +265,14 @@ add_test(NAME test_viewer_state
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_viewer_state PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_viewer_auth
+    COMMAND ${CMAKE_COMMAND}
+        -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DTEST_EXECUTABLE_NAME=test_viewer_auth${CMAKE_EXECUTABLE_SUFFIX}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
+)
+set_tests_properties(test_viewer_auth PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_pointer_shape
     COMMAND ${CMAKE_COMMAND}
