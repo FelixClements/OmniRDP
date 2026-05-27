@@ -1,6 +1,7 @@
 #include "backend.h"
 #include "platform_compat.h"
 #include "svc_log.h"
+#include "viewer_auth.h"
 #include "viewer_classic_transport.h"
 #include "viewer_gfx_pipeline.h"
 #include "viewer_internal.h"
@@ -283,15 +284,13 @@ static char *viewer_identity_field_to_utf8(const void *field, UINT32 length) {
 }
 
 static BOOL viewer_settings_credentials_to_utf8(freerdp_peer *peer,
-                                                char **viewer_user,
-                                                char **viewer_domain,
-                                                char **viewer_password) {
+                                                ViewerAuthCredentials *out) {
   rdpSettings *settings = NULL;
   const char *settings_user = NULL;
   const char *settings_domain = NULL;
   const char *settings_password = NULL;
 
-  if (!peer || !peer->context)
+  if (!peer || !peer->context || !out)
     return FALSE;
 
   settings = peer->context->settings;
@@ -302,59 +301,38 @@ static BOOL viewer_settings_credentials_to_utf8(freerdp_peer *peer,
   settings_domain = freerdp_settings_get_string(settings, FreeRDP_Domain);
   settings_password = freerdp_settings_get_string(settings, FreeRDP_Password);
 
-  if (!viewer_string_has_value(settings_user) &&
-      !viewer_string_has_value(settings_domain) &&
-      !viewer_string_has_value(settings_password))
-    return FALSE;
+  out->username = _strdup(settings_user ? settings_user : "");
+  out->domain = _strdup(settings_domain ? settings_domain : "");
+  out->password = _strdup(settings_password ? settings_password : "");
 
-  *viewer_user = _strdup(settings_user ? settings_user : "");
-  *viewer_domain = _strdup(settings_domain ? settings_domain : "");
-  *viewer_password = _strdup(settings_password ? settings_password : "");
-
-  if (!*viewer_user || !*viewer_domain || !*viewer_password) {
-    free(*viewer_user);
-    free(*viewer_domain);
-    free(*viewer_password);
-    *viewer_user = NULL;
-    *viewer_domain = NULL;
-    *viewer_password = NULL;
+  if (!out->username || !out->domain || !out->password) {
+    viewer_auth_credentials_clear(out);
     return FALSE;
   }
 
-  return TRUE;
+  return viewer_auth_credentials_usable(out) ? TRUE : FALSE;
 }
 
 static BOOL
 viewer_identity_credentials_to_utf8(const SEC_WINNT_AUTH_IDENTITY *identity,
-                                    char **viewer_user, char **viewer_domain,
-                                    char **viewer_password) {
-  if (!identity)
+                                    ViewerAuthCredentials *out) {
+  if (!identity || !out)
     return FALSE;
 
-  *viewer_user =
+  out->username =
       viewer_identity_field_to_utf8(identity->User, identity->UserLength);
-  *viewer_domain =
+  out->domain =
       viewer_identity_field_to_utf8(identity->Domain, identity->DomainLength);
-  *viewer_password = viewer_identity_field_to_utf8(identity->Password,
-                                                   identity->PasswordLength);
+  out->password = viewer_identity_field_to_utf8(identity->Password,
+                                                identity->PasswordLength);
 
-  if (!*viewer_user || !*viewer_domain || !*viewer_password) {
-    free(*viewer_user);
-    free(*viewer_domain);
-    free(*viewer_password);
-    *viewer_user = NULL;
-    *viewer_domain = NULL;
-    *viewer_password = NULL;
+  if (!out->username || !out->domain || !out->password ||
+      !viewer_auth_credentials_usable(out)) {
+    viewer_auth_credentials_clear(out);
     return FALSE;
   }
 
   return TRUE;
-}
-
-static const char *
-viewer_comparison_domain_label(const char *configured_domain) {
-  return viewer_string_has_value(configured_domain) ? configured_domain
-                                                    : "<local>";
 }
 
 static BOOL viewer_credentials_match_expected(const char *expected_user,
@@ -857,6 +835,16 @@ static void viewer_graphics_context_uninit(ViewerGraphicsContext *gfx) {
   memset(gfx, 0, sizeof(*gfx));
 }
 
+static void viewer_auth_state_reset(Viewer *viewer) {
+  if (!viewer)
+    return;
+
+  viewer->auth_state = VIEWER_AUTH_STATE_NONE;
+  viewer->auth_deferred_required = FALSE;
+  viewer->auth_deferred_checked = FALSE;
+  viewer->auth_deferred_accepted = FALSE;
+}
+
 static BOOL viewer_send_state_init(Viewer *viewer) {
   if (!viewer)
     return FALSE;
@@ -939,6 +927,7 @@ static void viewer_cleanup_slot_finish_locked(Viewer *viewer) {
   viewer->activated = FALSE;
   viewer->counted_in_viewer_count = FALSE;
   viewer->cleanup_in_progress = FALSE;
+  viewer_auth_state_reset(viewer);
   viewer->publish_ref_count = 0;
   viewer->needs_full_refresh = FALSE;
   viewer->stop_requested = FALSE;
@@ -1398,8 +1387,13 @@ static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
 static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
                                              Viewer *viewer, UINT64 now) {
   ViewerFramebufferSnapshot snapshot = {0};
+  ViewerGfxPendingDirtyBatch dirty_batch = {0};
   const char *reason = NULL;
   UINT64 last_sent_generation = 0;
+  UINT64 snapshot_generation = 0;
+  UINT32 original_dirty_rect_count = 0;
+  UINT32 snapshot_dirty_rect_count = 0;
+  BOOL diagnostic_full_frame_dirty = FALSE;
   ViewerGfxDirtySendStatus send_status = VIEWER_GFX_DIRTY_SEND_FAILED;
 
   if (!server || !viewer || !server->viewer_gfx_enabled)
@@ -1414,16 +1408,73 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
 
   EnterCriticalSection(&viewer->gfx.lock);
   last_sent_generation = viewer->gfx.dirty_last_sent_generation;
+  diagnostic_full_frame_dirty =
+      server->viewer_gfx_diagnostic_full_frame_dirty &&
+      viewer->gfx.initialized && viewer->gfx.use_rdpgfx;
+  if (!viewer_gfx_pipeline_pending_dirty_move_locked(&viewer->gfx,
+                                                     &dirty_batch)) {
+    LeaveCriticalSection(&viewer->gfx.lock);
+    return TRUE;
+  }
   LeaveCriticalSection(&viewer->gfx.lock);
 
-  if (!viewer_publisher_gfx_dirty_snapshot(&server->publisher,
-                                           &server->framebuffer,
-                                           last_sent_generation, &snapshot))
+  if (!viewer_framebuffer_snapshot(&server->framebuffer, &snapshot)) {
+    EnterCriticalSection(&viewer->gfx.lock);
+    (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+        &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+    LeaveCriticalSection(&viewer->gfx.lock);
+    viewer_classic_queues_signal(&viewer->classic_queues);
     return TRUE;
+  }
+
+  if (!viewer_gfx_pipeline_snapshot_apply_pending_dirty(&snapshot,
+                                                        &dirty_batch)) {
+    viewer_framebuffer_snapshot_free(&snapshot);
+    EnterCriticalSection(&viewer->gfx.lock);
+    (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+        &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+    LeaveCriticalSection(&viewer->gfx.lock);
+    viewer_classic_queues_signal(&viewer->classic_queues);
+    return TRUE;
+  }
+
+  snapshot_generation = snapshot.generation;
+  original_dirty_rect_count = snapshot.dirty_rect_count;
+  snapshot_dirty_rect_count = snapshot.dirty_rect_count;
+
+  if (diagnostic_full_frame_dirty) {
+    if (viewer_publisher_make_full_frame_dirty(&snapshot)) {
+      WLog_INFO(TAG,
+                "Viewer %u RDPEGFX diagnostic full-frame dirty forced: "
+                "generation=%" PRIu64 " original_dirty_rects=%u width=%u "
+                "height=%u",
+                viewer->id, snapshot_generation, original_dirty_rect_count,
+                snapshot.width, snapshot.height);
+    } else {
+      WLog_DBG(TAG,
+               "Viewer %u RDPEGFX diagnostic full-frame dirty skipped: "
+               "generation=%" PRIu64 " original_dirty_rects=%u width=%u "
+               "height=%u",
+               viewer->id, snapshot_generation, original_dirty_rect_count,
+               snapshot.width, snapshot.height);
+    }
+    snapshot_dirty_rect_count = snapshot.dirty_rect_count;
+  }
 
   if (!viewer_gfx_pipeline_dirty_update_allowed(server, viewer, &snapshot,
                                                 &reason)) {
+    WLog_DBG(TAG,
+             "Viewer %u RDPEGFX dirty update not sent: reason=%s "
+             "generation=%" PRIu64 " last_sent_generation=%" PRIu64
+             " dirty_rects=%u",
+             viewer->id, reason ? reason : "not allowed", snapshot_generation,
+             last_sent_generation, snapshot_dirty_rect_count);
     viewer_framebuffer_snapshot_free(&snapshot);
+    EnterCriticalSection(&viewer->gfx.lock);
+    (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+        &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+    LeaveCriticalSection(&viewer->gfx.lock);
+    viewer_classic_queues_signal(&viewer->classic_queues);
     return TRUE;
   }
 
@@ -1434,6 +1485,19 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
   if (send_status == VIEWER_GFX_DIRTY_SEND_FAILED)
     return viewer_gfx_handle_failure(server, viewer, now,
                                      "RDPEGFX dirty update send failed");
+
+  if (send_status == VIEWER_GFX_DIRTY_SEND_DEFERRED) {
+    WLog_DBG(TAG,
+             "Viewer %u RDPEGFX dirty update deferred: generation=%" PRIu64
+             " last_sent_generation=%" PRIu64 " dirty_rects=%u",
+             viewer->id, snapshot_generation, last_sent_generation,
+             snapshot_dirty_rect_count);
+    EnterCriticalSection(&viewer->gfx.lock);
+    (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+        &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+    LeaveCriticalSection(&viewer->gfx.lock);
+    viewer_classic_queues_signal(&viewer->classic_queues);
+  }
 
   return TRUE;
 }
@@ -1777,15 +1841,16 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
                             const SEC_WINNT_AUTH_IDENTITY *identity,
                             BOOL automatic) {
   ViewerServer *server = g_viewer_server;
-  char *viewer_user = NULL;
-  char *viewer_domain = NULL;
-  char *viewer_password = NULL;
-  const char *comparison_user = NULL;
-  const char *comparison_domain = NULL;
+  ViewerAuthCredentials identity_credentials = {0};
+  ViewerAuthCredentials settings_credentials = {0};
+  ViewerAuthCredentials selected_credentials = {0};
+  ViewerAuthSelection selection = {0};
+  Viewer *viewer = NULL;
   const char *credential_source = "none";
+  const char *viewer_user = "";
+  const char *viewer_domain = "";
+  const char *viewer_password = "";
   BOOL accepted = FALSE;
-
-  (void)automatic;
 
   if (!peer || !server) {
     WLog_WARN(TAG, "Viewer-side logon rejected: missing peer or server");
@@ -1796,8 +1861,13 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
             viewer_auth_mode_name(server->security.auth_mode),
             server->security.nla_enabled ? "true" : "false");
 
-  if (server->security.auth_mode == VIEWER_AUTH_MODE_NONE)
+  viewer = find_viewer_by_peer(peer);
+
+  if (server->security.auth_mode == VIEWER_AUTH_MODE_NONE) {
+    if (viewer)
+      viewer->auth_state = VIEWER_AUTH_STATE_ACCEPTED;
     return TRUE;
+  }
 
   if ((server->security.auth_mode == VIEWER_AUTH_MODE_BACKEND_CREDENTIALS) &&
       !server->backend) {
@@ -1809,22 +1879,66 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
     return FALSE;
   }
 
-  if (viewer_settings_credentials_to_utf8(peer, &viewer_user, &viewer_domain,
-                                          &viewer_password)) {
-    credential_source = "settings";
-  } else if (viewer_identity_credentials_to_utf8(
-                 identity, &viewer_user, &viewer_domain, &viewer_password)) {
-    credential_source = "identity";
-  } else {
-    viewer_user = _strdup("");
-    viewer_domain = _strdup("");
-    viewer_password = _strdup("");
-    credential_source = "none";
+  if (viewer_auth_should_defer_backend_credentials(server->security.nla_enabled,
+                                                   automatic)) {
+    if (!viewer) {
+      WLog_WARN(TAG,
+                "Viewer-side logon rejected: unable to defer auth without "
+                "viewer slot auth_mode=%s nla_enabled=false",
+                viewer_auth_mode_name(server->security.auth_mode));
+      return FALSE;
+    }
+
+    viewer->auth_state = VIEWER_AUTH_STATE_DEFERRED;
+    viewer->auth_deferred_required = TRUE;
+    viewer->auth_deferred_checked = FALSE;
+    viewer->auth_deferred_accepted = FALSE;
+    WLog_INFO(TAG,
+              "Viewer-side logon provisionally accepted pending deferred "
+              "settings credentials auth_mode=%s nla_enabled=false "
+              "credential_source=settings",
+              viewer_auth_mode_name(server->security.auth_mode));
+    return TRUE;
   }
 
-  if (!viewer_user || !viewer_domain || !viewer_password) {
+  (void)viewer_identity_credentials_to_utf8(identity, &identity_credentials);
+  (void)viewer_settings_credentials_to_utf8(peer, &settings_credentials);
+
+  selection = viewer_auth_select_credentials(&identity_credentials,
+                                             &settings_credentials,
+                                             server->security.nla_enabled);
+  credential_source = selection.source ? selection.source : "none";
+  if (!selection.credentials) {
+    WLog_WARN(
+        TAG,
+        "Viewer-side logon rejected: no usable credentials auth_mode=%s "
+        "nla_enabled=%s credential_source=%s identity_username_present=%s "
+        "identity_domain_present=%s identity_password_present=%s "
+        "settings_username_present=%s settings_domain_present=%s "
+        "settings_password_present=%s",
+        viewer_auth_mode_name(server->security.auth_mode),
+        server->security.nla_enabled ? "true" : "false", credential_source,
+        viewer_string_has_value(identity_credentials.username) ? "true"
+                                                               : "false",
+        viewer_string_has_value(identity_credentials.domain) ? "true" : "false",
+        viewer_string_has_value(identity_credentials.password) ? "true"
+                                                               : "false",
+        viewer_string_has_value(settings_credentials.username) ? "true"
+                                                               : "false",
+        viewer_string_has_value(settings_credentials.domain) ? "true" : "false",
+        viewer_string_has_value(settings_credentials.password) ? "true"
+                                                               : "false");
+    goto out;
+  }
+
+  selected_credentials.username = _strdup(selection.credentials->username);
+  selected_credentials.domain = _strdup(
+      selection.credentials->domain ? selection.credentials->domain : "");
+  selected_credentials.password = _strdup(selection.credentials->password);
+  if (!selected_credentials.username || !selected_credentials.domain ||
+      !selected_credentials.password) {
     WLog_WARN(TAG,
-              "Viewer-side logon rejected: failed to read credentials "
+              "Viewer-side logon rejected: failed to copy credentials "
               "auth_mode=%s nla_enabled=%s credential_source=%s",
               viewer_auth_mode_name(server->security.auth_mode),
               server->security.nla_enabled ? "true" : "false",

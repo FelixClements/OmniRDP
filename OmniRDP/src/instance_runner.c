@@ -637,16 +637,24 @@ int instance_runner_main(int argc, char *argv[]) {
     return 1;
   }
 
-  if ((viewer_auth_mode == VIEWER_AUTH_MODE_BACKEND_CREDENTIALS) &&
-      !inst->viewer_security_nla_enabled) {
-    LOG_E("instance_runner",
-          "Invalid viewer auth configuration: viewer.auth.mode=%s requires "
-          "viewer.security.nla_enabled=true for instance '%s'.",
-          inst->viewer_auth_mode, args.instance_name);
-    backend_disconnect(client);
-    backend_free(client);
-    svc_config_free(config);
-    return 1;
+  if (viewer_auth_mode == VIEWER_AUTH_MODE_BACKEND_CREDENTIALS) {
+    if (!inst->viewer_security_nla_enabled) {
+      LOG_W("instance_runner",
+            "Viewer auth configuration for instance '%s' uses "
+            "viewer.auth.mode=%s with viewer.security.nla_enabled=false. "
+            "This allows backend-local accounts to reach OmniRDP's "
+            "credential check because NLA validates against the OmniRDP "
+            "listener host/domain before application logon callbacks run.",
+            args.instance_name, inst->viewer_auth_mode);
+    }
+
+    if (!inst->viewer_security_tls_enabled) {
+      LOG_W("instance_runner",
+            "Viewer auth configuration for instance '%s' uses "
+            "viewer.auth.mode=%s without viewer.security.tls_enabled=true. "
+            "Enable TLS to protect viewer credentials in transit.",
+            args.instance_name, inst->viewer_auth_mode);
+    }
   }
 
   ViewerSecurityConfig viewer_security = {

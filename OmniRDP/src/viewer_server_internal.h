@@ -45,6 +45,13 @@ typedef enum {
   VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK
 } ViewerGfxNegotiationOutcome;
 
+typedef enum {
+  VIEWER_AUTH_STATE_NONE = 0,
+  VIEWER_AUTH_STATE_ACCEPTED,
+  VIEWER_AUTH_STATE_DEFERRED,
+  VIEWER_AUTH_STATE_REJECTED
+} ViewerAuthState;
+
 typedef struct {
   BOOL initialized;
   BOOL canonical_caps_valid;
@@ -134,6 +141,10 @@ typedef struct {
   BOOL activated;
   BOOL counted_in_viewer_count;
   BOOL cleanup_in_progress;
+  ViewerAuthState auth_state;
+  BOOL auth_deferred_required;
+  BOOL auth_deferred_checked;
+  BOOL auth_deferred_accepted;
   UINT32 publish_ref_count;
   BOOL needs_full_refresh;
   BOOL stop_requested;
