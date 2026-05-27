@@ -1833,6 +1833,8 @@ static int test_pending_dirty_accumulates_and_moves_latest_generation(void) {
                            "pending latest generation preserved");
   ok = ok &&
        expect_uint32(batch.rect_count, 2, "pending move returns both rects");
+  ok = ok && expect_uint64(batch.update_count, 2,
+                           "pending move records update count");
   ok = ok && expect_true(!batch.full_frame, "pending move not full frame");
   ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_move_locked(
                              &viewer.gfx, &batch),
@@ -1859,12 +1861,59 @@ static int test_pending_dirty_overflow_forces_full_frame(void) {
   LeaveCriticalSection(&viewer.gfx.lock);
 
   ok = ok && expect_true(batch.full_frame, "overflow becomes full frame");
+  ok = ok && expect_true(batch.overflow, "overflow metadata preserved");
   ok = ok &&
        expect_uint32(batch.rect_count, 1, "overflow full frame has one rect");
   ok = ok && expect_uint32(batch.rects[0].right, 99,
                            "overflow full frame right edge");
   ok = ok && expect_uint32(batch.rects[0].bottom, 99,
                            "overflow full frame bottom edge");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_pending_dirty_stale_generation_ignored(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  RECTANGLE_16 rect = {0, 0, 9, 9};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 100, 100), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  viewer.gfx.dirty_last_sent_generation = 20;
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &rect, 1, FALSE, 20, 100, 100),
+                         "equal generation ignored");
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &rect, 1, FALSE, 19, 100, 100),
+                         "older generation ignored");
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "stale generations create no pending dirty");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_pending_dirty_empty_move_behavior(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 100, 100), "viewer init");
+  batch.latest_generation = 123;
+  batch.rect_count = 9;
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(!viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "empty pending move returns false");
+  LeaveCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_uint64(batch.latest_generation, 0,
+                           "empty pending move clears output batch");
+  ok = ok && expect_uint32(batch.rect_count, 0,
+                           "empty pending move clears output rect count");
 
   uninit_test_viewer(&viewer);
   return ok;
@@ -2150,6 +2199,10 @@ int main(void) {
   if (!test_pending_dirty_accumulates_and_moves_latest_generation())
     return 1;
   if (!test_pending_dirty_overflow_forces_full_frame())
+    return 1;
+  if (!test_pending_dirty_stale_generation_ignored())
+    return 1;
+  if (!test_pending_dirty_empty_move_behavior())
     return 1;
   if (!test_pending_dirty_remerge_preserves_new_updates())
     return 1;

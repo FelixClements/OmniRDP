@@ -126,6 +126,7 @@ typedef struct {
   UINT32 pending_dirty_width;
   UINT32 pending_dirty_height;
   BOOL pending_dirty_full_frame;
+  BOOL pending_dirty_overflow;
   ViewerGfxCodec preferred_codec;
   ViewerGfxCodec selected_codec;
   ViewerGfxRfxContext *rfx_context;

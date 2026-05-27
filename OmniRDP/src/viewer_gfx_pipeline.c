@@ -242,6 +242,7 @@ void viewer_gfx_pipeline_pending_dirty_clear_locked(
   gfx->pending_dirty_width = 0;
   gfx->pending_dirty_height = 0;
   gfx->pending_dirty_full_frame = FALSE;
+  gfx->pending_dirty_overflow = FALSE;
 }
 
 static BOOL viewer_gfx_pipeline_pending_dirty_force_full_locked(
@@ -274,6 +275,9 @@ BOOL viewer_gfx_pipeline_pending_dirty_add_locked(
   if (!gfx || (generation == 0) || (width == 0) || (height == 0))
     return FALSE;
 
+  if (generation <= gfx->dirty_last_sent_generation)
+    return FALSE;
+
   if (!dirty_overflow && (dirty_rect_count > 0) && dirty_rects) {
     for (i = 0; i < dirty_rect_count; i++) {
       RECTANGLE_16 rect = {0};
@@ -300,6 +304,9 @@ BOOL viewer_gfx_pipeline_pending_dirty_add_locked(
   gfx->pending_dirty_width = width;
   gfx->pending_dirty_height = height;
 
+  if (dirty_overflow)
+    gfx->pending_dirty_overflow = TRUE;
+
   if (dirty_overflow || (dirty_rect_count == 0) || !dirty_rects ||
       gfx->pending_dirty_full_frame)
     return viewer_gfx_pipeline_pending_dirty_force_full_locked(gfx, generation,
@@ -323,9 +330,11 @@ BOOL viewer_gfx_pipeline_pending_dirty_add_locked(
     }
 
     if (!merged) {
-      if (gfx->pending_dirty_rect_count >= VIEWER_GFX_PENDING_DIRTY_MAX_RECTS)
+      if (gfx->pending_dirty_rect_count >= VIEWER_GFX_PENDING_DIRTY_MAX_RECTS) {
+        gfx->pending_dirty_overflow = TRUE;
         return viewer_gfx_pipeline_pending_dirty_force_full_locked(
             gfx, generation, width, height);
+      }
       gfx->pending_dirty_rects[gfx->pending_dirty_rect_count++] = rect;
     }
   }
@@ -364,6 +373,7 @@ BOOL viewer_gfx_pipeline_pending_dirty_move_locked(
   batch->width = gfx->pending_dirty_width;
   batch->height = gfx->pending_dirty_height;
   batch->full_frame = gfx->pending_dirty_full_frame;
+  batch->overflow = gfx->pending_dirty_overflow;
   for (i = 0; i < batch->rect_count; i++)
     batch->rects[i] = gfx->pending_dirty_rects[i];
 
@@ -380,7 +390,7 @@ BOOL viewer_gfx_pipeline_pending_dirty_remerge_locked(
       (batch->rect_count == 0))
     return FALSE;
   merged = viewer_gfx_pipeline_pending_dirty_add_locked(
-      gfx, batch->rects, batch->rect_count, batch->full_frame,
+      gfx, batch->rects, batch->rect_count, batch->overflow,
       batch->latest_generation, width, height);
   if (merged) {
     if ((batch->start_generation != 0) &&

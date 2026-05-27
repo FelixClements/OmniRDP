@@ -66,6 +66,7 @@ typedef struct {
   UINT32 width;
   UINT32 height;
   BOOL full_frame;
+  BOOL overflow;
 } ViewerGfxPendingDirtyBatch;
 
 BOOL viewer_gfx_pipeline_post_connect_locked(ViewerServer *server,
