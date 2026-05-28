@@ -160,7 +160,7 @@
       ],
       "priority": 8,
       "dependsOn": ["US-007"],
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
