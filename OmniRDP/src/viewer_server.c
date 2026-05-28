@@ -1461,15 +1461,36 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
 
   if (viewer_gfx_pipeline_poll_dirty_pacing(viewer, now, &reason) !=
       VIEWER_GFX_DIRTY_PACING_OK) {
+    UINT64 pending_area = 0;
+    UINT64 pending_start_generation = 0;
+    UINT64 pending_latest_generation = 0;
+    UINT64 fallback_count = 0;
+    UINT64 remerge_count = 0;
+    UINT64 in_flight_bytes = 0;
+    UINT32 in_flight_frames = 0;
+    UINT32 pending_rect_count = 0;
+
+    EnterCriticalSection(&viewer->gfx.lock);
+    in_flight_frames = viewer->gfx.dirty_in_flight_frames;
+    in_flight_bytes = viewer->gfx.dirty_in_flight_bytes;
+    pending_rect_count = viewer->gfx.pending_dirty_rect_count;
+    pending_area = viewer->gfx.pending_dirty_area;
+    pending_start_generation = viewer->gfx.pending_dirty_start_generation;
+    pending_latest_generation = viewer->gfx.pending_dirty_latest_generation;
+    fallback_count = viewer->gfx.dirty_diag_full_frame_fallbacks;
+    remerge_count = viewer->gfx.dirty_diag_remerges;
+    LeaveCriticalSection(&viewer->gfx.lock);
     WLog_DBG(TAG,
              "Viewer %u RDPEGFX dirty pacing suspended: reason=%s "
              "in_flight_frames=%u in_flight_bytes=%" PRIu64
-             " pending_generation=%" PRIu64 " pending_dirty_rects=%u",
-             viewer->id, reason ? reason : "unknown",
-             viewer->gfx.dirty_in_flight_frames,
-             viewer->gfx.dirty_in_flight_bytes,
-             viewer->gfx.pending_dirty_latest_generation,
-             viewer->gfx.pending_dirty_rect_count);
+             " pending_dirty_rects=%u pending_area=%" PRIu64
+             " pending_start_generation=%" PRIu64
+             " pending_latest_generation=%" PRIu64
+             " full_frame_fallbacks=%" PRIu64 " remerges=%" PRIu64,
+             viewer->id, reason ? reason : "unknown", in_flight_frames,
+             in_flight_bytes, pending_rect_count, pending_area,
+             pending_start_generation, pending_latest_generation,
+             fallback_count, remerge_count);
     if (reason && (strcmp(reason, "dirty ack timeout") == 0))
       return viewer_gfx_handle_failure(server, viewer, now, reason);
     return TRUE;
@@ -1544,17 +1565,37 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
 
   if (!viewer_gfx_pipeline_dirty_update_allowed(server, viewer, &snapshot,
                                                 &reason)) {
-    WLog_DBG(TAG,
-             "Viewer %u RDPEGFX dirty update not sent: reason=%s "
-             "generation=%" PRIu64 " last_sent_generation=%" PRIu64
-             " dirty_rects=%u",
-             viewer->id, reason ? reason : "not allowed", snapshot_generation,
-             last_sent_generation, snapshot_dirty_rect_count);
+    UINT64 pending_area = 0;
+    UINT64 pending_start_generation = 0;
+    UINT64 pending_latest_generation = 0;
+    UINT64 fallback_count = 0;
+    UINT64 remerge_count = 0;
+    UINT32 pending_rect_count = 0;
+
     viewer_framebuffer_snapshot_free(&snapshot);
     EnterCriticalSection(&viewer->gfx.lock);
     (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
         &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+    pending_rect_count = viewer->gfx.pending_dirty_rect_count;
+    pending_area = viewer->gfx.pending_dirty_area;
+    pending_start_generation = viewer->gfx.pending_dirty_start_generation;
+    pending_latest_generation = viewer->gfx.pending_dirty_latest_generation;
+    fallback_count = viewer->gfx.dirty_diag_full_frame_fallbacks;
+    remerge_count = viewer->gfx.dirty_diag_remerges;
     LeaveCriticalSection(&viewer->gfx.lock);
+    WLog_DBG(TAG,
+             "Viewer %u RDPEGFX dirty update not sent: reason=%s "
+             "generation=%" PRIu64 " last_sent_generation=%" PRIu64
+             " dirty_rects=%u moved_batch_generation=%" PRIu64
+             " pending_dirty_rects=%u pending_area=%" PRIu64
+             " pending_start_generation=%" PRIu64
+             " pending_latest_generation=%" PRIu64
+             " full_frame_fallbacks=%" PRIu64 " remerges=%" PRIu64,
+             viewer->id, reason ? reason : "not allowed", snapshot_generation,
+             last_sent_generation, snapshot_dirty_rect_count,
+             dirty_batch.latest_generation, pending_rect_count, pending_area,
+             pending_start_generation, pending_latest_generation,
+             fallback_count, remerge_count);
     viewer_classic_queues_signal(&viewer->classic_queues);
     return TRUE;
   }
@@ -1570,14 +1611,15 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
   if (send_status == VIEWER_GFX_DIRTY_SEND_DEFERRED) {
     BOOL forced_full_frame = FALSE;
     UINT64 fallback_generation = 0;
+    UINT64 pending_area = 0;
+    UINT64 pending_start_generation = 0;
+    UINT64 pending_latest_generation = 0;
+    UINT64 fallback_count = 0;
+    UINT64 remerge_count = 0;
     UINT32 fallback_width = 0;
     UINT32 fallback_height = 0;
+    UINT32 pending_rect_count = 0;
 
-    WLog_DBG(TAG,
-             "Viewer %u RDPEGFX dirty update deferred: generation=%" PRIu64
-             " last_sent_generation=%" PRIu64 " dirty_rects=%u",
-             viewer->id, snapshot_generation, last_sent_generation,
-             snapshot_dirty_rect_count);
     EnterCriticalSection(&viewer->gfx.lock);
     (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
         &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
@@ -1588,7 +1630,27 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
       fallback_width = viewer->gfx.pending_dirty_width;
       fallback_height = viewer->gfx.pending_dirty_height;
     }
+    pending_rect_count = viewer->gfx.pending_dirty_rect_count;
+    pending_area = viewer->gfx.pending_dirty_area;
+    pending_start_generation = viewer->gfx.pending_dirty_start_generation;
+    pending_latest_generation = viewer->gfx.pending_dirty_latest_generation;
+    fallback_count = viewer->gfx.dirty_diag_full_frame_fallbacks;
+    remerge_count = viewer->gfx.dirty_diag_remerges;
     LeaveCriticalSection(&viewer->gfx.lock);
+    WLog_DBG(TAG,
+             "Viewer %u RDPEGFX dirty update deferred: reason=%s "
+             "generation=%" PRIu64 " sent_generation=%" PRIu64
+             " last_sent_generation=%" PRIu64 " dirty_rects=%u"
+             " moved_batch_generation=%" PRIu64
+             " pending_dirty_rects=%u pending_area=%" PRIu64
+             " pending_start_generation=%" PRIu64
+             " pending_latest_generation=%" PRIu64
+             " full_frame_fallbacks=%" PRIu64 " remerges=%" PRIu64,
+             viewer->id, "dirty send deferred", snapshot_generation,
+             snapshot_generation, last_sent_generation,
+             snapshot_dirty_rect_count, dirty_batch.latest_generation,
+             pending_rect_count, pending_area, pending_start_generation,
+             pending_latest_generation, fallback_count, remerge_count);
     if (forced_full_frame) {
       WLog_INFO(TAG,
                 "Viewer %u RDPEGFX threshold full-frame dirty fallback: "

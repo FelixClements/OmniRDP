@@ -124,6 +124,11 @@ typedef struct {
   UINT64 pending_dirty_latest_generation;
   UINT64 pending_dirty_area;
   UINT64 pending_dirty_update_count;
+  UINT64 dirty_diag_accumulated_updates;
+  UINT64 dirty_diag_moved_batches;
+  UINT64 dirty_diag_remerges;
+  UINT64 dirty_diag_full_frame_fallbacks;
+  UINT64 dirty_diag_successful_sends;
   UINT32 pending_dirty_width;
   UINT32 pending_dirty_height;
   BOOL pending_dirty_full_frame;

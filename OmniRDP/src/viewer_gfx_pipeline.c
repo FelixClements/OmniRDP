@@ -230,6 +230,17 @@ static void viewer_gfx_pipeline_rect_union(RECTANGLE_16 *target,
     target->bottom = rect->bottom;
 }
 
+static void
+viewer_gfx_pipeline_reset_dirty_diagnostics_locked(ViewerGraphicsContext *gfx) {
+  if (!gfx)
+    return;
+  gfx->dirty_diag_accumulated_updates = 0;
+  gfx->dirty_diag_moved_batches = 0;
+  gfx->dirty_diag_remerges = 0;
+  gfx->dirty_diag_full_frame_fallbacks = 0;
+  gfx->dirty_diag_successful_sends = 0;
+}
+
 void viewer_gfx_pipeline_pending_dirty_clear_locked(
     ViewerGraphicsContext *gfx) {
   if (!gfx)
@@ -264,6 +275,7 @@ static BOOL viewer_gfx_pipeline_pending_dirty_force_full_locked(
   gfx->pending_dirty_height = height;
   if (reason)
     gfx->pending_dirty_full_frame_reason = reason;
+  gfx->dirty_diag_full_frame_fallbacks++;
   return TRUE;
 }
 
@@ -331,6 +343,7 @@ BOOL viewer_gfx_pipeline_pending_dirty_add_locked(
     gfx->pending_dirty_latest_generation = generation;
   gfx->pending_dirty_width = width;
   gfx->pending_dirty_height = height;
+  gfx->dirty_diag_accumulated_updates++;
 
   if (dirty_overflow)
     gfx->pending_dirty_overflow = TRUE;
@@ -414,6 +427,7 @@ BOOL viewer_gfx_pipeline_pending_dirty_move_locked(
   for (i = 0; i < batch->rect_count; i++)
     batch->rects[i] = gfx->pending_dirty_rects[i];
 
+  gfx->dirty_diag_moved_batches++;
   viewer_gfx_pipeline_pending_dirty_clear_locked(gfx);
   return TRUE;
 }
@@ -436,9 +450,11 @@ BOOL viewer_gfx_pipeline_pending_dirty_remerge_locked(
         ((gfx->pending_dirty_start_generation == 0) ||
          (batch->start_generation < gfx->pending_dirty_start_generation)))
       gfx->pending_dirty_start_generation = batch->start_generation;
-    if (merged)
+    if (merged) {
       gfx->pending_dirty_update_count =
           existing_update_count + batch->update_count;
+      gfx->dirty_diag_remerges++;
+    }
     return merged;
   }
   merged = viewer_gfx_pipeline_pending_dirty_add_locked(
@@ -451,6 +467,7 @@ BOOL viewer_gfx_pipeline_pending_dirty_remerge_locked(
       gfx->pending_dirty_start_generation = batch->start_generation;
     if (batch->update_count > 1)
       gfx->pending_dirty_update_count += batch->update_count - 1U;
+    gfx->dirty_diag_remerges++;
   }
   return merged;
 }
@@ -902,6 +919,7 @@ BOOL viewer_gfx_pipeline_init(Viewer *viewer) {
   viewer->gfx.preferred_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
   viewer->gfx.selected_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
   viewer->gfx.rfx_context = NULL;
+  viewer_gfx_pipeline_reset_dirty_diagnostics_locked(&viewer->gfx);
   return TRUE;
 }
 
@@ -926,6 +944,7 @@ void viewer_gfx_pipeline_uninit(Viewer *viewer) {
     gfx->vcm = NULL;
   }
   gfx->channel_opened = FALSE;
+  viewer_gfx_pipeline_reset_dirty_diagnostics_locked(gfx);
   LeaveCriticalSection(&gfx->lock);
 }
 
@@ -1426,6 +1445,7 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   gfx->dirty_last_sent_rect_count = snapshot->dirty_rect_count;
   gfx->dirty_last_sent_area = dirty_area;
   gfx->dirty_consecutive_deferred_sends = 0;
+  gfx->dirty_diag_successful_sends++;
   gfx->gfx_send_time_total_us += send_us;
   if (send_us > gfx->gfx_send_time_max_us)
     gfx->gfx_send_time_max_us = send_us;

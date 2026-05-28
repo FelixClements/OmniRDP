@@ -2382,6 +2382,66 @@ static int test_dirty_success_resets_consecutive_deferred_counter(void) {
   return ok;
 }
 
+static int test_dirty_diagnostic_counters_increment(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot dirty = make_dirty_snapshot(pixels, 68, 1);
+  RECTANGLE_16 rect = {0, 0, 1, 1};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &rect, 1, FALSE, 68, 4, 4),
+                         "diagnostic counter pending dirty accepted");
+  ok = ok && expect_uint64(viewer.gfx.dirty_diag_accumulated_updates, 1,
+                           "diagnostic accumulated counter increments");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "diagnostic counter pending dirty moved");
+  ok = ok && expect_uint64(viewer.gfx.dirty_diag_moved_batches, 1,
+                           "diagnostic moved counter increments");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_remerge_locked(
+                             &viewer.gfx, &batch, batch.width, batch.height),
+                         "diagnostic counter pending dirty remerged");
+  ok = ok && expect_uint64(viewer.gfx.dirty_diag_remerges, 1,
+                           "diagnostic remerge counter increments");
+  ok = ok && expect_uint64(viewer.gfx.dirty_diag_accumulated_updates, 2,
+                           "remerge records accumulated update");
+  viewer.gfx.dirty_consecutive_deferred_sends = 2;
+  ok = ok &&
+       expect_true(viewer_gfx_pipeline_note_dirty_deferred_locked(&viewer.gfx),
+                   "diagnostic forced full frame at threshold");
+  ok = ok && expect_uint64(viewer.gfx.dirty_diag_full_frame_fallbacks, 1,
+                           "diagnostic full-frame fallback counter increments");
+  viewer_gfx_pipeline_pending_dirty_clear_locked(&viewer.gfx);
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 131;
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &dirty),
+                           VIEWER_GFX_DIRTY_SEND_SENT,
+                           "diagnostic counter dirty send succeeds");
+  ok = ok &&
+       expect_uint64(viewer.gfx.dirty_diag_successful_sends, 1,
+                     "diagnostic successful dirty send counter increments");
+  viewer_gfx_pipeline_reset_dirty_state_locked(&viewer.gfx);
+  ok = ok && expect_uint64(viewer.gfx.dirty_diag_successful_sends, 1,
+                           "dirty reset preserves diagnostic counters");
+  ok = ok && expect_uint64(viewer.gfx.dirty_diag_remerges, 1,
+                           "dirty reset preserves remerge counter");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
 static int test_pending_dirty_stale_generation_ignored(void) {
   Viewer viewer = {0};
   ViewerGfxPendingDirtyBatch batch = {0};
@@ -2951,6 +3011,8 @@ int main(void) {
   if (!test_consecutive_deferred_dirty_forces_full_frame())
     return 1;
   if (!test_dirty_success_resets_consecutive_deferred_counter())
+    return 1;
+  if (!test_dirty_diagnostic_counters_increment())
     return 1;
   if (!test_pending_dirty_stale_generation_ignored())
     return 1;

@@ -708,6 +708,13 @@ int instance_runner_main(int argc, char *argv[]) {
   LOG_I("instance_runner",
         "Applied viewer GFX diagnostic-only full-frame dirty: enabled=%s",
         bool_str(inst->viewer_gfx_diagnostic_full_frame_dirty));
+  LOG_I("instance_runner",
+        "Viewer GFX dirty fallback defaults: enabled=%s codec=%s "
+        "diagnostic_full_frame_dirty=%s max_pending_rects=%u "
+        "area_fallback_percent=%u consecutive_defer_fallback_count=%u",
+        bool_str(inst->viewer_gfx_enabled),
+        instance_viewer_gfx_codec_name(inst->viewer_gfx_codec),
+        bool_str(inst->viewer_gfx_diagnostic_full_frame_dirty), 128U, 60U, 3U);
 
   /* Register FreeRDP WTS API */
   {
