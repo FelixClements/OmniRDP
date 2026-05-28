@@ -242,7 +242,7 @@
       "priority": 12,
       "dependsOn": ["US-011"],
       "passes": false,
-      "notes": ""
+      "notes": "Checklist created; runtime validation not run due missing real client/backend lab."
     },
     {
       "id": "US-013",
