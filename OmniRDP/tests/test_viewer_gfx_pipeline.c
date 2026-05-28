@@ -1430,6 +1430,7 @@ static int test_dirty_mapping_cleared_by_baseline(void) {
   ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 4,
                            "dirty bytes before baseline");
   epoch = viewer.gfx.frame_epoch;
+  viewer.gfx.dirty_consecutive_deferred_sends = 2;
   ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
                              &viewer.gfx, &pending, 1, FALSE, 55, 4, 4),
                          "baseline pending dirty seeded");
@@ -1446,6 +1447,8 @@ static int test_dirty_mapping_cleared_by_baseline(void) {
                            "baseline clears dirty bytes");
   ok = ok && expect_uint64(viewer.gfx.frame_epoch, epoch + 1U,
                            "baseline increments epoch");
+  ok = ok && expect_uint32(viewer.gfx.dirty_consecutive_deferred_sends, 0,
+                           "baseline clears deferred dirty counter");
   ok = ok && expect_uint32(viewer.gfx.pending_dirty_rect_count, 0,
                            "baseline clears pending dirty rect count");
   ok = ok && expect_uint64(viewer.gfx.pending_dirty_latest_generation, 0,
@@ -1488,6 +1491,7 @@ static int test_dirty_mapping_cleared_by_reset(void) {
   viewer.gfx.dirty_suspended_for_no_ack = TRUE;
   viewer.gfx.dirty_last_sent_generation = 71;
   viewer.gfx.dirty_last_acked_generation = 70;
+  viewer.gfx.dirty_consecutive_deferred_sends = 3;
   viewer.gfx.dirty_in_flight_bytes = 4;
   viewer.gfx.dirty_frame_sent_ts[0] = 1234;
   ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
@@ -1505,6 +1509,8 @@ static int test_dirty_mapping_cleared_by_reset(void) {
                            "reset clears last sent generation");
   ok = ok && expect_uint64(viewer.gfx.dirty_last_acked_generation, 0,
                            "reset clears last acked generation");
+  ok = ok && expect_uint32(viewer.gfx.dirty_consecutive_deferred_sends, 0,
+                           "reset clears deferred dirty counter");
   ok = ok && expect_true(!viewer.gfx.dirty_acknowledgements_suspended,
                          "reset clears ack suspension policy flag");
   ok = ok && expect_true(!viewer.gfx.dirty_suspended_for_no_ack,
@@ -2247,6 +2253,10 @@ static int test_pending_dirty_region_union_and_thresholds(void) {
                          "move 129 sparse dirty rects");
   LeaveCriticalSection(&viewer.gfx.lock);
   ok = ok && expect_true(batch.full_frame, "129 sparse rects force full frame");
+  ok = ok && expect_true(batch.full_frame_reason &&
+                             (strcmp(batch.full_frame_reason,
+                                     "pending rectangle count threshold") == 0),
+                         "129 sparse rects record threshold reason");
   ok = ok && expect_true(batch.overflow,
                          "129 sparse rects preserve overflow metadata");
   ok = ok && expect_uint32(batch.rect_count, 1,
@@ -2265,6 +2275,10 @@ static int test_pending_dirty_region_union_and_thresholds(void) {
                          "move greater-than-60-percent dirty rect");
   LeaveCriticalSection(&viewer.gfx.lock);
   ok = ok && expect_true(batch.full_frame, ">60 percent forces full frame");
+  ok = ok && expect_true(batch.full_frame_reason &&
+                             (strcmp(batch.full_frame_reason,
+                                     "pending area threshold") == 0),
+                         ">60 percent records threshold reason");
   ok = ok && expect_uint32(batch.rect_count, 1,
                            ">60 percent produces one full-frame rect");
   ok = ok &&
@@ -2289,6 +2303,81 @@ static int test_pending_dirty_region_union_and_thresholds(void) {
   ok =
       ok && expect_uint32(batch.rects[0].bottom, 99, "empty full-frame bottom");
 
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_consecutive_deferred_dirty_forces_full_frame(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  RECTANGLE_16 rect = {10, 10, 19, 19};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 100, 100), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &rect, 1, FALSE, 66, 100, 100),
+                         "consecutive defer pending dirty seeded");
+  ok = ok &&
+       expect_true(!viewer_gfx_pipeline_note_dirty_deferred_locked(&viewer.gfx),
+                   "first deferred dirty does not force full frame");
+  ok = ok &&
+       expect_true(!viewer_gfx_pipeline_note_dirty_deferred_locked(&viewer.gfx),
+                   "second deferred dirty does not force full frame");
+  ok = ok &&
+       expect_true(viewer_gfx_pipeline_note_dirty_deferred_locked(&viewer.gfx),
+                   "third deferred dirty forces full frame");
+  ok = ok && expect_uint32(viewer.gfx.dirty_consecutive_deferred_sends, 3,
+                           "consecutive defer counter reaches threshold");
+  ok = ok && expect_true(viewer.gfx.pending_dirty_full_frame,
+                         "consecutive defer marks pending dirty full frame");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move consecutive defer full-frame batch");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok &&
+       expect_true(batch.full_frame, "consecutive defer batch is full frame");
+  ok = ok && expect_true(batch.full_frame_reason &&
+                             (strcmp(batch.full_frame_reason,
+                                     "consecutive deferred dirty sends") == 0),
+                         "consecutive defer records full-frame reason");
+  ok = ok && expect_uint32(batch.rect_count, 1,
+                           "consecutive defer full frame has one rect");
+  ok = ok && expect_uint32(batch.rects[0].left, 0,
+                           "consecutive defer full frame left");
+  ok = ok &&
+       expect_uint32(batch.rects[0].top, 0, "consecutive defer full frame top");
+  ok = ok && expect_uint32(batch.rects[0].right, 99,
+                           "consecutive defer full frame right");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 99,
+                           "consecutive defer full frame bottom");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_success_resets_consecutive_deferred_counter(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot dirty = make_dirty_snapshot(pixels, 67, 1);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 130;
+  viewer.gfx.dirty_consecutive_deferred_sends = 2;
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &dirty),
+                           VIEWER_GFX_DIRTY_SEND_SENT,
+                           "dirty send succeeds after defer counter");
+  ok = ok && expect_uint32(viewer.gfx.dirty_consecutive_deferred_sends, 0,
+                           "dirty success resets deferred counter");
+
+  viewer.gfx.rdpgfx = NULL;
   uninit_test_viewer(&viewer);
   return ok;
 }
@@ -2858,6 +2947,10 @@ int main(void) {
   if (!test_pending_dirty_overflow_forces_full_frame())
     return 1;
   if (!test_pending_dirty_region_union_and_thresholds())
+    return 1;
+  if (!test_consecutive_deferred_dirty_forces_full_frame())
+    return 1;
+  if (!test_dirty_success_resets_consecutive_deferred_counter())
     return 1;
   if (!test_pending_dirty_stale_generation_ignored())
     return 1;

@@ -706,7 +706,7 @@ int instance_runner_main(int argc, char *argv[]) {
   viewer_server_set_gfx_diagnostic_full_frame_dirty(
       server, inst->viewer_gfx_diagnostic_full_frame_dirty ? TRUE : FALSE);
   LOG_I("instance_runner",
-        "Applied viewer GFX diagnostic full-frame dirty: enabled=%s",
+        "Applied viewer GFX diagnostic-only full-frame dirty: enabled=%s",
         bool_str(inst->viewer_gfx_diagnostic_full_frame_dirty));
 
   /* Register FreeRDP WTS API */

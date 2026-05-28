@@ -1511,6 +1511,18 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
   original_dirty_rect_count = snapshot.dirty_rect_count;
   snapshot_dirty_rect_count = snapshot.dirty_rect_count;
 
+  if (dirty_batch.full_frame_reason &&
+      ((strcmp(dirty_batch.full_frame_reason,
+               "pending rectangle count threshold") == 0) ||
+       (strcmp(dirty_batch.full_frame_reason, "pending area threshold") ==
+        0))) {
+    WLog_INFO(TAG,
+              "Viewer %u RDPEGFX threshold full-frame dirty fallback: "
+              "generation=%" PRIu64 " reason=%s width=%u height=%u",
+              viewer->id, snapshot_generation, dirty_batch.full_frame_reason,
+              dirty_batch.width, dirty_batch.height);
+  }
+
   if (diagnostic_full_frame_dirty) {
     if (viewer_publisher_make_full_frame_dirty(&snapshot)) {
       WLog_INFO(TAG,
@@ -1556,6 +1568,11 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
                                      "RDPEGFX dirty update send failed");
 
   if (send_status == VIEWER_GFX_DIRTY_SEND_DEFERRED) {
+    BOOL forced_full_frame = FALSE;
+    UINT64 fallback_generation = 0;
+    UINT32 fallback_width = 0;
+    UINT32 fallback_height = 0;
+
     WLog_DBG(TAG,
              "Viewer %u RDPEGFX dirty update deferred: generation=%" PRIu64
              " last_sent_generation=%" PRIu64 " dirty_rects=%u",
@@ -1564,7 +1581,22 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
     EnterCriticalSection(&viewer->gfx.lock);
     (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
         &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+    forced_full_frame =
+        viewer_gfx_pipeline_note_dirty_deferred_locked(&viewer->gfx);
+    if (forced_full_frame) {
+      fallback_generation = viewer->gfx.pending_dirty_latest_generation;
+      fallback_width = viewer->gfx.pending_dirty_width;
+      fallback_height = viewer->gfx.pending_dirty_height;
+    }
     LeaveCriticalSection(&viewer->gfx.lock);
+    if (forced_full_frame) {
+      WLog_INFO(TAG,
+                "Viewer %u RDPEGFX threshold full-frame dirty fallback: "
+                "generation=%" PRIu64
+                " reason=consecutive deferred dirty sends width=%u height=%u",
+                viewer->id, fallback_generation, fallback_width,
+                fallback_height);
+    }
     viewer_classic_queues_signal(&viewer->classic_queues);
   }
 

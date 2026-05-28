@@ -67,6 +67,7 @@ typedef struct {
   UINT32 height;
   BOOL full_frame;
   BOOL overflow;
+  const char *full_frame_reason;
 } ViewerGfxPendingDirtyBatch;
 
 BOOL viewer_gfx_pipeline_post_connect_locked(ViewerServer *server,
@@ -112,6 +113,7 @@ BOOL viewer_gfx_pipeline_pending_dirty_move_locked(
 BOOL viewer_gfx_pipeline_pending_dirty_remerge_locked(
     ViewerGraphicsContext *gfx, const ViewerGfxPendingDirtyBatch *batch,
     UINT32 width, UINT32 height);
+BOOL viewer_gfx_pipeline_note_dirty_deferred_locked(ViewerGraphicsContext *gfx);
 BOOL viewer_gfx_pipeline_snapshot_apply_pending_dirty(
     ViewerFramebufferSnapshot *snapshot,
     const ViewerGfxPendingDirtyBatch *batch);

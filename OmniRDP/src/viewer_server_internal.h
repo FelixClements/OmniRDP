@@ -107,6 +107,7 @@ typedef struct {
   UINT64 dirty_max_in_flight_bytes;
   UINT32 dirty_in_flight_frames;
   UINT32 dirty_max_in_flight_frames;
+  UINT32 dirty_consecutive_deferred_sends;
   BOOL dirty_suspended_for_no_ack;
   BOOL dirty_acknowledgements_suspended;
   BOOL dirty_updates_enabled;
@@ -127,6 +128,7 @@ typedef struct {
   UINT32 pending_dirty_height;
   BOOL pending_dirty_full_frame;
   BOOL pending_dirty_overflow;
+  const char *pending_dirty_full_frame_reason;
   ViewerGfxCodec preferred_codec;
   ViewerGfxCodec selected_codec;
   ViewerGfxRfxContext *rfx_context;
