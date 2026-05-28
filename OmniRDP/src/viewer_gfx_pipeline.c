@@ -412,6 +412,10 @@ BOOL viewer_gfx_pipeline_snapshot_apply_pending_dirty(
       (batch->rect_count == 0))
     return FALSE;
 
+  if (((batch->width != 0) && (batch->width != snapshot->width)) ||
+      ((batch->height != 0) && (batch->height != snapshot->height)))
+    return FALSE;
+
   if (batch->full_frame) {
     if (!viewer_gfx_pipeline_full_frame_rect(snapshot->width, snapshot->height,
                                              &snapshot->dirty_rects[0]))
@@ -855,6 +859,7 @@ void viewer_gfx_pipeline_uninit(Viewer *viewer) {
     return;
 
   EnterCriticalSection(&gfx->lock);
+  viewer_gfx_pipeline_reset_dirty_state_locked(gfx);
   viewer_gfx_rfx_context_free(gfx->rfx_context);
   gfx->rfx_context = NULL;
   if (gfx->rdpgfx) {

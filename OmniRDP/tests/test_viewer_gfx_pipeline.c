@@ -1587,6 +1587,134 @@ static int test_stale_ack_after_invalidate_does_not_clear_or_unsuspend(void) {
   return ok;
 }
 
+static int test_uninit_clears_pending_dirty_state(void) {
+  Viewer viewer = {0};
+  RECTANGLE_16 pending = {0, 0, 1, 1};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  viewer.gfx.dirty_last_sent_generation = 22;
+  viewer.gfx.dirty_last_acked_generation = 21;
+  viewer.gfx.dirty_in_flight_frames = 1;
+  viewer.gfx.dirty_in_flight_bytes = 4;
+  viewer.gfx.dirty_suspended_for_no_ack = TRUE;
+  viewer.gfx.dirty_acknowledgements_suspended = TRUE;
+  viewer.gfx.dirty_frame_valid[0] = TRUE;
+  viewer.gfx.dirty_frame_ids[0] = 7;
+  viewer.gfx.dirty_frame_sent_ts[0] = 100;
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &pending, 1, FALSE, 23, 4, 4),
+                         "uninit pending dirty seeded");
+
+  viewer_gfx_pipeline_uninit(&viewer);
+  ok = ok && expect_uint32(viewer.gfx.pending_dirty_rect_count, 0,
+                           "uninit clears pending dirty rect count");
+  ok = ok && expect_uint64(viewer.gfx.pending_dirty_latest_generation, 0,
+                           "uninit clears pending dirty generation");
+  ok = ok && expect_true(!viewer.gfx.pending_dirty_full_frame,
+                         "uninit clears pending dirty full-frame flag");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "uninit clears dirty in-flight");
+  ok = ok && expect_uint64(viewer.gfx.dirty_in_flight_bytes, 0,
+                           "uninit clears dirty bytes");
+  ok = ok && expect_true(!viewer.gfx.dirty_suspended_for_no_ack,
+                         "uninit clears no-ack suspension");
+  ok = ok && expect_true(!viewer.gfx.dirty_acknowledgements_suspended,
+                         "uninit clears ack policy suspension");
+  ok = ok && expect_true(!viewer.gfx.dirty_frame_valid[0],
+                         "uninit clears dirty frame map");
+  ok = ok && expect_true(viewer.gfx.rfx_context == NULL,
+                         "uninit leaves RFX context null");
+  ok = ok && expect_true(viewer.gfx.rdpgfx == NULL,
+                         "uninit leaves RDPEGFX context null");
+
+  DeleteCriticalSection(&viewer.send_lock);
+  DeleteCriticalSection(&viewer.gfx.lock);
+  return ok;
+}
+
+static int test_classic_fallback_clears_pending_dirty_state(void) {
+  Viewer viewer = {0};
+  ViewerGfxJoinResult result = {0};
+  RECTANGLE_16 pending = {0, 0, 1, 1};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  viewer.gfx.ready = TRUE;
+  viewer.gfx.use_rdpgfx = TRUE;
+  viewer.gfx.caps_ready = TRUE;
+  viewer.gfx.dirty_updates_enabled = TRUE;
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &pending, 1, FALSE, 31, 4, 4),
+                         "classic fallback pending dirty seeded");
+
+  viewer_gfx_pipeline_enter_classic_fallback(&viewer, 200, "test fallback",
+                                             &result);
+  ok = ok && expect_true(!viewer.gfx.use_rdpgfx,
+                         "classic fallback disables RDPEGFX use");
+  ok = ok && expect_true(!viewer.gfx.dirty_updates_enabled,
+                         "classic fallback disables dirty updates");
+  ok = ok && expect_uint32(viewer.gfx.pending_dirty_rect_count, 0,
+                           "classic fallback clears pending dirty rect count");
+  ok = ok && expect_uint64(viewer.gfx.pending_dirty_latest_generation, 0,
+                           "classic fallback clears pending dirty generation");
+  ok = ok &&
+       expect_true(!viewer.gfx.pending_dirty_full_frame,
+                   "classic fallback clears pending dirty full-frame flag");
+  ok = ok && expect_uint32(result.actions,
+                           VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK,
+                           "classic fallback reports fallback action");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_pending_dirty_dimension_mismatch_discard(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 55, 1);
+  RECTANGLE_16 first = {0, 0, 1, 1};
+  RECTANGLE_16 second = {2, 2, 3, 3};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 8, 8), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &first, 1, FALSE, 41, 4, 4),
+                         "dimension mismatch seeds first pending dirty");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &second, 1, FALSE, 42, 8, 8),
+                         "dimension mismatch accepts new surface dirty");
+  ok = ok && expect_uint32(viewer.gfx.pending_dirty_rect_count, 1,
+                           "dimension mismatch discards old pending dirty");
+  ok = ok && expect_uint32(viewer.gfx.pending_dirty_width, 8,
+                           "dimension mismatch records new width");
+  ok = ok && expect_uint32(viewer.gfx.pending_dirty_height, 8,
+                           "dimension mismatch records new height");
+  ok = ok && expect_uint64(viewer.gfx.pending_dirty_latest_generation, 42,
+                           "dimension mismatch records new generation");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "dimension mismatch moves new batch");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok && expect_true(!viewer_gfx_pipeline_snapshot_apply_pending_dirty(
+                             &snapshot, &batch),
+                         "dimension mismatch apply rejected");
+  ok = ok && expect_uint64(snapshot.generation, 55,
+                           "dimension mismatch leaves snapshot generation");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "dimension mismatch leaves snapshot rect count");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 1,
+                           "dimension mismatch leaves snapshot rect left");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].right, 1,
+                           "dimension mismatch leaves snapshot rect right");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
 static ViewerFramebufferSnapshot make_sized_snapshot(BYTE *pixels, UINT32 width,
                                                      UINT32 height,
                                                      UINT64 generation,
@@ -2694,6 +2822,12 @@ int main(void) {
   if (!test_dirty_mapping_cleared_by_reset())
     return 1;
   if (!test_stale_ack_after_invalidate_does_not_clear_or_unsuspend())
+    return 1;
+  if (!test_uninit_clears_pending_dirty_state())
+    return 1;
+  if (!test_classic_fallback_clears_pending_dirty_state())
+    return 1;
+  if (!test_pending_dirty_dimension_mismatch_discard())
     return 1;
   if (!test_live_resize_schedules_fresh_baseline())
     return 1;
