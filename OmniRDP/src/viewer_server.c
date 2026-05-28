@@ -1461,6 +1461,15 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
 
   if (viewer_gfx_pipeline_poll_dirty_pacing(viewer, now, &reason) !=
       VIEWER_GFX_DIRTY_PACING_OK) {
+    WLog_DBG(TAG,
+             "Viewer %u RDPEGFX dirty pacing suspended: reason=%s "
+             "in_flight_frames=%u in_flight_bytes=%" PRIu64
+             " pending_generation=%" PRIu64 " pending_dirty_rects=%u",
+             viewer->id, reason ? reason : "unknown",
+             viewer->gfx.dirty_in_flight_frames,
+             viewer->gfx.dirty_in_flight_bytes,
+             viewer->gfx.pending_dirty_latest_generation,
+             viewer->gfx.pending_dirty_rect_count);
     if (reason && (strcmp(reason, "dirty ack timeout") == 0))
       return viewer_gfx_handle_failure(server, viewer, now, reason);
     return TRUE;

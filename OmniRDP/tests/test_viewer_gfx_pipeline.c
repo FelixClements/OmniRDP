@@ -1773,6 +1773,106 @@ static int test_dirty_byte_backpressure_and_ack_release(void) {
   return ok;
 }
 
+static int test_dirty_pacing_frame_limit_preserves_pending_dirty(void) {
+  Viewer viewer = {0};
+  RECTANGLE_16 rect = {0, 0, 1, 1};
+  const char *reason = NULL;
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &rect, 1, FALSE, 130, 4, 4),
+                         "add pending dirty before frame pacing");
+  viewer.gfx.dirty_max_in_flight_frames = 1;
+  viewer.gfx.dirty_in_flight_frames = 1;
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok &&
+       expect_uint32(viewer_gfx_pipeline_poll_dirty_pacing(&viewer, 1, &reason),
+                     VIEWER_GFX_DIRTY_PACING_SUSPENDED,
+                     "frame limit suspends dirty pacing");
+  ok = ok &&
+       expect_true(reason && (strcmp(reason, "in-flight limit reached") == 0),
+                   "frame limit reason reported");
+  ok = ok && expect_uint32(viewer.gfx.pending_dirty_rect_count, 1,
+                           "frame pacing leaves pending dirty unmoved");
+  ok = ok && expect_uint64(viewer.gfx.pending_dirty_latest_generation, 130,
+                           "frame pacing preserves pending generation");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_pacing_byte_limit_preserves_pending_dirty(void) {
+  Viewer viewer = {0};
+  RECTANGLE_16 rect = {0, 0, 1, 1};
+  const char *reason = NULL;
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &rect, 1, FALSE, 131, 4, 4),
+                         "add pending dirty before byte pacing");
+  viewer.gfx.dirty_max_in_flight_frames = 2;
+  viewer.gfx.dirty_max_in_flight_bytes = 4;
+  viewer.gfx.dirty_in_flight_bytes = 4;
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok &&
+       expect_uint32(viewer_gfx_pipeline_poll_dirty_pacing(&viewer, 1, &reason),
+                     VIEWER_GFX_DIRTY_PACING_SUSPENDED,
+                     "byte limit suspends dirty pacing");
+  ok = ok && expect_true(reason && (strcmp(reason, "byte limit reached") == 0),
+                         "byte limit reason reported");
+  ok = ok && expect_uint32(viewer.gfx.pending_dirty_rect_count, 1,
+                           "byte pacing leaves pending dirty unmoved");
+  ok = ok && expect_uint64(viewer.gfx.pending_dirty_latest_generation, 131,
+                           "byte pacing preserves pending generation");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_pacing_frame_map_full_preserves_pending_dirty(void) {
+  Viewer viewer = {0};
+  RECTANGLE_16 rect = {0, 0, 1, 1};
+  const char *reason = NULL;
+  UINT32 i = 0;
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  EnterCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &rect, 1, FALSE, 132, 4, 4),
+                         "add pending dirty before map pacing");
+  viewer.gfx.dirty_max_in_flight_frames =
+      VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY + 10U;
+  viewer.gfx.dirty_in_flight_frames = VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY - 1U;
+  for (i = 0; i < VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY; i++) {
+    viewer.gfx.dirty_frame_valid[i] = TRUE;
+    viewer.gfx.dirty_frame_ids[i] = i + 1U;
+    viewer.gfx.dirty_frame_sent_ts[i] = 1;
+  }
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok &&
+       expect_uint32(viewer_gfx_pipeline_poll_dirty_pacing(&viewer, 1, &reason),
+                     VIEWER_GFX_DIRTY_PACING_SUSPENDED,
+                     "full map suspends dirty pacing");
+  ok =
+      ok && expect_true(reason && (strcmp(reason, "dirty frame map full") == 0),
+                        "full map reason reported");
+  ok = ok && expect_uint32(viewer.gfx.pending_dirty_rect_count, 1,
+                           "map pacing leaves pending dirty unmoved");
+  ok = ok && expect_uint64(viewer.gfx.pending_dirty_latest_generation, 132,
+                           "map pacing preserves pending generation");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
 static int test_frame_id_wrap_skips_zero_and_starts_epoch(void) {
   ViewerServer server = {0};
   Viewer viewer = {0};
@@ -2529,6 +2629,12 @@ int main(void) {
   if (!test_dimension_mismatch_dirty_deferred_without_frame())
     return 1;
   if (!test_dirty_byte_backpressure_and_ack_release())
+    return 1;
+  if (!test_dirty_pacing_frame_limit_preserves_pending_dirty())
+    return 1;
+  if (!test_dirty_pacing_byte_limit_preserves_pending_dirty())
+    return 1;
+  if (!test_dirty_pacing_frame_map_full_preserves_pending_dirty())
     return 1;
   if (!test_frame_id_wrap_skips_zero_and_starts_epoch())
     return 1;

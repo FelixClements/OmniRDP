@@ -1184,6 +1184,8 @@ viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
                                       const char **reason) {
   ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
   ViewerGfxDirtyPacingStatus status = VIEWER_GFX_DIRTY_PACING_OK;
+  UINT32 max_in_flight = 0;
+  BOOL map_full = TRUE;
   UINT32 i = 0;
 
   if (reason)
@@ -1196,6 +1198,11 @@ viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
   }
 
   EnterCriticalSection(&gfx->lock);
+  viewer_gfx_pipeline_ensure_dirty_limits_locked(gfx);
+  max_in_flight = gfx->dirty_max_in_flight_frames;
+  if (max_in_flight > VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY)
+    max_in_flight = VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY;
+
   if (gfx->dirty_suspended_for_no_ack ||
       gfx->dirty_acknowledgements_suspended) {
     status = VIEWER_GFX_DIRTY_PACING_SUSPENDED;
@@ -1206,7 +1213,12 @@ viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
   } else {
     for (i = 0; i < VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY; i++) {
       UINT64 sent_ts = gfx->dirty_frame_sent_ts[i];
-      if (!gfx->dirty_frame_valid[i] || (sent_ts == 0))
+      if (!gfx->dirty_frame_valid[i]) {
+        map_full = FALSE;
+        continue;
+      }
+
+      if (sent_ts == 0)
         continue;
 
       if (now >= sent_ts &&
@@ -1216,6 +1228,24 @@ viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
         if (reason)
           *reason = "dirty ack timeout";
         break;
+      }
+    }
+
+    if (status == VIEWER_GFX_DIRTY_PACING_OK) {
+      if (gfx->dirty_in_flight_frames >= max_in_flight) {
+        status = VIEWER_GFX_DIRTY_PACING_SUSPENDED;
+        if (reason)
+          *reason = "in-flight limit reached";
+      } else if (map_full) {
+        status = VIEWER_GFX_DIRTY_PACING_SUSPENDED;
+        if (reason)
+          *reason = "dirty frame map full";
+      } else if ((gfx->dirty_max_in_flight_bytes > 0) &&
+                 (gfx->dirty_in_flight_bytes >=
+                  gfx->dirty_max_in_flight_bytes)) {
+        status = VIEWER_GFX_DIRTY_PACING_SUSPENDED;
+        if (reason)
+          *reason = "byte limit reached";
       }
     }
   }
