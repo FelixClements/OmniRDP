@@ -69,4 +69,4 @@ Suggested log patterns from current code:
 
 ## Limitations / blockers
 
-US-012 remains pending because runtime validation failed. Blocker/follow-up: area-threshold full-frame fallback storm freezes MSTSC during window drag; fix and retest uncompressed RDPEGFX before marking US-012 complete.
+US-012 remains pending because runtime validation failed. Mitigation implemented: uncompressed RDPEGFX no longer promotes >60% pending area to full-frame, while RFX/non-uncompressed area fallback remains unchanged. Runtime retest is required to confirm the window-drag MSTSC freeze is resolved before marking US-012 complete.

@@ -396,9 +396,12 @@ BOOL viewer_gfx_pipeline_pending_dirty_add_locked(
       gfx->pending_dirty_rects, gfx->pending_dirty_rect_count);
   full_area = (UINT64)width * (UINT64)height;
   if ((full_area > 0) &&
-      (gfx->pending_dirty_area > ((full_area * 60ULL) / 100ULL)))
+      (gfx->pending_dirty_area > ((full_area * 60ULL) / 100ULL))) {
+    if (gfx->selected_codec == VIEWER_GFX_CODEC_UNCOMPRESSED)
+      return TRUE;
     return viewer_gfx_pipeline_pending_dirty_force_full_locked(
         gfx, generation, width, height, "pending area threshold");
+  }
 
   return TRUE;
 }

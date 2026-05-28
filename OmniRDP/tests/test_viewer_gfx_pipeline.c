@@ -2274,17 +2274,35 @@ static int test_pending_dirty_region_union_and_thresholds(void) {
                              &viewer.gfx, &batch),
                          "move greater-than-60-percent dirty rect");
   LeaveCriticalSection(&viewer.gfx.lock);
-  ok = ok && expect_true(batch.full_frame, ">60 percent forces full frame");
+  ok = ok && expect_true(!batch.full_frame,
+                         "uncompressed >60 percent preserves dirty rect");
+  ok = ok && expect_uint32(batch.rect_count, 1,
+                           "uncompressed >60 percent keeps one dirty rect");
+  ok = ok &&
+       expect_uint32(batch.rects[0].right, 60, "uncompressed large rect right");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 99,
+                           "uncompressed large rect bottom");
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &area_rect, 1, FALSE, 66, 100, 100),
+                         "RFX greater-than-60-percent dirty rect accepted");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move RFX greater-than-60-percent dirty rect");
+  LeaveCriticalSection(&viewer.gfx.lock);
+  ok = ok && expect_true(batch.full_frame, "RFX >60 percent forces full frame");
   ok = ok && expect_true(batch.full_frame_reason &&
                              (strcmp(batch.full_frame_reason,
                                      "pending area threshold") == 0),
-                         ">60 percent records threshold reason");
+                         "RFX >60 percent records threshold reason");
   ok = ok && expect_uint32(batch.rect_count, 1,
-                           ">60 percent produces one full-frame rect");
-  ok = ok &&
-       expect_uint32(batch.rects[0].right, 99, ">60 percent full-frame right");
+                           "RFX >60 percent produces one full-frame rect");
+  ok = ok && expect_uint32(batch.rects[0].right, 99,
+                           "RFX >60 percent full-frame right");
   ok = ok && expect_uint32(batch.rects[0].bottom, 99,
-                           ">60 percent full-frame bottom");
+                           "RFX >60 percent full-frame bottom");
 
   EnterCriticalSection(&viewer.gfx.lock);
   ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
@@ -2546,6 +2564,7 @@ static int test_pending_dirty_remerge_full_frame_with_newer_update(void) {
 
   ok = ok && expect_true(init_test_viewer(&viewer, 100, 100), "viewer init");
   EnterCriticalSection(&viewer.gfx.lock);
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
   ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
                              &viewer.gfx, &full, 1, FALSE, 40, 100, 100),
                          "add moved full-frame-equivalent batch");

@@ -242,7 +242,7 @@
       "priority": 12,
       "dependsOn": ["US-011"],
       "passes": false,
-      "notes": "Runtime validation failed: baseline and Start menu open/close passed, but window drag triggered repeated pending-area-threshold full-frame fallback storm (885 threshold logs, diagnostic forced full-frame 0) and froze MSTSC; fix and retest required."
+      "notes": "Runtime validation failed: baseline and Start menu open/close passed, but window drag triggered repeated pending-area-threshold full-frame fallback storm (885 threshold logs, diagnostic forced full-frame 0) and froze MSTSC. Mitigation implemented to disable area-threshold full-frame promotion for uncompressed RDPEGFX; runtime retest required."
     },
     {
       "id": "US-013",
