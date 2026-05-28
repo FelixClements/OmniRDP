@@ -242,7 +242,7 @@
       "priority": 12,
       "dependsOn": ["US-011"],
       "passes": false,
-      "notes": "Checklist created; runtime validation not run due missing real client/backend lab."
+      "notes": "Runtime validation failed: baseline and Start menu open/close passed, but window drag triggered repeated pending-area-threshold full-frame fallback storm (885 threshold logs, diagnostic forced full-frame 0) and froze MSTSC; fix and retest required."
     },
     {
       "id": "US-013",

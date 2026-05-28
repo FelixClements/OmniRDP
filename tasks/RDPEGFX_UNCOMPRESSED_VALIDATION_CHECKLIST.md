@@ -1,14 +1,14 @@
 # RDPEGFX Uncompressed Runtime Validation Checklist
 
 - Story: US-012
-- Status: NOT_RUN
+- Status: FAIL
 - Date:
 - Run ID:
 - Tester:
 - Build:
 - Backend:
 - Client/viewer:
-- Config path:
+- Config path: C:\ProgramData\OmniRDP\logs\vm2
 
 Do not commit credentials, passwords, secrets, private hostnames, private keys, or sensitive screenshots/log excerpts. Redact sensitive values before attaching evidence.
 
@@ -26,10 +26,10 @@ codec.graphics_pipeline = false
 
 | Scenario | Result (PASS/FAIL/NOT_RUN) | Ghosting | Black fragments | Stale trails | Canvas fragmentation | Click responsiveness | Reconnect recovery if applicable | Log/evidence path | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| Initial baseline | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | N/A |  |  |
-| Start menu open | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | N/A |  |  |
-| Start menu close | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | N/A |  |  |
-| Window drag | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | N/A |  |  |
+| Initial baseline | PASS | PASS | PASS | PASS | PASS | PASS | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | Baseline rendered correctly. Logs show RDPEGFX negotiated successfully and framebuffer baseline sent. |
+| Start menu open | PASS | PASS | PASS | PASS | PASS | PASS | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | No visible corruption reported. |
+| Start menu close | PASS | PASS | PASS | PASS | PASS | PASS | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | No visible corruption reported. |
+| Window drag | FAIL | FAIL | NOT_REPORTED | FAIL | FAIL | FAIL | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | Worked briefly, then screen change hit repeated 60%+ area-threshold full-frame fallback and MSTSC froze. |
 | Window resize | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | N/A |  |  |
 | Overlapping windows | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | N/A |  |  |
 | Text editing | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | N/A |  |  |
@@ -38,9 +38,19 @@ codec.graphics_pipeline = false
 
 ## Log evidence checklist
 
-- [ ] At least one accumulated pending dirty generation observed.
-- [ ] At least one sent dirty generation observed.
-- [ ] Confirmed no unintended diagnostic full-frame forcing occurred.
+- [x] At least one accumulated pending dirty generation observed.
+- [x] At least one sent dirty generation observed.
+- [x] Confirmed no unintended diagnostic full-frame forcing occurred.
+
+Runtime evidence summary from `C:\ProgramData\OmniRDP\logs\vm2`:
+
+- Config applied: `viewer.gfx.enabled=true`, `viewer.gfx.codec=uncompressed`, `viewer.gfx.diagnostic.full_frame_dirty=false`.
+- RDPEGFX negotiated successfully and framebuffer baseline was sent.
+- During window drag, repeated `RDPEGFX threshold full-frame dirty fallback` with `reason=pending area threshold`, `width=1920`, `height=1080`.
+- Later logs showed repeated fallback burst for the same generation `255` approximately every 8-16ms.
+- Counts from searched logs: threshold fallback `885`, area threshold `885`, diagnostic full-frame dirty forced `0`, consecutive deferred dirty sends `0`.
+- No pacing/backpressure/ACK-timeout messages were observed in searched logs.
+- Diagnostic full-frame forcing was absent.
 
 Suggested log patterns from current code:
 
@@ -59,4 +69,4 @@ Suggested log patterns from current code:
 
 ## Limitations / blockers
 
-US-012 remains pending until runtime validation is executed against a real backend VM and real RDP viewer/client lab using the required config above. This checklist records the required evidence but does not itself validate runtime behavior.
+US-012 remains pending because runtime validation failed. Blocker/follow-up: area-threshold full-frame fallback storm freezes MSTSC during window drag; fix and retest uncompressed RDPEGFX before marking US-012 complete.
