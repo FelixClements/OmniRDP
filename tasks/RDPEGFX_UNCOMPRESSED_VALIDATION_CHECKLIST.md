@@ -82,4 +82,4 @@ Suggested log patterns from current code:
 
 ## Limitations / blockers
 
-US-012 remains pending because retest after `9bc6b45` still failed. The area-threshold full-frame fallback storm is resolved for uncompressed RDPEGFX, but consecutive-defer full-frame fallback and/or large dirty bursts still freeze MSTSC during big screen changes. Further fix and retest are required before marking US-012 complete.
+US-012 remains pending because retest after `9bc6b45` still failed. The area-threshold full-frame fallback storm is resolved for uncompressed RDPEGFX. Additional mitigation implemented: uncompressed RDPEGFX now increments the consecutive-defer counter but does not force full-frame fallback for consecutive deferred dirty sends; RFX/non-uncompressed behavior remains unchanged. Runtime retest is required before marking US-012 complete.

@@ -242,7 +242,7 @@
       "priority": 12,
       "dependsOn": ["US-011"],
       "passes": false,
-      "notes": "Retest after 9bc6b45 still failed: baseline, Start menu open/close, and text editing passed; window drag froze, and resize/overlap visually passed but froze on big screen changes. Area-threshold storm resolved (pending area threshold 0), but consecutive-defer full-frame fallback occurred 3 times and large dirty bursts preceded disconnect; further fix/retest required."
+      "notes": "Retest after 9bc6b45 still failed: baseline, Start menu open/close, and text editing passed; window drag froze, and resize/overlap visually passed but froze on big screen changes. Area-threshold storm resolved; mitigation now also disables consecutive-defer full-frame fallback for uncompressed RDPEGFX while preserving RFX behavior. Runtime retest required."
     },
     {
       "id": "US-013",

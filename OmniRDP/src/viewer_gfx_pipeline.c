@@ -291,6 +291,9 @@ BOOL viewer_gfx_pipeline_note_dirty_deferred_locked(
   if (gfx->dirty_consecutive_deferred_sends < UINT32_MAX)
     gfx->dirty_consecutive_deferred_sends++;
 
+  if (gfx->selected_codec == VIEWER_GFX_CODEC_UNCOMPRESSED)
+    return FALSE;
+
   if ((gfx->dirty_consecutive_deferred_sends < 3U) ||
       gfx->pending_dirty_full_frame ||
       (gfx->pending_dirty_latest_generation == 0) ||
