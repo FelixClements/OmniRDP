@@ -260,9 +260,9 @@
         "git diff --check passes"
       ],
       "priority": 13,
-      "dependsOn": ["US-012"],
+      "dependsOn": ["US-011"],
       "passes": false,
-      "notes": ""
+      "notes": "Partial RFX observation documented: viewer.gfx.codec=rfx works much better than uncompressed with some lag dragging large Explorer windows; logs show area fallback 2, consecutive-defer fallback 0, diagnostic forced 0, large dirty bursts, and one disconnect/provider ultimatum. Formal validation still pending; RFX success does not close US-012."
     }
   ]
 }
