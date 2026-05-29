@@ -242,18 +242,18 @@
       "priority": 12,
       "dependsOn": ["US-011"],
       "passes": false,
-      "notes": "Retest after 9bc6b45 still failed: baseline, Start menu open/close, and text editing passed; window drag froze, and resize/overlap visually passed but froze on big screen changes. Area-threshold storm resolved; mitigation now also disables consecutive-defer full-frame fallback for uncompressed RDPEGFX while preserving RFX behavior. Runtime retest required."
+      "notes": "Uncompressed remains pending: retest after 9bc6b45 failed during drag/large screen changes despite mitigations. A later viewer.gfx.codec=rfx run was smoother with some lag and no diagnostic forcing, but it is excluded from US-012 pass criteria because US-012 requires uncompressed evidence."
     },
     {
       "id": "US-013",
-      "title": "Gate RFX validation behind clean uncompressed RDPEGFX",
-      "description": "As a maintainer, I want viewer RFX validation to remain gated behind clean uncompressed RDPEGFX validation so codec artifacts are not confused with dirty-region correctness issues.",
+      "title": "Validate RFX separately from uncompressed RDPEGFX",
+      "description": "As a maintainer, I want viewer RFX validation and comparison to proceed separately from unresolved uncompressed RDPEGFX issues so RFX observations are useful without masking dirty-region correctness defects.",
       "acceptanceCriteria": [
-        "viewer.gfx.codec=rfx validation is documented as blocked until US-012 records clean uncompressed RDPEGFX validation.",
+        "viewer.gfx.codec=rfx validation may be documented and compared before US-012 is clean, but it must be labeled separately from uncompressed validation.",
         "RFX remains disabled by default and no backend codec negotiation settings are changed.",
         "RFX validation, when run, uses the same dirty accumulator, coordinate convention, lifecycle cleanup, and pacing logic as uncompressed RDPEGFX.",
-        "RFX-specific artifacts are documented separately from dirty-region correctness failures.",
-        "Existing uncompressed RDPEGFX tests remain required before any RFX validation note can pass.",
+        "RFX-specific artifacts, compression artifacts, and lag are documented separately from uncompressed dirty-region correctness failures.",
+        "RFX success must not mark US-012 complete or hide unresolved uncompressed RDPEGFX defects.",
         "Typecheck passes",
         "Debug build passes: cmake --build OmniRDP/build --config Debug",
         "CTest passes: ctest --test-dir OmniRDP/build -C Debug -R \"test_viewer_gfx_pipeline|test_viewer_publisher|test_viewer_framebuffer|test_svc_config\" --output-on-failure",

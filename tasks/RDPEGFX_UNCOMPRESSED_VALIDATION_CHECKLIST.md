@@ -65,6 +65,13 @@ Retest evidence after mitigation commit `9bc6b45`:
 - Large dirty bursts occurred before the freeze, for example 143, 156, and 22 rectangle batches within approximately 48ms.
 - Viewer eventually disconnected.
 
+RFX observation (excluded from US-012 pass criteria):
+
+- User changed `viewer.gfx.codec` to `rfx`; latest logs confirm this run used RFX, not uncompressed.
+- RFX worked much better overall, with some remaining lag while dragging large Explorer windows.
+- Latest RFX logs showed area fallback count `2` and diagnostic full-frame forcing count `0`.
+- This is useful comparison evidence for US-013, but it is not valid evidence for passing US-012 because US-012 specifically requires `viewer.gfx.codec=uncompressed`.
+
 Suggested log patterns from current code:
 
 - Pending/start/latest generation fields:
@@ -82,4 +89,4 @@ Suggested log patterns from current code:
 
 ## Limitations / blockers
 
-US-012 remains pending because retest after `9bc6b45` still failed. The area-threshold full-frame fallback storm is resolved for uncompressed RDPEGFX. Additional mitigation implemented: uncompressed RDPEGFX now increments the consecutive-defer counter but does not force full-frame fallback for consecutive deferred dirty sends; RFX/non-uncompressed behavior remains unchanged. Runtime retest is required before marking US-012 complete.
+US-012 remains pending because uncompressed runtime validation has not passed. RFX appears smoother but is excluded from US-012 pass criteria; uncompressed RDPEGFX still requires runtime retest before marking US-012 complete.
