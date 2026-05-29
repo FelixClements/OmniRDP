@@ -29,10 +29,10 @@ codec.graphics_pipeline = false
 | Initial baseline | PASS | PASS | PASS | PASS | PASS | PASS | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | Baseline rendered correctly. Logs show RDPEGFX negotiated successfully and framebuffer baseline sent. |
 | Start menu open | PASS | PASS | PASS | PASS | PASS | PASS | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | No visible corruption reported. |
 | Start menu close | PASS | PASS | PASS | PASS | PASS | PASS | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | No visible corruption reported. |
-| Window drag | FAIL | FAIL | NOT_REPORTED | FAIL | FAIL | FAIL | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | Worked briefly, then screen change hit repeated 60%+ area-threshold full-frame fallback and MSTSC froze. |
-| Window resize | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | N/A |  |  |
-| Overlapping windows | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | N/A |  |  |
-| Text editing | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | N/A |  |  |
+| Window drag | FAIL | NOT_REPORTED | NOT_REPORTED | NOT_REPORTED | NOT_REPORTED | FAIL | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | Retest after `9bc6b45`: very slow and froze at some point with a big screen change. Area-threshold storm resolved, but consecutive-defer full-frame fallback still occurred. |
+| Window resize | FAIL/BLOCKED | PASS | PASS | PASS | PASS | FAIL | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | Retest after `9bc6b45`: visually passed, then froze with big screen change. |
+| Overlapping windows | FAIL/BLOCKED | PASS | PASS | PASS | PASS | FAIL | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | Retest after `9bc6b45`: visually passed, then froze with big screen change. |
+| Text editing | PASS | PASS | PASS | PASS | PASS | PASS | N/A | `C:\ProgramData\OmniRDP\logs\vm2` | Retest after `9bc6b45`: passed. |
 | Viewer reconnect | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN |  |  |
 | Backend desktop resize | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN | NOT_RUN |  |  |
 
@@ -52,6 +52,19 @@ Runtime evidence summary from `C:\ProgramData\OmniRDP\logs\vm2`:
 - No pacing/backpressure/ACK-timeout messages were observed in searched logs.
 - Diagnostic full-frame forcing was absent.
 
+Retest evidence after mitigation commit `9bc6b45`:
+
+- Initial baseline, Start menu open, Start menu close, and text editing passed.
+- Window drag remained very slow and eventually froze on a big screen change.
+- Window resize and overlapping windows were visually correct but blocked/failed because they froze with a big screen change.
+- Viewer reconnect and backend desktop resize were not reported / NOT_RUN.
+- Area-threshold storm was resolved: `pending area threshold` count `0`.
+- `RDPEGFX threshold full-frame dirty fallback` count `3`, all with `reason=consecutive deferred dirty sends`.
+- `pending rectangle count threshold` count `0`; `dirty overflow` count `0`; `diagnostic full-frame dirty forced` count `0`.
+- No dirty ACK timeout, byte limit, in-flight limit, or frame-map-full logs were observed.
+- Large dirty bursts occurred before the freeze, for example 143, 156, and 22 rectangle batches within approximately 48ms.
+- Viewer eventually disconnected.
+
 Suggested log patterns from current code:
 
 - Pending/start/latest generation fields:
@@ -69,4 +82,4 @@ Suggested log patterns from current code:
 
 ## Limitations / blockers
 
-US-012 remains pending because runtime validation failed. Mitigation implemented: uncompressed RDPEGFX no longer promotes >60% pending area to full-frame, while RFX/non-uncompressed area fallback remains unchanged. Runtime retest is required to confirm the window-drag MSTSC freeze is resolved before marking US-012 complete.
+US-012 remains pending because retest after `9bc6b45` still failed. The area-threshold full-frame fallback storm is resolved for uncompressed RDPEGFX, but consecutive-defer full-frame fallback and/or large dirty bursts still freeze MSTSC during big screen changes. Further fix and retest are required before marking US-012 complete.
