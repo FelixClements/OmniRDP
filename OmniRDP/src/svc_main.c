@@ -93,8 +93,16 @@ int main(int argc, char *argv[]) {
   BOOL runConsole = FALSE;
   BOOL hasServiceName = FALSE;
   BOOL hasConfigPath = FALSE;
-  char serviceName[256] = DEFAULT_SERVICE_NAME;
-  char configPath[MAX_PATH] = DEFAULT_CONFIG_PATH;
+  char serviceName[256];
+  char configPath[MAX_PATH];
+
+  if (copy_arg_string(serviceName, sizeof(serviceName), DEFAULT_SERVICE_NAME) !=
+          0 ||
+      copy_arg_string(configPath, sizeof(configPath), DEFAULT_CONFIG_PATH) !=
+          0) {
+    fprintf(stderr, "Default service configuration is too long.\n");
+    return 1;
+  }
 
   /* Parse command-line arguments */
   for (int i = 1; i < argc; i++) {
