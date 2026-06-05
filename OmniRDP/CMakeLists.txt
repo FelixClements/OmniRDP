@@ -6,12 +6,27 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # ── AddressSanitizer (MSVC) ───────────────────────────────────────
 option(USE_ADDRESS_SANITIZER "Enable MSVC AddressSanitizer for memory checking" OFF)
+option(USE_ADDRESS_SANITIZER_USE_AFTER_RETURN "Enable MSVC ASan stack use-after-return instrumentation" OFF)
 if(USE_ADDRESS_SANITIZER)
     message(STATUS "AddressSanitizer enabled for all targets")
-    # Apply globally so test targets inherit ASan instrumentation.
+    # Apply globally so app and test targets inherit ASan instrumentation.
     # /Zo enables enhanced debug info for better ASan stack traces.
     add_compile_options(/fsanitize=address /Zo)
-    add_link_options(/fsanitize=address)
+    if(USE_ADDRESS_SANITIZER_USE_AFTER_RETURN)
+        add_compile_options(/fsanitize-address-use-after-return)
+    endif()
+
+    if(MSVC)
+        string(REPLACE "/RTC1" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+        string(REPLACE "/RTC1" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+        string(REPLACE "/ZI" "/Zi" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+        string(REPLACE "/ZI" "/Zi" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+
+        foreach(linker_flag_var CMAKE_EXE_LINKER_FLAGS_DEBUG CMAKE_SHARED_LINKER_FLAGS_DEBUG CMAKE_MODULE_LINKER_FLAGS_DEBUG)
+            string(REPLACE "/INCREMENTAL" "" ${linker_flag_var} "${${linker_flag_var}}")
+            string(APPEND ${linker_flag_var} " /INCREMENTAL:NO")
+        endforeach()
+    endif()
 endif()
 
 # ── Find FreeRDP 3.26.0 ───────────────────────────────────────
@@ -242,3 +257,4 @@ enable_testing()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt)
     add_subdirectory(tests)
 endif()
+

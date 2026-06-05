@@ -1,7 +1,9 @@
 # Prerequisites
 *.d
 archive/
+artifacts/
 OmniRDP/build/
+OmniRDP/build-asan/
 /*.md
 AGENTS.md
 .vscode/*
