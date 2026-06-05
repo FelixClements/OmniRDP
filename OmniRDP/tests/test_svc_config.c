@@ -138,6 +138,49 @@ static int write_viewer_gfx_codec_config(const char *path,
   return 1;
 }
 
+static int write_backend_rdp_file_options_config(const char *path) {
+  FILE *fp = NULL;
+  if (fopen_s(&fp, path, "w") != 0 || !fp)
+    return 0;
+
+  fprintf(fp, "[instances]\n"
+              "names = Test\n"
+              "\n"
+              "[instance:Test]\n"
+              "backend.hostname = rds-broker.domain.com\n"
+              "backend.port = 3389\n"
+              "backend.username = alice\n"
+              "backend.password = secret\n"
+              "viewer.port = 3390\n"
+              "backend.rdp_file.workspace_id = rds-broker.domain.com\n"
+              "backend.rdp_file.use_redirection_server_name = true\n"
+              "backend.rdp_file.loadbalanceinfo = "
+              "tsv://MS Terminal Services Plugin.1.Marketing_Pool\n"
+              "backend.rdp_file.alternate_full_address = "
+              "rds-broker.domain.com\n");
+
+  fclose(fp);
+  return 1;
+}
+
+static int write_backend_rdp_file_options_default_config(const char *path) {
+  FILE *fp = NULL;
+  if (fopen_s(&fp, path, "w") != 0 || !fp)
+    return 0;
+
+  fprintf(fp, "[instances]\n"
+              "names = Test\n"
+              "\n"
+              "[instance:Test]\n"
+              "backend.hostname = rds-broker.domain.com\n"
+              "backend.port = 3389\n"
+              "backend.username = alice\n"
+              "backend.password = secret\n"
+              "viewer.port = 3390\n");
+
+  fclose(fp);
+  return 1;
+}
 static int write_backend_credentials_without_nla_config(const char *path) {
   FILE *fp = NULL;
   if (fopen_s(&fp, path, "w") != 0 || !fp)
@@ -200,6 +243,10 @@ int main(void) {
       "test_svc_config_gfx_codec_invalid.ini";
   const char *backend_credentials_without_nla_path =
       "test_svc_config_backend_credentials_without_nla.ini";
+  const char *backend_rdp_file_options_path =
+      "test_svc_config_backend_rdp_file_options.ini";
+  const char *backend_rdp_file_options_default_path =
+      "test_svc_config_backend_rdp_file_options_default.ini";
   SvcLogLevel level = SVC_LOG_INFO;
   SvcConfig *config = NULL;
   const InstanceConfig *inst = NULL;
@@ -438,6 +485,84 @@ int main(void) {
     ok = 0;
   svc_config_free(config);
 
+  if (!write_backend_rdp_file_options_config(backend_rdp_file_options_path)) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_invalid_path);
+    return 1;
+  }
+
+  config = svc_config_load(backend_rdp_file_options_path);
+  if (!config) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_invalid_path);
+    remove(backend_rdp_file_options_path);
+    return 1;
+  }
+
+  inst = svc_config_find_instance(config, "Test");
+  if (!inst ||
+      strcmp(inst->backend_rdp_workspace_id, "rds-broker.domain.com") != 0 ||
+      inst->backend_rdp_use_redirection_server_name != 1 ||
+      strcmp(inst->backend_rdp_loadbalanceinfo,
+             "tsv://MS Terminal Services Plugin.1.Marketing_Pool") != 0 ||
+      strcmp(inst->backend_rdp_alternate_full_address,
+             "rds-broker.domain.com") != 0)
+    ok = 0;
+  svc_config_free(config);
+
+  if (!write_backend_rdp_file_options_default_config(
+          backend_rdp_file_options_default_path)) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_invalid_path);
+    remove(backend_rdp_file_options_path);
+    return 1;
+  }
+
+  config = svc_config_load(backend_rdp_file_options_default_path);
+  if (!config) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_invalid_path);
+    remove(backend_rdp_file_options_path);
+    remove(backend_rdp_file_options_default_path);
+    return 1;
+  }
+
+  inst = svc_config_find_instance(config, "Test");
+  if (!inst || inst->backend_rdp_workspace_id[0] != '\0' ||
+      inst->backend_rdp_use_redirection_server_name != 0 ||
+      inst->backend_rdp_loadbalanceinfo[0] != '\0' ||
+      inst->backend_rdp_alternate_full_address[0] != '\0')
+    ok = 0;
+  svc_config_free(config);
+
   if (!write_backend_credentials_without_nla_config(
           backend_credentials_without_nla_path)) {
     remove(path);
@@ -464,6 +589,8 @@ int main(void) {
     remove(viewer_gfx_codec_remote_fx_path);
     remove(viewer_gfx_codec_invalid_path);
     remove(backend_credentials_without_nla_path);
+    remove(backend_rdp_file_options_path);
+    remove(backend_rdp_file_options_default_path);
     return 1;
   }
 
@@ -478,6 +605,8 @@ int main(void) {
     remove(path);
     remove(viewer_gfx_full_frame_dirty_path);
     remove(backend_credentials_without_nla_path);
+    remove(backend_rdp_file_options_path);
+    remove(backend_rdp_file_options_default_path);
     return 1;
   }
 
@@ -498,5 +627,7 @@ int main(void) {
   remove(viewer_gfx_codec_remote_fx_path);
   remove(viewer_gfx_codec_invalid_path);
   remove(backend_credentials_without_nla_path);
+  remove(backend_rdp_file_options_path);
+  remove(backend_rdp_file_options_default_path);
   return ok ? 0 : 1;
 }

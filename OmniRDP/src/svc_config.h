@@ -47,8 +47,12 @@ typedef struct {
   char backend_username[256];  /* REQUIRED */
   char backend_password[1024]; /* REQUIRED (may be dpapi:... or plaintext) */
   char backend_domain[256];    /* default: "" */
-  unsigned int backend_connect_timeout_ms; /* default: 30000 */
-  int backend_gfx_decode_only_enabled;     /* default: 0 */
+  unsigned int backend_connect_timeout_ms;      /* default: 30000 */
+  int backend_gfx_decode_only_enabled;          /* default: 0 */
+  char backend_rdp_workspace_id[256];           /* default: "" */
+  int backend_rdp_use_redirection_server_name;  /* default: 0 */
+  char backend_rdp_loadbalanceinfo[1024];       /* default: "" */
+  char backend_rdp_alternate_full_address[256]; /* default: "" */
 
   /* Reconnect policy */
   int reconnect_enabled;                   /* default: 1 */

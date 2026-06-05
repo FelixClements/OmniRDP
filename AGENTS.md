@@ -1,40 +1,52 @@
-# AGENTS.md
+# PROJECT KNOWLEDGE BASE
 
-Repository guidance for AI agents and developers working in the OmniRDP codebase.
+**Generated:** 2026-06-04
+**Commit:** 51d56ee
+**Branch:** detached HEAD
 
-## Repository overview
+## OVERVIEW
 
+OmniRDP is a C11/CMake Windows RDP multiplexer that links against FreeRDP 3.26.0 and ships three executables: `OmniRDP`, `OmniRDP-svc`, and `OmniRDP-tray`.
+
+## STRUCTURE
+
+```text
+OmniRDP/
+|-- OmniRDP/              # CMake project, production C sources, public headers, tests
+|   |-- include/          # Public API headers only; keep internals out
+|   |-- src/              # Multiplexer, service, tray, pipe, config, RDPEGFX code
+|   `-- tests/            # C executable tests plus CMake boundary audits
+|-- patches/freerdp/      # Reproducible patches applied to upstream FreeRDP
+|-- setup/                # Inno Setup installer and config template
+|-- tasks/                # RDPEGFX plans, evidence, validation notes
+`-- freerdp-3.26.0/       # External local checkout only; never commit
 ```
-OmniRDP/              Main application (C, CMake)
-setup/                Inno Setup installer script + license files
-patches/freerdp/      Patches applied to upstream FreeRDP at build/CI time
-.github/workflows/    GitHub Actions CI
-freerdp-3.26.0/       NOT committed — generated locally or checked out by CI
-```
 
-OmniRDP links against FreeRDP libraries (freerdp3.dll, winpr3.dll, freerdp-client3.dll, freerdp-server3.dll) and ships them alongside its own executables.
+## WHERE TO LOOK
 
-## FreeRDP source and patch workflow
+| Task | Location | Notes |
+|---|---|---|
+| Main multiplexer executable | `OmniRDP/src/main.c`, `backend.c`, `viewer_server.c` | FreeRDP client-to-backend plus listener-to-viewers path |
+| Viewer publishing and framebuffer | `OmniRDP/src/viewer_publisher.c`, `viewer_framebuffer.c` | Generation, snapshots, dirty regions, classic/GFX publish decisions |
+| RDPEGFX viewer path | `OmniRDP/src/viewer_gfx_pipeline.c`, `viewer_gfx_codec_*.c` | Pipeline owns FreeRDP RDPEGFX transport; codecs stay transport-free |
+| Classic viewer path | `viewer_classic_queue.c`, `viewer_classic_transport.c` | Queue policy separated from FreeRDP update calls |
+| Service executable | `svc_main.c`, `svc_service.c`, `svc_instance_mgr.c`, `svc_pipe_server.c` | No FreeRDP link dependency |
+| Tray executable | `tray_main.c`, `tray_icon.c`, `tray_pipe_client.c` | Talks to service over named pipe protocol |
+| Config model | `svc_config.c`, `ini_parser.c`, `setup/config.ini.template` | Prefer `backend.security.*` over legacy `security.*` |
+| Installer | `setup/OmniRDP.iss`, `setup/build-installer-local.ps1` | Pulls built EXEs/DLLs into Inno Setup output |
+| CI build logic | `.github/workflows/ci.yml` | Checks out FreeRDP, applies patches, builds Debug/ASan/Release |
+| Source-specific guidance | `OmniRDP/src/AGENTS.md` | Boundaries and anti-patterns for production C |
+| Test-specific guidance | `OmniRDP/tests/AGENTS.md` | Test registration, DLL PATH handling, architecture audits |
 
-FreeRDP 3.26.0 is an **external dependency**. The full source tree is **not committed** to this repo. Instead:
+## FREERDP DEPENDENCY
 
-1. **CI** checks out `FreeRDP/FreeRDP` ref `3.26.0` into `freerdp-3.26.0/` at build time.
-2. CI applies patches from `patches/freerdp/` using `git -C freerdp-3.26.0 apply`.
-3. CI then configures and builds FreeRDP with standard flags.
-
-### Current patches
+FreeRDP 3.26.0 is external. CI checks out `FreeRDP/FreeRDP` ref `3.26.0` into `freerdp-3.26.0/`, applies `patches/freerdp/*.patch`, then builds shared libraries.
 
 | Patch | Purpose |
 |---|---|
-| `0001-winpr-skip-legacy-provider-when-internal-md4.patch` | Skip loading OpenSSL legacy provider when `WITH_INTERNAL_MD4` is enabled |
+| `0001-winpr-skip-legacy-provider-when-internal-md4.patch` | Skip OpenSSL legacy provider loading when internal MD4 is enabled |
 
-### Why a patch?
-
-OpenSSL 3.x requires the legacy provider for MD4, which is needed for NTLM/CredSSP authentication. Instead of requiring end-users to install OpenSSL with legacy provider enabled, we compile FreeRDP with internal MD4 support and skip the legacy provider load entirely. This is a small, targeted source change to upstream FreeRDP.
-
-### Local development with FreeRDP
-
-You need a local `freerdp-3.26.0/` checkout for building, but **do not commit it**. Instead:
+Local setup:
 
 ```powershell
 git clone https://github.com/FreeRDP/FreeRDP.git freerdp-3.26.0
@@ -44,36 +56,13 @@ git apply ..\patches\freerdp\0001-winpr-skip-legacy-provider-when-internal-md4.p
 Set-Location ..
 ```
 
-Then build:
+FreeRDP build flags: `WITH_INTERNAL_MD4=ON`, `WITH_INTERNAL_MD5=ON`, `WITH_INTERNAL_RC4=ON`, `WITH_NATIVE_SSPI=ON`, `WITH_AAD=OFF`, `WITH_KRB5=OFF`.
 
-```powershell
-cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build `
-  -DWITH_INTERNAL_MD4=ON `
-  -DWITH_INTERNAL_MD5=ON `
-  -DWITH_INTERNAL_RC4=ON `
-  -DWITH_NATIVE_SSPI=ON `
-  -DWITH_AAD=OFF `
-  -DWITH_KRB5=OFF
-cmake --build freerdp-3.26.0/build --config Release -j
-cmake --build OmniRDP/build --config Release -j
-```
+When modifying FreeRDP source via patches, keep patches small and add Apache 2.0 section 4(b) modification notices.
 
-## FreeRDP build flags
+## CONFIGURATION MODEL
 
-| Flag | Value | Reason |
-|---|---|---|
-| `WITH_INTERNAL_MD4` | ON | NTLM/CredSSP needs MD4; avoids OpenSSL 3.x legacy provider dependency |
-| `WITH_INTERNAL_MD5` | ON | NTLM/CredSSP needs MD5 |
-| `WITH_INTERNAL_RC4` | ON | Legacy RDP security and licensing need RC4 |
-| `WITH_NATIVE_SSPI` | ON | Windows SSPI handles Kerberos/NTLM natively for domain auth |
-| `WITH_AAD` | OFF | Not needed for on-prem domain-joined VMs |
-| `WITH_KRB5` | OFF | Not needed when native SSPI is enabled |
-
-## Configuration model
-
-OmniRDP config lives in `config.ini` with `[instance:<name>]` sections. Key groups:
-
-### Backend VM connection (OmniRDP connects to real RDP server)
+OmniRDP reads `config.ini` with `[instance:<name>]` sections.
 
 ```ini
 backend.hostname = 192.168.1.10
@@ -82,21 +71,13 @@ backend.username = alice
 backend.password = password
 backend.domain = CONTOSO
 backend.connect_timeout_ms = 30000
-```
 
-### Backend security (OmniRDP -> backend VM)
-
-```ini
 backend.security.nla_enabled = true
 backend.security.tls_enabled = true
 backend.security.rdp_enabled = true
 backend.security.server_authentication = true
 backend.security.ignore_certificate = false
-```
 
-### Viewer listener/security (clients connect to OmniRDP)
-
-```ini
 viewer.bind_address = 192.168.1.207
 viewer.port = 3390
 viewer.cert_path = C:\server.crt
@@ -104,80 +85,66 @@ viewer.key_path = C:\server.key
 viewer.max_viewers = 10
 ```
 
-### Legacy compatibility keys
+Legacy `security.*` keys are compatibility fallback only. New examples and code paths should use `backend.security.*`.
 
-```ini
-security.tls_enabled = true
-security.nla_enabled = false
-security.server_authentication = true
-security.ignore_certificate = false
+Credential handling: `alice` plus `CONTOSO` is preferred; `alice@contoso.local` stays UPN with empty domain; `CONTOSO\alice` is auto-split.
+
+## COMMANDS
+
+```powershell
+cmake -S freerdp-3.26.0 -B freerdp-3.26.0/build `
+  -DWITH_INTERNAL_MD4=ON `
+  -DWITH_INTERNAL_MD5=ON `
+  -DWITH_INTERNAL_RC4=ON `
+  -DWITH_NATIVE_SSPI=ON `
+  -DWITH_AAD=OFF `
+  -DWITH_KRB5=OFF `
+  -DWITH_SERVER=ON `
+  -DBUILD_SHARED_LIBS=ON
+
+cmake --build freerdp-3.26.0/build --config Release -j
+
+cmake -S OmniRDP -B OmniRDP/build `
+  -DFREERDP_BUILD="$PWD/freerdp-3.26.0/build"
+cmake --build OmniRDP/build --config Release -j
+ctest --test-dir OmniRDP/build -C Release --output-on-failure
 ```
 
-These are retained for backward compatibility. If `backend.security.*` keys are absent, these fill in. Prefer `backend.security.*` for new configs.
+Format check mirrors CI:
 
-### Credential handling
+```powershell
+Get-ChildItem -Path "OmniRDP/src", "OmniRDP/include" -Recurse -Include "*.c", "*.h" |
+  ForEach-Object { clang-format --dry-run --Werror $_.FullName }
+```
 
-- `backend.username = alice` + `backend.domain = CONTOSO` — preferred
-- `backend.username = alice@contoso.local` — UPN, domain left empty
-- `backend.username = CONTOSO\alice` — auto-split into domain + username
+## CI
 
-## CI workflow
+`.github/workflows/ci.yml` runs `format-check`, `windows-build-test`, and `build-installer`. The build job checks out FreeRDP, applies patches, installs vcpkg deps, builds Debug/ASan/Release, and uploads release artifacts.
 
-`.github/workflows/ci.yml` has two jobs:
+Common failures: missing `freerdp-3.26.0/CMakeLists.txt` means checkout failed; patch failures mean patch drift; format failures need clang-format; installer skips when `windows-build-test` fails.
 
-1. **format-check** — clang-format on C sources
-2. **windows-build-test** — one job that:
-   - Checks out repo
-   - Checks out upstream FreeRDP 3.26.0
-   - Applies patches
-   - Installs vcpkg once
-   - Builds FreeRDP Debug + OmniRDP Debug
-   - Builds OmniRDP ASan + runs tests on push
-   - Builds FreeRDP Release + OmniRDP Release
-   - Uploads Release artifacts
-3. **build-installer** — downloads Release artifact, builds Inno Setup installer
+## CODE-SCANNING RULES
 
-### Troubleshooting CI
+Avoid patterns GitHub code scanning flags in this repo: `strcpy`, `strncpy`, raw `strlen`, raw `memcpy`, `fopen`, `atoi`, `getenv`, and direct `fgetc` loops without robust EOF/error handling.
 
-| Symptom | Likely cause |
-|---|---|
-| `CMakeLists.txt` not found in `freerdp-3.26.0` | FreeRDP checkout step failed or was removed |
-| Patch fails to apply | Upstream FreeRDP changed; patch needs update for new version |
-| `backend.c` format check fails | Run `clang-format -i OmniRDP/src/backend.c` |
-| Installer skipped | Previous job failed; check `windows-build-test` |
-| vcpkg errors | Check vcpkg cache key or dependency list |
+Prefer checked patterns already used locally: `snprintf` with truncation checks, `strnlen_s`, `memcpy_s`, whole-struct assignment, `fopen_s`, `strtol`/`strtoul` with `errno`, end-pointer, and range checks, and checked `InitializeCriticalSectionAndSpinCount`/`InitializeCriticalSectionEx`.
 
-## Preventing code-scanning warning alerts
+## ANTI-PATTERNS
 
-- Avoid unsafe C library calls that GitHub code scanning flags in this repo: `strcpy`, `strncpy`, `strlen`, `memcpy`, `fopen`, `atoi`, `getenv`, and direct `fgetc` loops without robust EOF/error handling.
-- Prefer bounded, checked patterns: `snprintf` with return-value/truncation checks, `strnlen_s`, `memcpy_s` or whole-struct assignment where appropriate, `fopen_s`, `strtol`/`strtoul` with `errno`, end-pointer, and range checks, and `InitializeCriticalSectionAndSpinCount`/`InitializeCriticalSectionEx` with failure handling.
-- Do not commit generated `freerdp-3.26.0/` source trees, build directories, artifacts, logs, or archives; keep FreeRDP changes as small patches under `patches/freerdp/`.
-- Fix code-scanning, compiler, clang-format, and relevant build/test warnings before opening PRs.
-- Use `backend.security.*` config keys for new examples and changes; keep legacy `security.*` keys only for compatibility notes.
+- Do not commit `freerdp-3.26.0/`, build directories, artifacts, logs, archives, or installer outputs.
+- Do not add AAD or KRB5 dependencies for on-prem domain VM scenarios.
+- Do not move FreeRDP source edits into the repo; keep reproducible patch files under `patches/freerdp/`.
+- Do not expose internal viewer transport or GFX pipeline types through `OmniRDP/include`.
+- Do not resurrect backend RDPEGFX replay symbols forbidden by the CMake boundary tests.
 
-## Build outputs
+## BUILD OUTPUTS
 
 | What | Local path |
 |---|---|
-| OmniRDP EXEs | `OmniRDP/build/Release/OmniRDP.exe` etc. |
-| FreeRDP DLLs | `freerdp-3.26.0/build/libfreerdp/Release/freerdp3.dll` etc. |
+| OmniRDP EXEs | `OmniRDP/build/Release/OmniRDP.exe`, `OmniRDP-svc.exe`, `OmniRDP-tray.exe` |
+| FreeRDP DLLs | `freerdp-3.26.0/build/libfreerdp/Release/freerdp3.dll` and peers |
 | Installer | `setup/Output/OmniRDP-Setup.exe` |
 
-## Licensing
+## LICENSING
 
-| Component | License |
-|---|---|
-| OmniRDP | GNU AGPLv3 |
-| FreeRDP | Apache License 2.0 |
-| Installer license files | `setup/license/AGPLv3.txt`, `setup/license/Apache-2.0.txt`, `setup/license/NOTICE.txt` |
-
-When modifying FreeRDP source via patches, add modification notices per Apache 2.0 §4(b).
-
-## Agent rules
-
-- Do not commit build artifacts, logs, or archives.
-- Do not commit the full `freerdp-3.26.0/` source tree unless intentionally vendoring.
-- Keep FreeRDP modifications as small reproducible patches in `patches/freerdp/`.
-- Run or mention relevant build checks when changing C/CMake/CI files.
-- Prefer `backend.security.*` over legacy `security.*` keys in new config.
-- For on-prem domain VMs, do not add AAD/KRB5 dependencies.
+OmniRDP is GNU AGPLv3. FreeRDP is Apache License 2.0. Installer license files live under `setup/license/`.

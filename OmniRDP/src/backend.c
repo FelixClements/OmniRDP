@@ -36,6 +36,35 @@
 
 static BackendClient *g_backend_client = NULL;
 
+static BOOL backend_string_is_empty(const char *value) {
+  return !value || value[0] == '\0';
+}
+
+static BOOL backend_replace_owned_string(char **target, const char *value) {
+  char *copy = NULL;
+  size_t length = 0;
+
+  if (!target)
+    return FALSE;
+  if (!value)
+    value = "";
+
+  length = strnlen_s(value, 4096);
+  if (length >= 4096)
+    return FALSE;
+
+  copy = (char *)calloc(length + 1, sizeof(char));
+  if (!copy)
+    return FALSE;
+  if (length > 0 && memcpy_s(copy, length + 1, value, length) != 0) {
+    free(copy);
+    return FALSE;
+  }
+
+  free(*target);
+  *target = copy;
+  return TRUE;
+}
 static UINT backend_rdpgfx_on_open(RdpgfxClientContext *context,
                                    BOOL *do_caps_advertise,
                                    BOOL *do_frame_acks);
@@ -1814,6 +1843,53 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
   if (client->connect_timeout_ms > 0) {
     freerdp_settings_set_uint32(settings, FreeRDP_TcpConnectTimeout,
                                 client->connect_timeout_ms);
+  }
+
+  return TRUE;
+}
+
+BOOL backend_apply_rdp_file_options(BackendClient *client,
+                                    const BackendRdpFileOptions *options) {
+  rdpSettings *settings = NULL;
+  const char *effective_host = NULL;
+
+  if (!client || !client->context)
+    return FALSE;
+  if (!options)
+    return TRUE;
+
+  settings = client->context->settings;
+  if (!settings)
+    return FALSE;
+
+  (void)options->workspace_id;
+
+  effective_host = client->hostname;
+  if (!backend_string_is_empty(options->alternate_full_address)) {
+    effective_host = options->alternate_full_address;
+    if (!freerdp_settings_set_string(settings, FreeRDP_ServerHostname,
+                                     effective_host))
+      return FALSE;
+    if (!backend_replace_owned_string(&client->hostname, effective_host))
+      return FALSE;
+  }
+
+  if (!backend_string_is_empty(options->loadbalanceinfo)) {
+    const size_t loadbalanceinfo_length =
+        strnlen_s(options->loadbalanceinfo, 4096);
+    if (loadbalanceinfo_length >= 4096)
+      return FALSE;
+    if (!freerdp_settings_set_pointer_len(settings, FreeRDP_LoadBalanceInfo,
+                                          options->loadbalanceinfo,
+                                          loadbalanceinfo_length))
+      return FALSE;
+  }
+
+  if (options->use_redirection_server_name &&
+      !backend_string_is_empty(effective_host)) {
+    if (!freerdp_settings_set_string(settings, FreeRDP_UserSpecifiedServerName,
+                                     effective_host))
+      return FALSE;
   }
 
   return TRUE;

@@ -130,6 +130,13 @@ typedef struct BackendSecurityConfig {
   BOOL ignore_certificate;
 } BackendSecurityConfig;
 
+typedef struct BackendRdpFileOptions {
+  const char *workspace_id;
+  BOOL use_redirection_server_name;
+  const char *loadbalanceinfo;
+  const char *alternate_full_address;
+} BackendRdpFileOptions;
+
 typedef enum BackendFullRefreshOutcome {
   BACKEND_FULL_REFRESH_OUTCOME_NONE = 0,
   BACKEND_FULL_REFRESH_OUTCOME_COMPLETED = 1,
@@ -171,6 +178,9 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
                        const char *domain,
                        const BackendSecurityConfig *security);
 BOOL backend_set_gfx_decode_only(BackendClient *client, BOOL enabled);
+
+BOOL backend_apply_rdp_file_options(BackendClient *client,
+                                    const BackendRdpFileOptions *options);
 
 /**
  * @brief Connect to Windows Server

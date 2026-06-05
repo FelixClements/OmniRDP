@@ -53,6 +53,18 @@ backend.connect_timeout_ms = 30000
 ; Experimental backend RDPEGFX decode-only path. Default off and independent of viewer GFX.
 backend.gfx.decode_only_enabled = false
 
+; Optional RDS Connection Broker/session collection routing.
+; RDP-file equivalents:
+;   full address:s:rds-broker.domain.com
+;   workspace id:s:rds-broker.domain.com
+;   use redirection server name:i:1
+;   loadbalanceinfo:s:tsv://MS Terminal Services Plugin.1.Marketing_Pool
+;   alternate full address:s:rds-broker.domain.com
+backend.rdp_file.workspace_id =
+backend.rdp_file.use_redirection_server_name = false
+backend.rdp_file.loadbalanceinfo =
+backend.rdp_file.alternate_full_address =
+
 ; Backend security (OmniRDP -> backend VM)
 backend.security.nla_enabled = true
 backend.security.tls_enabled = true

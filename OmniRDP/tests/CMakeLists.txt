@@ -59,6 +59,13 @@ add_executable(test_backend_gfx_decode_only
     test_backend_gfx_decode_only.c
 )
 
+add_executable(test_backend_rdp_file_options
+    test_backend_rdp_file_options.c
+    ${CMAKE_SOURCE_DIR}/src/backend.c
+    ${CMAKE_SOURCE_DIR}/src/platform_compat.c
+    ${CMAKE_SOURCE_DIR}/src/pointer_shape.c
+)
+
 if(MSVC)
     set_source_files_properties(test_viewer_gfx_pipeline.c PROPERTIES
         COMPILE_OPTIONS /wd4273
@@ -253,7 +260,28 @@ target_include_directories(test_backend_gfx_decode_only PRIVATE
     ${FREERDP_BUILD}/winpr/include
 )
 
+target_include_directories(test_backend_rdp_file_options PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${FREERDP_ROOT}/include
+    ${FREERDP_ROOT}/winpr/include
+    ${FREERDP_BUILD}/include
+    ${FREERDP_BUILD}/winpr/include
+)
+
+target_link_libraries(test_backend_rdp_file_options
+    ${FREERDP_CLIENT_LIB}
+    ${FREERDP_SERVER_LIB}
+    ${FREERDP_LIB}
+    ${WINPR_LIB}
+)
+
 set_target_properties(test_backend_gfx_decode_only PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+)
+
+set_target_properties(test_backend_rdp_file_options PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
 )
@@ -355,6 +383,15 @@ add_test(NAME test_backend_gfx_decode_only
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_backend_gfx_decode_only PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_backend_rdp_file_options
+    COMMAND ${CMAKE_COMMAND}
+        -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DTEST_EXECUTABLE_NAME=test_backend_rdp_file_options${CMAKE_EXECUTABLE_SUFFIX}
+        "-DTEST_DLL_DIR=${FREERDP_BUILD}/libfreerdp/Release\;${FREERDP_BUILD}/winpr/libwinpr/Release\;${FREERDP_BUILD}/client/common/Release\;${FREERDP_BUILD}/server/common/Release\;${CMAKE_SOURCE_DIR}/../artifacts/windows-Release/bin"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
+)
+set_tests_properties(test_backend_rdp_file_options PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_backend_gfx_quarantine
     COMMAND ${CMAKE_COMMAND}

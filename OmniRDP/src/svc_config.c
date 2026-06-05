@@ -36,6 +36,7 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->backend_port = 3389;
   cfg->backend_connect_timeout_ms = 30000;
   cfg->backend_gfx_decode_only_enabled = 0;
+  cfg->backend_rdp_use_redirection_server_name = 0;
   cfg->reconnect_enabled = 1;
   cfg->reconnect_max_attempts = 10;
   cfg->reconnect_initial_delay_ms = 1000;
@@ -191,6 +192,19 @@ static int parse_one_instance(const IniFile *ini, const char *name,
       ini_get_bool(ini, section, "backend.gfx.decode_only_enabled",
                    inst->backend_gfx_decode_only_enabled);
 
+  strcpy_safe(inst->backend_rdp_workspace_id,
+              sizeof(inst->backend_rdp_workspace_id),
+              ini_get(ini, section, "backend.rdp_file.workspace_id", ""));
+  inst->backend_rdp_use_redirection_server_name =
+      ini_get_bool(ini, section, "backend.rdp_file.use_redirection_server_name",
+                   inst->backend_rdp_use_redirection_server_name);
+  strcpy_safe(inst->backend_rdp_loadbalanceinfo,
+              sizeof(inst->backend_rdp_loadbalanceinfo),
+              ini_get(ini, section, "backend.rdp_file.loadbalanceinfo", ""));
+  strcpy_safe(
+      inst->backend_rdp_alternate_full_address,
+      sizeof(inst->backend_rdp_alternate_full_address),
+      ini_get(ini, section, "backend.rdp_file.alternate_full_address", ""));
   /* Reconnect policy */
   inst->reconnect_enabled =
       ini_get_bool(ini, section, "reconnect.enabled", inst->reconnect_enabled);

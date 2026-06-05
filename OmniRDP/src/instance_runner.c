@@ -581,6 +581,18 @@ int instance_runner_main(int argc, char *argv[]) {
     return 1;
   }
 
+  BackendRdpFileOptions rdp_file_options = {
+      inst->backend_rdp_workspace_id,
+      inst->backend_rdp_use_redirection_server_name ? TRUE : FALSE,
+      inst->backend_rdp_loadbalanceinfo,
+      inst->backend_rdp_alternate_full_address};
+  if (!backend_apply_rdp_file_options(client, &rdp_file_options)) {
+    LOG_E("instance_runner", "Failed to configure backend RDP file options");
+    SecureZeroMemory(password, sizeof(password));
+    backend_free(client);
+    svc_config_free(config);
+    return 1;
+  }
   if (!backend_set_gfx_decode_only(
           client, inst->backend_gfx_decode_only_enabled ? TRUE : FALSE)) {
     LOG_E("instance_runner", "Failed to configure backend GFX decode gate");
