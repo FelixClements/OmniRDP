@@ -1451,9 +1451,15 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
   const char *reason = NULL;
   UINT64 last_sent_generation = 0;
   UINT64 snapshot_generation = 0;
+  UINT64 estimated_payload_bytes = 0;
+  UINT64 max_in_flight_bytes = 0;
+  UINT64 full_area = 0;
   UINT32 original_dirty_rect_count = 0;
   UINT32 snapshot_dirty_rect_count = 0;
   BOOL diagnostic_full_frame_dirty = FALSE;
+  BOOL selected_uncompressed = FALSE;
+  BOOL uncompressed_overload = FALSE;
+  const char *uncompressed_overload_reason = NULL;
   ViewerGfxDirtySendStatus send_status = VIEWER_GFX_DIRTY_SEND_FAILED;
 
   if (!server || !viewer || !server->viewer_gfx_enabled)
@@ -1532,6 +1538,55 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
   original_dirty_rect_count = snapshot.dirty_rect_count;
   snapshot_dirty_rect_count = snapshot.dirty_rect_count;
 
+  EnterCriticalSection(&viewer->gfx.lock);
+  selected_uncompressed =
+      (viewer->gfx.selected_codec == VIEWER_GFX_CODEC_UNCOMPRESSED);
+  max_in_flight_bytes = viewer->gfx.dirty_max_in_flight_bytes;
+  LeaveCriticalSection(&viewer->gfx.lock);
+  if (max_in_flight_bytes == 0)
+    max_in_flight_bytes = VIEWER_GFX_DIRTY_MAX_IN_FLIGHT_BYTES;
+
+  full_area = (UINT64)snapshot.width * (UINT64)snapshot.height;
+  if (selected_uncompressed) {
+    if (!viewer_gfx_pipeline_estimate_uncompressed_dirty_payload(
+            &snapshot, &estimated_payload_bytes)) {
+      uncompressed_overload = TRUE;
+      uncompressed_overload_reason = "payload estimate failed";
+    } else if (estimated_payload_bytes > max_in_flight_bytes) {
+      uncompressed_overload = TRUE;
+      uncompressed_overload_reason = "estimated payload exceeds byte budget";
+    } else if ((full_area > 0) &&
+               (dirty_batch.area > ((full_area * 60ULL) / 100ULL))) {
+      uncompressed_overload = TRUE;
+      uncompressed_overload_reason = "dirty area exceeds threshold";
+    }
+  }
+
+  if (uncompressed_overload) {
+    BOOL baseline_sent = FALSE;
+
+    viewer_framebuffer_snapshot_free(&snapshot);
+    WLog_INFO(TAG,
+              "Viewer %u RDPEGFX uncompressed dirty overload; sending "
+              "baseline instead: reason=%s generation=%" PRIu64
+              " dirty_rects=%u estimated_payload_bytes=%" PRIu64
+              " max_in_flight_bytes=%" PRIu64 " dirty_area=%" PRIu64
+              " surface=%ux%u",
+              viewer->id,
+              uncompressed_overload_reason ? uncompressed_overload_reason
+                                           : "unknown",
+              snapshot_generation, snapshot_dirty_rect_count,
+              estimated_payload_bytes, max_in_flight_bytes, dirty_batch.area,
+              dirty_batch.width, dirty_batch.height);
+    baseline_sent = viewer_gfx_send_framebuffer_baseline(server, viewer, now);
+    if (!baseline_sent) {
+      EnterCriticalSection(&viewer->gfx.lock);
+      (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+          &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+      LeaveCriticalSection(&viewer->gfx.lock);
+    }
+    return baseline_sent;
+  }
   if (dirty_batch.full_frame_reason &&
       ((strcmp(dirty_batch.full_frame_reason,
                "pending rectangle count threshold") == 0) ||

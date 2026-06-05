@@ -1469,6 +1469,42 @@ static int test_dirty_mapping_cleared_by_baseline(void) {
   return ok;
 }
 
+static int test_baseline_preserves_newer_pending_dirty(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot baseline = make_dirty_snapshot(pixels, 100, 1);
+  RECTANGLE_16 pending = {1, 1, 2, 2};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, &pending, 1, FALSE, 200, 4, 4),
+                         "newer pending dirty seeded");
+  reset_send_recorder();
+  ok = ok && expect_true(
+                 viewer_gfx_pipeline_send_snapshot(&server, &viewer, &baseline),
+                 "older baseline sends");
+
+  ok = ok && expect_uint32(viewer.gfx.pending_dirty_rect_count, 1,
+                           "newer pending dirty rect remains");
+  ok = ok && expect_uint64(viewer.gfx.pending_dirty_start_generation, 200,
+                           "newer pending dirty start remains");
+  ok = ok && expect_uint64(viewer.gfx.pending_dirty_latest_generation, 200,
+                           "newer pending dirty generation remains");
+  ok = ok && expect_uint64(viewer.gfx.pending_dirty_area, 4,
+                           "newer pending dirty area remains");
+  ok = ok && expect_true(!viewer.gfx.pending_dirty_full_frame,
+                         "newer pending dirty full-frame flag remains false");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
 static int test_dirty_mapping_cleared_by_reset(void) {
   ViewerServer server = {0};
   Viewer viewer = {0};
@@ -2823,6 +2859,95 @@ static int test_pending_dirty_successful_send_leaves_pending_empty(void) {
   return ok;
 }
 
+static int test_uncompressed_dirty_payload_estimator(void) {
+  BYTE pixel = 0;
+  ViewerFramebufferSnapshot snapshot = {0};
+  UINT64 payload_bytes = 0;
+  int ok = 1;
+
+  snapshot.width = 1920;
+  snapshot.height = 1080;
+  snapshot.stride = 1920 * 4;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixels = &pixel;
+  snapshot.pixel_bytes = 1;
+  snapshot.generation = 200;
+  snapshot.dirty_rect_count = 1;
+  snapshot.dirty_rects[0].left = 0;
+  snapshot.dirty_rects[0].top = 0;
+  snapshot.dirty_rects[0].right = 1919;
+  snapshot.dirty_rects[0].bottom = 1079;
+
+  ok =
+      ok && expect_true(viewer_gfx_pipeline_estimate_uncompressed_dirty_payload(
+                            &snapshot, &payload_bytes),
+                        "estimate full-screen uncompressed payload");
+  ok = ok && expect_uint64(payload_bytes, 8294400ULL,
+                           "full-screen uncompressed payload bytes");
+
+  snapshot.dirty_rects[0].left = 4;
+  snapshot.dirty_rects[0].top = 5;
+  snapshot.dirty_rects[0].right = 4;
+  snapshot.dirty_rects[0].bottom = 5;
+  ok =
+      ok && expect_true(viewer_gfx_pipeline_estimate_uncompressed_dirty_payload(
+                            &snapshot, &payload_bytes),
+                        "estimate one-pixel uncompressed payload");
+  ok = ok && expect_uint64(payload_bytes, 4ULL,
+                           "one-pixel uncompressed payload bytes");
+
+  snapshot.dirty_rects[0].right = 1920;
+  ok = ok &&
+       expect_true(!viewer_gfx_pipeline_estimate_uncompressed_dirty_payload(
+                       &snapshot, &payload_bytes),
+                   "reject out-of-bounds estimator rect");
+  return ok;
+}
+
+static int test_oversized_uncompressed_dirty_defers_before_send(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixel = 0;
+  ViewerFramebufferSnapshot snapshot = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 1920, 1080),
+                         "viewer init oversized uncompressed");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
+  viewer.gfx.next_frame_id = 33;
+
+  snapshot.width = 1920;
+  snapshot.height = 1080;
+  snapshot.stride = 1920 * 4;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixels = &pixel;
+  snapshot.pixel_bytes = 1;
+  snapshot.generation = 201;
+  snapshot.dirty_rect_count = 1;
+  snapshot.dirty_rects[0].left = 0;
+  snapshot.dirty_rects[0].top = 0;
+  snapshot.dirty_rects[0].right = 1919;
+  snapshot.dirty_rects[0].bottom = 1079;
+
+  reset_send_recorder();
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &snapshot),
+                           VIEWER_GFX_DIRTY_SEND_DEFERRED,
+                           "oversized uncompressed dirty deferred");
+  ok = ok && expect_uint32(g_send_count, 0,
+                           "oversized uncompressed sends no frame PDUs");
+  ok = ok && expect_uint32(g_surface_count, 0,
+                           "oversized uncompressed sends no surface commands");
+  ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
+                           "oversized uncompressed records no frame");
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
 static int test_dirty_update_command_bounds_validation(void) {
   ViewerServer server = {0};
   Viewer viewer = {0};
@@ -2996,6 +3121,10 @@ int main(void) {
     return 1;
   if (!test_dirty_update_send_order_and_ack())
     return 1;
+  if (!test_uncompressed_dirty_payload_estimator())
+    return 1;
+  if (!test_oversized_uncompressed_dirty_defers_before_send())
+    return 1;
   if (!test_dirty_update_command_bounds_validation())
     return 1;
   if (!test_dirty_update_rfx_codec_emits_cavideo())
@@ -3011,6 +3140,8 @@ int main(void) {
   if (!test_dirty_update_multi_rect_and_failures())
     return 1;
   if (!test_dirty_mapping_cleared_by_baseline())
+    return 1;
+  if (!test_baseline_preserves_newer_pending_dirty())
     return 1;
   if (!test_dirty_mapping_cleared_by_reset())
     return 1;

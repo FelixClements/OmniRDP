@@ -257,6 +257,19 @@ void viewer_gfx_pipeline_pending_dirty_clear_locked(
   gfx->pending_dirty_full_frame_reason = NULL;
 }
 
+static BOOL viewer_gfx_pipeline_pending_dirty_clear_through_generation_locked(
+    ViewerGraphicsContext *gfx, UINT64 generation) {
+  if (!gfx || (gfx->pending_dirty_latest_generation == 0))
+    return FALSE;
+
+  if (gfx->pending_dirty_latest_generation <= generation) {
+    viewer_gfx_pipeline_pending_dirty_clear_locked(gfx);
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
 static BOOL viewer_gfx_pipeline_pending_dirty_force_full_locked(
     ViewerGraphicsContext *gfx, UINT64 generation, UINT32 width, UINT32 height,
     const char *reason) {
@@ -508,6 +521,45 @@ BOOL viewer_gfx_pipeline_snapshot_apply_pending_dirty(
   return TRUE;
 }
 
+BOOL viewer_gfx_pipeline_estimate_uncompressed_dirty_payload(
+    const ViewerFramebufferSnapshot *snapshot, UINT64 *payload_bytes) {
+  UINT64 total = 0;
+  UINT32 i = 0;
+
+  if (payload_bytes)
+    *payload_bytes = 0;
+
+  if (!snapshot || !payload_bytes || (snapshot->dirty_rect_count == 0))
+    return FALSE;
+
+  for (i = 0; i < snapshot->dirty_rect_count; i++) {
+    const RECTANGLE_16 *rect = &snapshot->dirty_rects[i];
+    UINT64 width = 0;
+    UINT64 height = 0;
+    UINT64 area = 0;
+    UINT64 bytes = 0;
+
+    if ((rect->left > rect->right) || (rect->top > rect->bottom) ||
+        ((UINT32)rect->right >= snapshot->width) ||
+        ((UINT32)rect->bottom >= snapshot->height))
+      return FALSE;
+
+    width = (UINT64)rect->right - (UINT64)rect->left + 1ULL;
+    height = (UINT64)rect->bottom - (UINT64)rect->top + 1ULL;
+    if ((width == 0) || (height == 0) || (width > (UINT64_MAX / height)))
+      return FALSE;
+    area = width * height;
+    if (area > (UINT64_MAX / 4ULL))
+      return FALSE;
+    bytes = area * 4ULL;
+    if ((UINT64_MAX - total) < bytes)
+      return FALSE;
+    total += bytes;
+  }
+
+  *payload_bytes = total;
+  return TRUE;
+}
 static void
 viewer_gfx_pipeline_ensure_dirty_limits_locked(ViewerGraphicsContext *gfx) {
   if (!gfx)
@@ -1353,9 +1405,12 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   UINT64 send_start_us = 0;
   UINT64 send_us = 0;
   UINT64 dirty_area = 0;
+  UINT64 estimated_payload_bytes = 0;
+  UINT64 max_dirty_bytes = 0;
   UINT32 i = 0;
   UINT rc = CHANNEL_RC_OK;
   BOOL ok = FALSE;
+  BOOL selected_uncompressed = FALSE;
 
   if (!server || !viewer || !gfx || !snapshot || !snapshot->pixels ||
       (snapshot->dirty_rect_count == 0))
@@ -1364,6 +1419,28 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   if (!viewer_gfx_pipeline_dirty_update_allowed(server, viewer, snapshot, NULL))
     return VIEWER_GFX_DIRTY_SEND_DEFERRED;
 
+  EnterCriticalSection(&gfx->lock);
+  selected_uncompressed =
+      (gfx->selected_codec == VIEWER_GFX_CODEC_UNCOMPRESSED);
+  viewer_gfx_pipeline_ensure_dirty_limits_locked(gfx);
+  max_dirty_bytes = gfx->dirty_max_in_flight_bytes;
+  LeaveCriticalSection(&gfx->lock);
+
+  if (selected_uncompressed) {
+    if (!viewer_gfx_pipeline_estimate_uncompressed_dirty_payload(
+            snapshot, &estimated_payload_bytes))
+      return VIEWER_GFX_DIRTY_SEND_FAILED;
+    if (estimated_payload_bytes > max_dirty_bytes) {
+      WLog_INFO(TAG,
+                "Viewer %u RDPEGFX uncompressed dirty deferred before "
+                "payload build: generation=%" PRIu64
+                " dirty_rects=%u estimated_payload_bytes=%" PRIu64
+                " max_in_flight_bytes=%" PRIu64,
+                viewer->id, snapshot->generation, snapshot->dirty_rect_count,
+                estimated_payload_bytes, max_dirty_bytes);
+      return VIEWER_GFX_DIRTY_SEND_DEFERRED;
+    }
+  }
   commands = (RDPGFX_SURFACE_COMMAND *)calloc(snapshot->dirty_rect_count,
                                               sizeof(RDPGFX_SURFACE_COMMAND));
   if (!commands)
@@ -1390,6 +1467,15 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   }
   dirty_area = viewer_gfx_pipeline_dirty_area(snapshot->dirty_rects,
                                               snapshot->dirty_rect_count);
+  if (selected_uncompressed && ((pending_payload_bytes > (1024ULL * 1024ULL)) ||
+                                (snapshot->dirty_rect_count > 64U))) {
+    WLog_INFO(TAG,
+              "Viewer %u RDPEGFX large uncompressed dirty send: "
+              "generation=%" PRIu64 " dirty_rects=%u payload_bytes=%" PRIu64
+              " dirty_area=%" PRIu64,
+              viewer->id, snapshot->generation, snapshot->dirty_rect_count,
+              pending_payload_bytes, dirty_area);
+  }
 
   EnterCriticalSection(&gfx->lock);
   viewer_gfx_pipeline_ensure_dirty_limits_locked(gfx);
@@ -1689,7 +1775,17 @@ BOOL viewer_gfx_pipeline_send_snapshot(
     gfx->last_gfx_send_end_us = send_start_us + send_us;
     viewer_gfx_pipeline_increment_epoch_locked(gfx);
     viewer_gfx_pipeline_dirty_map_clear_locked(gfx);
-    viewer_gfx_pipeline_pending_dirty_clear_locked(gfx);
+    if (viewer_gfx_pipeline_pending_dirty_clear_through_generation_locked(
+            gfx, snapshot->generation)) {
+      WLog_INFO(TAG,
+                "Viewer %u RDPEGFX baseline preserved newer pending dirty "
+                "baseline_generation=%" PRIu64 " pending_start=%" PRIu64
+                " pending_latest=%" PRIu64 " rects=%u area=%" PRIu64,
+                viewer->id, snapshot->generation,
+                gfx->pending_dirty_start_generation,
+                gfx->pending_dirty_latest_generation,
+                gfx->pending_dirty_rect_count, gfx->pending_dirty_area);
+    }
     gfx->dirty_baseline_required = FALSE;
     gfx->dirty_updates_enabled = TRUE;
     viewer_gfx_pipeline_ensure_dirty_limits_locked(gfx);

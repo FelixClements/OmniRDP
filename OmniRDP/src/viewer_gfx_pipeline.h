@@ -117,6 +117,8 @@ BOOL viewer_gfx_pipeline_note_dirty_deferred_locked(ViewerGraphicsContext *gfx);
 BOOL viewer_gfx_pipeline_snapshot_apply_pending_dirty(
     ViewerFramebufferSnapshot *snapshot,
     const ViewerGfxPendingDirtyBatch *batch);
+BOOL viewer_gfx_pipeline_estimate_uncompressed_dirty_payload(
+    const ViewerFramebufferSnapshot *snapshot, UINT64 *payload_bytes);
 ViewerGfxDirtyPacingStatus
 viewer_gfx_pipeline_poll_dirty_pacing(Viewer *viewer, UINT64 now,
                                       const char **reason);
