@@ -39,10 +39,26 @@ typedef struct {
   UINT64 last_update_ts_ms;
   BYTE *pixels;
   size_t pixel_bytes;
+  UINT32 pixel_origin_x;
+  UINT32 pixel_origin_y;
+  UINT32 pixel_width;
+  UINT32 pixel_height;
   RECTANGLE_16 dirty_rects[VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS];
   UINT32 dirty_rect_count;
   BOOL dirty_overflow;
 } ViewerFramebufferSnapshot;
+
+typedef struct {
+  UINT64 last_update_dirty_bytes;
+  UINT64 last_update_copied_bytes;
+  UINT64 last_update_full_frame_bytes;
+  UINT64 last_update_copy_start_us;
+  UINT64 last_update_copy_time_us;
+  UINT64 last_update_dirty_rect_count;
+  UINT64 last_snapshot_copied_bytes;
+  UINT64 last_snapshot_copy_start_us;
+  UINT64 last_snapshot_copy_time_us;
+} ViewerFramebufferMetrics;
 
 typedef struct {
   BOOL initialized;
@@ -58,6 +74,7 @@ typedef struct {
   RECTANGLE_16 dirty_rects[VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS];
   UINT32 dirty_rect_count;
   BOOL dirty_overflow;
+  ViewerFramebufferMetrics metrics;
   CRITICAL_SECTION lock;
 } ViewerFramebuffer;
 
@@ -77,7 +94,15 @@ BOOL viewer_framebuffer_mark_dirty(ViewerFramebuffer *framebuffer,
                                    const RECTANGLE_16 *rect);
 BOOL viewer_framebuffer_snapshot(ViewerFramebuffer *framebuffer,
                                  ViewerFramebufferSnapshot *snapshot);
+BOOL viewer_framebuffer_dirty_snapshot(ViewerFramebuffer *framebuffer,
+                                       UINT32 max_dirty_rect_count,
+                                       ViewerFramebufferSnapshot *snapshot);
+BOOL viewer_framebuffer_snapshot_dirty_rects(
+    ViewerFramebuffer *framebuffer, const RECTANGLE_16 *dirty_rects,
+    UINT32 dirty_rect_count, ViewerFramebufferSnapshot *snapshot);
 void viewer_framebuffer_snapshot_free(ViewerFramebufferSnapshot *snapshot);
+BOOL viewer_framebuffer_get_metrics(ViewerFramebuffer *framebuffer,
+                                    ViewerFramebufferMetrics *metrics);
 
 #ifdef __cplusplus
 }

@@ -49,6 +49,7 @@ typedef struct {
   char backend_domain[256];    /* default: "" */
   unsigned int backend_connect_timeout_ms;      /* default: 30000 */
   int backend_gfx_decode_only_enabled;          /* default: 0 */
+  int backend_gfx_rfx_enabled;                  /* default: 0 */
   char backend_rdp_workspace_id[256];           /* default: "" */
   int backend_rdp_use_redirection_server_name;  /* default: 0 */
   char backend_rdp_loadbalanceinfo[1024];       /* default: "" */
@@ -76,8 +77,11 @@ typedef struct {
   unsigned int viewer_throttle_max_updates_per_sec; /* default: 0 (unlimited) */
   int viewer_gfx_enabled;                           /* default: 0 */
   int viewer_gfx_codec; /* default: SVC_VIEWER_GFX_CODEC_UNCOMPRESSED */
-  int viewer_gfx_diagnostic_full_frame_dirty;               /* default: 0 */
-  int viewer_classic_latest_state_enabled;                  /* default: 0 */
+  int viewer_gfx_rfx_threading_enabled;               /* default: 0 */
+  unsigned int viewer_gfx_dirty_max_in_flight_frames; /* default: 1 */
+  unsigned int viewer_gfx_dirty_max_in_flight_bytes;  /* default: 4194304 */
+  int viewer_gfx_diagnostic_full_frame_dirty;         /* default: 0 */
+  int viewer_classic_latest_state_enabled;            /* default: 0 */
   unsigned int viewer_classic_latest_state_max_queue_depth; /* default: 0 */
   unsigned int viewer_classic_latest_state_max_queue_bytes; /* default: 0 */
   int viewer_security_nla_enabled;                          /* default: 1 */

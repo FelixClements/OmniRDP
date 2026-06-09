@@ -351,7 +351,8 @@ BOOL viewer_publisher_gfx_dirty_snapshot(ViewerPublisher *publisher,
 
   /* Snapshot owns copied pixels/dirty metadata; publisher lock is not held
    * while copying framebuffer data. Generation filtering is per viewer. */
-  if (!viewer_framebuffer_snapshot(framebuffer, snapshot)) {
+  if (!viewer_framebuffer_dirty_snapshot(
+          framebuffer, VIEWER_PUBLISHER_GFX_DIRTY_RECT_THRESHOLD, snapshot)) {
     viewer_publisher_count_drop(publisher);
     return FALSE;
   }

@@ -13,23 +13,55 @@ struct ViewerGfxRfxContext {
 
 #ifdef VIEWER_GFX_RFX_TESTING
 static BOOL g_viewer_gfx_rfx_force_context_new_failure = FALSE;
+static UINT32 g_viewer_gfx_rfx_last_threading_flags =
+    THREADING_FLAGS_DISABLE_THREADS;
 #endif
 
 BOOL viewer_gfx_rfx_is_available(void) { return TRUE; }
 
 const char *viewer_gfx_rfx_disabled_reason(void) { return NULL; }
 
+static void
+viewer_gfx_rfx_pixel_bounds(const ViewerFramebufferSnapshot *snapshot,
+                            UINT32 *origin_x, UINT32 *origin_y,
+                            UINT32 *pixel_width, UINT32 *pixel_height) {
+  if (!snapshot)
+    return;
+
+  if (origin_x)
+    *origin_x = snapshot->pixel_width ? snapshot->pixel_origin_x : 0U;
+  if (origin_y)
+    *origin_y = snapshot->pixel_height ? snapshot->pixel_origin_y : 0U;
+  if (pixel_width)
+    *pixel_width =
+        snapshot->pixel_width ? snapshot->pixel_width : snapshot->width;
+  if (pixel_height)
+    *pixel_height =
+        snapshot->pixel_height ? snapshot->pixel_height : snapshot->height;
+}
+
 #ifdef VIEWER_GFX_RFX_TESTING
 void viewer_gfx_rfx_test_set_force_context_new_failure(BOOL force_failure) {
   g_viewer_gfx_rfx_force_context_new_failure = force_failure;
 }
+
+UINT32 viewer_gfx_rfx_test_last_threading_flags(void) {
+  return g_viewer_gfx_rfx_last_threading_flags;
+}
 #endif
 
 ViewerGfxRfxContext *viewer_gfx_rfx_context_new(void) {
+  return viewer_gfx_rfx_context_new_ex(FALSE);
+}
+
+ViewerGfxRfxContext *viewer_gfx_rfx_context_new_ex(BOOL threaded) {
   ViewerGfxRfxContext *context = NULL;
   RFX_CONTEXT *rfx = NULL;
+  UINT32 threading_flags =
+      threaded ? 0U : (UINT32)THREADING_FLAGS_DISABLE_THREADS;
 
 #ifdef VIEWER_GFX_RFX_TESTING
+  g_viewer_gfx_rfx_last_threading_flags = threading_flags;
   if (g_viewer_gfx_rfx_force_context_new_failure)
     return NULL;
 #endif
@@ -38,7 +70,7 @@ ViewerGfxRfxContext *viewer_gfx_rfx_context_new(void) {
   if (!context)
     return NULL;
 
-  rfx = rfx_context_new_ex(TRUE, THREADING_FLAGS_DISABLE_THREADS);
+  rfx = rfx_context_new_ex(TRUE, threading_flags);
   if (!rfx) {
     free(context);
     return NULL;
@@ -76,6 +108,10 @@ static BOOL
 viewer_gfx_rfx_validate_snapshot(const ViewerFramebufferSnapshot *snapshot) {
   size_t minimum_pixel_bytes = 0;
   size_t tight_row_bytes = 0;
+  UINT32 origin_x = 0;
+  UINT32 origin_y = 0;
+  UINT32 pixel_width = 0;
+  UINT32 pixel_height = 0;
 
   if (!snapshot || !snapshot->pixels || (snapshot->width == 0) ||
       (snapshot->height == 0))
@@ -88,24 +124,54 @@ viewer_gfx_rfx_validate_snapshot(const ViewerFramebufferSnapshot *snapshot) {
   if (snapshot->pixel_format != PIXEL_FORMAT_BGRX32)
     return FALSE;
 
-  if ((size_t)snapshot->width > (SIZE_MAX / 4U))
+  viewer_gfx_rfx_pixel_bounds(snapshot, &origin_x, &origin_y, &pixel_width,
+                              &pixel_height);
+  if ((pixel_width == 0) || (pixel_height == 0) ||
+      (origin_x >= snapshot->width) || (origin_y >= snapshot->height) ||
+      (pixel_width > (snapshot->width - origin_x)) ||
+      (pixel_height > (snapshot->height - origin_y)))
     return FALSE;
-  tight_row_bytes = (size_t)snapshot->width * 4U;
+
+  if ((size_t)pixel_width > (SIZE_MAX / 4U))
+    return FALSE;
+  tight_row_bytes = (size_t)pixel_width * 4U;
 
   if ((snapshot->stride == 0) || ((size_t)snapshot->stride < tight_row_bytes))
     return FALSE;
 
-  if ((size_t)(snapshot->height - 1U) >
+  if ((size_t)(pixel_height - 1U) >
       ((SIZE_MAX - tight_row_bytes) / (size_t)snapshot->stride))
     return FALSE;
   minimum_pixel_bytes =
-      ((size_t)(snapshot->height - 1U) * (size_t)snapshot->stride) +
+      ((size_t)(pixel_height - 1U) * (size_t)snapshot->stride) +
       tight_row_bytes;
 
   if (snapshot->pixel_bytes < minimum_pixel_bytes)
     return FALSE;
 
   return TRUE;
+}
+
+static BOOL
+viewer_gfx_rfx_bounds_available(const ViewerFramebufferSnapshot *snapshot,
+                                UINT32 left, UINT32 top, UINT32 right,
+                                UINT32 bottom) {
+  UINT32 origin_x = 0;
+  UINT32 origin_y = 0;
+  UINT32 pixel_width = 0;
+  UINT32 pixel_height = 0;
+  UINT32 pixel_right = 0;
+  UINT32 pixel_bottom = 0;
+
+  if (!snapshot || (left >= right) || (top >= bottom))
+    return FALSE;
+
+  viewer_gfx_rfx_pixel_bounds(snapshot, &origin_x, &origin_y, &pixel_width,
+                              &pixel_height);
+  pixel_right = origin_x + pixel_width;
+  pixel_bottom = origin_y + pixel_height;
+  return (left >= origin_x) && (top >= origin_y) && (right <= pixel_right) &&
+         (bottom <= pixel_bottom);
 }
 
 static BOOL
@@ -155,6 +221,8 @@ static BOOL viewer_gfx_rfx_build_surface_command_bounds(
   if ((left >= right) || (top >= bottom) || (right > snapshot->width) ||
       (bottom > snapshot->height))
     return FALSE;
+  if (!viewer_gfx_rfx_bounds_available(snapshot, left, top, right, bottom))
+    return FALSE;
 
   rect_width = right - left;
   rect_height = bottom - top;
@@ -173,8 +241,14 @@ static BOOL viewer_gfx_rfx_build_surface_command_bounds(
   rfx_rect.y = 0;
   rfx_rect.width = (UINT16)rect_width;
   rfx_rect.height = (UINT16)rect_height;
-  source = snapshot->pixels + ((size_t)top * (size_t)snapshot->stride) +
-           ((size_t)left * 4U);
+  {
+    UINT32 origin_x = 0;
+    UINT32 origin_y = 0;
+    viewer_gfx_rfx_pixel_bounds(snapshot, &origin_x, &origin_y, NULL, NULL);
+    source = snapshot->pixels +
+             ((size_t)(top - origin_y) * (size_t)snapshot->stride) +
+             ((size_t)(left - origin_x) * 4U);
+  }
 
   if (!rfx_compose_message(context->rfx, stream, &rfx_rect, 1, source,
                            rect_width, rect_height, snapshot->stride)) {

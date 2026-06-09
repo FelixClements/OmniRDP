@@ -99,7 +99,7 @@ static int test_applies_broker_options(void) {
   const char *expected_loadbalanceinfo =
       "tsv://MS Terminal Services Plugin.1.Marketing_Pool";
   const size_t expected_loadbalanceinfo_length =
-      strlen(expected_loadbalanceinfo);
+      strnlen_s(expected_loadbalanceinfo, 256);
 
   int ok =
       expect_string(server_hostname, "rds-broker-alt.domain.com") &&

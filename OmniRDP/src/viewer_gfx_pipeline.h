@@ -94,6 +94,8 @@ void viewer_gfx_pipeline_enter_classic_fallback(Viewer *viewer, UINT64 now,
 void viewer_gfx_pipeline_on_baseline_result(Viewer *viewer, UINT64 now,
                                             BOOL sent,
                                             ViewerGfxJoinResult *result);
+void viewer_gfx_pipeline_on_baseline_unavailable(Viewer *viewer, UINT64 now,
+                                                 ViewerGfxJoinResult *result);
 void viewer_gfx_pipeline_on_peer_activated(Viewer *viewer, UINT64 now,
                                            ViewerGfxJoinResult *result);
 void viewer_gfx_pipeline_step_join(ViewerServer *server, Viewer *viewer,

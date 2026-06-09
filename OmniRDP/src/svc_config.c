@@ -36,6 +36,7 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->backend_port = 3389;
   cfg->backend_connect_timeout_ms = 30000;
   cfg->backend_gfx_decode_only_enabled = 0;
+  cfg->backend_gfx_rfx_enabled = 0;
   cfg->backend_rdp_use_redirection_server_name = 0;
   cfg->reconnect_enabled = 1;
   cfg->reconnect_max_attempts = 10;
@@ -54,6 +55,9 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->viewer_throttle_max_updates_per_sec = 0;
   cfg->viewer_gfx_enabled = 0;
   cfg->viewer_gfx_codec = SVC_VIEWER_GFX_CODEC_UNCOMPRESSED;
+  cfg->viewer_gfx_rfx_threading_enabled = 0;
+  cfg->viewer_gfx_dirty_max_in_flight_frames = 1;
+  cfg->viewer_gfx_dirty_max_in_flight_bytes = 4U * 1024U * 1024U;
   cfg->viewer_gfx_diagnostic_full_frame_dirty = 0;
   cfg->viewer_classic_latest_state_enabled = 0;
   cfg->viewer_classic_latest_state_max_queue_depth = 0;
@@ -191,6 +195,8 @@ static int parse_one_instance(const IniFile *ini, const char *name,
   inst->backend_gfx_decode_only_enabled =
       ini_get_bool(ini, section, "backend.gfx.decode_only_enabled",
                    inst->backend_gfx_decode_only_enabled);
+  inst->backend_gfx_rfx_enabled = ini_get_bool(
+      ini, section, "backend.gfx.rfx_enabled", inst->backend_gfx_rfx_enabled);
 
   strcpy_safe(inst->backend_rdp_workspace_id,
               sizeof(inst->backend_rdp_workspace_id),
@@ -259,6 +265,15 @@ static int parse_one_instance(const IniFile *ini, const char *name,
                                           inst->viewer_gfx_enabled);
   inst->viewer_gfx_codec = svc_config_get_viewer_gfx_codec(
       ini, section, "viewer.gfx.codec", inst->viewer_gfx_codec);
+  inst->viewer_gfx_rfx_threading_enabled =
+      ini_get_bool(ini, section, "viewer.gfx.rfx_threading_enabled",
+                   inst->viewer_gfx_rfx_threading_enabled);
+  inst->viewer_gfx_dirty_max_in_flight_frames =
+      ini_get_uint(ini, section, "viewer.gfx.dirty_max_in_flight_frames",
+                   inst->viewer_gfx_dirty_max_in_flight_frames);
+  inst->viewer_gfx_dirty_max_in_flight_bytes =
+      ini_get_uint(ini, section, "viewer.gfx.dirty_max_in_flight_bytes",
+                   inst->viewer_gfx_dirty_max_in_flight_bytes);
   inst->viewer_gfx_diagnostic_full_frame_dirty =
       ini_get_bool(ini, section, "viewer.gfx.diagnostic.full_frame_dirty",
                    inst->viewer_gfx_diagnostic_full_frame_dirty);

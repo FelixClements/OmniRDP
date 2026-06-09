@@ -65,6 +65,7 @@ typedef struct BackendClient {
   BOOL rdpgfx_channel_open;
   BOOL rdpgfx_caps_confirmed;
   BOOL backend_gfx_decode_only_enabled;
+  BOOL backend_rfx_enabled;
   PointerShapeCache *pointer_shape_cache;
   PointerShapeEntry *active_pointer_shape;
   CRITICAL_SECTION pointer_lock;
@@ -97,6 +98,11 @@ typedef struct BackendClient {
   UINT64 bitmap_update_batches_total;
   UINT64 bitmap_update_rectangles_total;
   UINT64 bitmap_update_payload_bytes_total;
+  UINT64 surface_bits_decode_count;
+  UINT64 surface_bits_decode_failure_count;
+  UINT64 surface_bits_decode_time_total_us;
+  UINT64 surface_bits_decode_time_max_us;
+  UINT64 surface_bits_payload_bytes_total;
   UINT64 forwarded_surface_bits_count;
   UINT64 forwarded_surface_bits_bytes;
   UINT64 forwarded_frame_marker_count;
@@ -115,7 +121,14 @@ typedef struct BackendClient {
   void *gdi_ResetGraphics;
   void *gdi_CreateSurface;
   void *gdi_DeleteSurface;
+  void *gdi_SolidFill;
+  void *gdi_SurfaceToSurface;
+  void *gdi_SurfaceToCache;
+  void *gdi_CacheToSurface;
   void *gdi_MapSurfaceToOutput;
+  void *gdi_MapSurfaceToScaledOutput;
+  void *gdi_MapSurfaceToWindow;
+  void *gdi_MapSurfaceToScaledWindow;
   void *gdi_DeleteEncodingContext;
   void *gdi_OnOpen;
   void *gdi_OnClose;
@@ -178,6 +191,7 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
                        const char *domain,
                        const BackendSecurityConfig *security);
 BOOL backend_set_gfx_decode_only(BackendClient *client, BOOL enabled);
+BOOL backend_set_rfx_enabled(BackendClient *client, BOOL enabled);
 
 BOOL backend_apply_rdp_file_options(BackendClient *client,
                                     const BackendRdpFileOptions *options);

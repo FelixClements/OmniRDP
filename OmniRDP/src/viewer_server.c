@@ -42,6 +42,11 @@
 static ViewerServer *g_viewer_server = NULL;
 
 static BOOL viewer_string_has_value(const char *value);
+static UINT64 viewer_server_dirty_area(const RECTANGLE_16 *dirty_rects,
+                                       UINT32 dirty_rect_count);
+static void viewer_server_log_framebuffer_metrics(
+    ViewerServer *server, const char *phase, UINT64 generation,
+    const RECTANGLE_16 *dirty_rects, UINT32 dirty_rect_count);
 
 static ViewerSecurityConfig viewer_security_default(void) {
   ViewerSecurityConfig security = {0};
@@ -253,6 +258,55 @@ viewer_classic_transport_from_viewer(Viewer *viewer) {
 
 static BOOL viewer_string_has_value(const char *value) {
   return value && value[0];
+}
+
+static UINT64 viewer_server_dirty_area(const RECTANGLE_16 *dirty_rects,
+                                       UINT32 dirty_rect_count) {
+  UINT64 area = 0;
+  UINT32 i = 0;
+
+  if (!dirty_rects)
+    return 0;
+
+  for (i = 0; i < dirty_rect_count; i++) {
+    const RECTANGLE_16 *rect = &dirty_rects[i];
+    UINT32 width = 0;
+    UINT32 height = 0;
+
+    if ((rect->left > rect->right) || (rect->top > rect->bottom))
+      continue;
+
+    width = (UINT32)rect->right - (UINT32)rect->left + 1U;
+    height = (UINT32)rect->bottom - (UINT32)rect->top + 1U;
+    area += (UINT64)width * (UINT64)height;
+  }
+
+  return area;
+}
+
+static void viewer_server_log_framebuffer_metrics(
+    ViewerServer *server, const char *phase, UINT64 generation,
+    const RECTANGLE_16 *dirty_rects, UINT32 dirty_rect_count) {
+  ViewerFramebufferMetrics metrics = {0};
+  UINT64 dirty_area = 0;
+
+  if (!server || !phase ||
+      !viewer_framebuffer_get_metrics(&server->framebuffer, &metrics))
+    return;
+
+  dirty_area = viewer_server_dirty_area(dirty_rects, dirty_rect_count);
+  WLog_DBG(TAG,
+           "Framebuffer %s metrics: generation=%" PRIu64
+           " dirty_rects=%u dirty_area=%" PRIu64 " update_dirty_rects=%" PRIu64
+           " update_dirty_bytes=%" PRIu64 " update_copy_bytes=%" PRIu64
+           " update_full_frame_bytes=%" PRIu64 " update_copy_us=%" PRIu64
+           " snapshot_copy_bytes=%" PRIu64 " snapshot_copy_us=%" PRIu64,
+           phase, generation, dirty_rect_count, dirty_area,
+           metrics.last_update_dirty_rect_count,
+           metrics.last_update_dirty_bytes, metrics.last_update_copied_bytes,
+           metrics.last_update_full_frame_bytes,
+           metrics.last_update_copy_time_us, metrics.last_snapshot_copied_bytes,
+           metrics.last_snapshot_copy_time_us);
 }
 
 static char *viewer_identity_field_to_utf8(const void *field, UINT32 length) {
@@ -822,6 +876,15 @@ static void viewer_graphics_context_reset(ViewerGraphicsContext *gfx,
   gfx->preferred_codec = g_viewer_server ? g_viewer_server->viewer_gfx_codec
                                          : VIEWER_GFX_CODEC_UNCOMPRESSED;
   gfx->selected_codec = gfx->preferred_codec;
+  gfx->rfx_threading_enabled =
+      g_viewer_server ? g_viewer_server->viewer_gfx_rfx_threading_enabled
+                      : FALSE;
+  gfx->dirty_max_in_flight_frames =
+      g_viewer_server ? g_viewer_server->viewer_gfx_dirty_max_in_flight_frames
+                      : 1U;
+  gfx->dirty_max_in_flight_bytes =
+      g_viewer_server ? g_viewer_server->viewer_gfx_dirty_max_in_flight_bytes
+                      : VIEWER_GFX_DIRTY_MAX_IN_FLIGHT_BYTES;
   viewer_gfx_pipeline_invalidate_surface_locked(gfx);
   gfx->channel_opened = FALSE;
   gfx->vcm_progress_logged = FALSE;
@@ -1417,9 +1480,16 @@ static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
           &server->publisher, &server->framebuffer, &snapshot)) {
     WLog_WARN(TAG, "Viewer %u RDPEGFX baseline snapshot unavailable",
               viewer->id);
-    return viewer_gfx_handle_failure(
-        server, viewer, now, "RDPEGFX framebuffer baseline unavailable");
+    viewer_gfx_pipeline_on_baseline_unavailable(viewer, now, &result);
+    WLog_INFO(TAG,
+              "Viewer %u RDPEGFX baseline deferred; waiting for backend "
+              "framebuffer refresh",
+              viewer->id);
+    return TRUE;
   }
+  viewer_server_log_framebuffer_metrics(
+      server, "baseline snapshot", snapshot.generation, snapshot.dirty_rects,
+      snapshot.dirty_rect_count);
 
   sent = viewer_gfx_pipeline_send_snapshot(server, viewer, &snapshot);
   viewer_framebuffer_snapshot_free(&snapshot);
@@ -1472,6 +1542,7 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
     UINT64 pending_latest_generation = 0;
     UINT64 fallback_count = 0;
     UINT64 remerge_count = 0;
+    UINT64 ack_timeout_count = 0;
     UINT64 in_flight_bytes = 0;
     UINT32 in_flight_frames = 0;
     UINT32 pending_rect_count = 0;
@@ -1485,6 +1556,7 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
     pending_latest_generation = viewer->gfx.pending_dirty_latest_generation;
     fallback_count = viewer->gfx.dirty_diag_full_frame_fallbacks;
     remerge_count = viewer->gfx.dirty_diag_remerges;
+    ack_timeout_count = viewer->gfx.dirty_ack_timeout_count;
     LeaveCriticalSection(&viewer->gfx.lock);
     WLog_DBG(TAG,
              "Viewer %u RDPEGFX dirty pacing suspended: reason=%s "
@@ -1492,11 +1564,12 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
              " pending_dirty_rects=%u pending_area=%" PRIu64
              " pending_start_generation=%" PRIu64
              " pending_latest_generation=%" PRIu64
-             " full_frame_fallbacks=%" PRIu64 " remerges=%" PRIu64,
+             " full_frame_fallbacks=%" PRIu64 " remerges=%" PRIu64
+             " ack_timeouts=%" PRIu64,
              viewer->id, reason ? reason : "unknown", in_flight_frames,
              in_flight_bytes, pending_rect_count, pending_area,
              pending_start_generation, pending_latest_generation,
-             fallback_count, remerge_count);
+             fallback_count, remerge_count, ack_timeout_count);
     if (reason && (strcmp(reason, "dirty ack timeout") == 0))
       return viewer_gfx_handle_failure(server, viewer, now, reason);
     return TRUE;
@@ -1514,7 +1587,18 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
   }
   LeaveCriticalSection(&viewer->gfx.lock);
 
-  if (!viewer_framebuffer_snapshot(&server->framebuffer, &snapshot)) {
+  if (dirty_batch.full_frame) {
+    if (!viewer_framebuffer_snapshot(&server->framebuffer, &snapshot)) {
+      EnterCriticalSection(&viewer->gfx.lock);
+      (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+          &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+      LeaveCriticalSection(&viewer->gfx.lock);
+      viewer_classic_queues_signal(&viewer->classic_queues);
+      return TRUE;
+    }
+  } else if (!viewer_framebuffer_snapshot_dirty_rects(
+                 &server->framebuffer, dirty_batch.rects,
+                 dirty_batch.rect_count, &snapshot)) {
     EnterCriticalSection(&viewer->gfx.lock);
     (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
         &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
@@ -1533,6 +1617,9 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
     viewer_classic_queues_signal(&viewer->classic_queues);
     return TRUE;
   }
+  viewer_server_log_framebuffer_metrics(
+      server, "dirty snapshot", snapshot.generation, snapshot.dirty_rects,
+      snapshot.dirty_rect_count);
 
   snapshot_generation = snapshot.generation;
   original_dirty_rect_count = snapshot.dirty_rect_count;
@@ -1566,18 +1653,17 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
     BOOL baseline_sent = FALSE;
 
     viewer_framebuffer_snapshot_free(&snapshot);
-    WLog_INFO(TAG,
-              "Viewer %u RDPEGFX uncompressed dirty overload; sending "
-              "baseline instead: reason=%s generation=%" PRIu64
-              " dirty_rects=%u estimated_payload_bytes=%" PRIu64
-              " max_in_flight_bytes=%" PRIu64 " dirty_area=%" PRIu64
-              " surface=%ux%u",
-              viewer->id,
-              uncompressed_overload_reason ? uncompressed_overload_reason
-                                           : "unknown",
-              snapshot_generation, snapshot_dirty_rect_count,
-              estimated_payload_bytes, max_in_flight_bytes, dirty_batch.area,
-              dirty_batch.width, dirty_batch.height);
+    WLog_INFO(
+        TAG,
+        "Viewer %u RDPEGFX uncompressed dirty overload; sending "
+        "baseline instead: reason=%s generation=%" PRIu64
+        " dirty_rects=%u estimated_payload_bytes=%" PRIu64
+        " max_in_flight_bytes=%" PRIu64 " dirty_area=%" PRIu64 " surface=%ux%u",
+        viewer->id,
+        uncompressed_overload_reason ? uncompressed_overload_reason : "unknown",
+        snapshot_generation, snapshot_dirty_rect_count, estimated_payload_bytes,
+        max_in_flight_bytes, dirty_batch.area, dirty_batch.width,
+        dirty_batch.height);
     baseline_sent = viewer_gfx_send_framebuffer_baseline(server, viewer, now);
     if (!baseline_sent) {
       EnterCriticalSection(&viewer->gfx.lock);
@@ -2906,6 +2992,10 @@ ViewerServer *viewer_server_init_ex(const char *bind_address, UINT16 port,
   server->security = security ? *security : viewer_security_default();
   server->viewer_gfx_enabled = FALSE;
   server->viewer_gfx_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
+  server->viewer_gfx_rfx_threading_enabled = FALSE;
+  server->viewer_gfx_dirty_max_in_flight_frames = 1U;
+  server->viewer_gfx_dirty_max_in_flight_bytes =
+      VIEWER_GFX_DIRTY_MAX_IN_FLIGHT_BYTES;
   server->viewer_gfx_diagnostic_full_frame_dirty = FALSE;
   if (backend)
     server->monitor_layout = backend->monitor_layout;
@@ -3011,6 +3101,13 @@ void viewer_server_set_gfx_codec(ViewerServer *server, ViewerGfxCodec codec) {
   server->viewer_gfx_codec = (codec == VIEWER_GFX_CODEC_RFX)
                                  ? VIEWER_GFX_CODEC_RFX
                                  : VIEWER_GFX_CODEC_UNCOMPRESSED;
+}
+
+void viewer_server_set_gfx_rfx_threading(ViewerServer *server, BOOL enabled) {
+  if (!server)
+    return;
+
+  server->viewer_gfx_rfx_threading_enabled = enabled ? TRUE : FALSE;
 }
 
 void viewer_server_set_gfx_diagnostic_full_frame_dirty(ViewerServer *server,
@@ -3163,6 +3260,9 @@ BOOL viewer_server_update_framebuffer_from_gdi(BackendClient *backend,
   EnterCriticalSection(&server->framebuffer.lock);
   generation = server->framebuffer.generation;
   LeaveCriticalSection(&server->framebuffer.lock);
+  viewer_server_log_framebuffer_metrics(server, "update", generation,
+                                        update_dirty_rects,
+                                        update_dirty_rect_count);
   viewer_publisher_note_framebuffer_update(
       &server->publisher, generation, update_dirty_rect_count,
       update_dirty_rect_count > VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS);

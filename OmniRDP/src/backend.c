@@ -10,13 +10,16 @@
 #include <freerdp/client/channels.h>
 #include <freerdp/client/cmdline.h>
 #include <freerdp/client/rdpgfx.h>
+#include <freerdp/codec/color.h>
 #include <freerdp/constants.h>
 #include <freerdp/error.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
+#include <freerdp/gdi/gfx.h>
 #include <freerdp/pointer.h>
 #include <freerdp/update.h>
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <winpr/synch.h>
@@ -81,9 +84,29 @@ backend_rdpgfx_create_surface(RdpgfxClientContext *context,
 static UINT
 backend_rdpgfx_delete_surface(RdpgfxClientContext *context,
                               const RDPGFX_DELETE_SURFACE_PDU *delete_surface);
+static UINT backend_rdpgfx_solid_fill(RdpgfxClientContext *context,
+                                      const RDPGFX_SOLID_FILL_PDU *solid_fill);
+static UINT backend_rdpgfx_surface_to_surface(
+    RdpgfxClientContext *context,
+    const RDPGFX_SURFACE_TO_SURFACE_PDU *surface_to_surface);
+static UINT backend_rdpgfx_surface_to_cache(
+    RdpgfxClientContext *context,
+    const RDPGFX_SURFACE_TO_CACHE_PDU *surface_to_cache);
+static UINT backend_rdpgfx_cache_to_surface(
+    RdpgfxClientContext *context,
+    const RDPGFX_CACHE_TO_SURFACE_PDU *cache_to_surface);
 static UINT backend_rdpgfx_map_surface_to_output(
     RdpgfxClientContext *context,
     const RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU *map_surface_to_output);
+static UINT backend_rdpgfx_map_surface_to_scaled_output(
+    RdpgfxClientContext *context, const RDPGFX_MAP_SURFACE_TO_SCALED_OUTPUT_PDU
+                                      *map_surface_to_scaled_output);
+static UINT backend_rdpgfx_map_surface_to_window(
+    RdpgfxClientContext *context,
+    const RDPGFX_MAP_SURFACE_TO_WINDOW_PDU *map_surface_to_window);
+static UINT backend_rdpgfx_map_surface_to_scaled_window(
+    RdpgfxClientContext *context, const RDPGFX_MAP_SURFACE_TO_SCALED_WINDOW_PDU
+                                      *map_surface_to_scaled_window);
 static UINT
 backend_rdpgfx_start_frame(RdpgfxClientContext *context,
                            const RDPGFX_START_FRAME_PDU *start_frame);
@@ -94,6 +117,10 @@ static UINT backend_rdpgfx_end_frame(RdpgfxClientContext *context,
 static UINT backend_rdpgfx_delete_encoding_context(
     RdpgfxClientContext *context,
     const RDPGFX_DELETE_ENCODING_CONTEXT_PDU *delete_encoding_context);
+static UINT backend_rdpgfx_update_surface_area(RdpgfxClientContext *context,
+                                               UINT16 surface_id,
+                                               UINT32 rect_count,
+                                               const RECTANGLE_16 *rects);
 static void backend_on_channel_connected(void *context,
                                          const ChannelConnectedEventArgs *e);
 static void
@@ -107,6 +134,7 @@ backend_complete_full_refresh_locked(BackendClient *client, UINT64 generation,
 static const char *backend_surface_bits_codec_name(UINT16 codec_id);
 static BOOL backend_should_log_path_event(UINT64 count);
 static UINT64 backend_perf_now_us(void);
+static UINT32 backend_min_u32(UINT32 lhs, UINT32 rhs);
 static BOOL backend_should_log_bitmap_perf(UINT64 batch_count,
                                            UINT64 callback_us,
                                            UINT64 publish_us);
@@ -114,6 +142,8 @@ static void backend_normalize_domain_username(const char **domain,
                                               const char **username);
 static BOOL backend_forward_bitmap_update(BackendClient *client,
                                           const BITMAP_UPDATE *bitmap);
+static BOOL backend_rect_from_bounds(UINT32 left, UINT32 top, UINT32 right,
+                                     UINT32 bottom, RECTANGLE_16 *rect);
 static void backend_ingest_gdi_framebuffer(BackendClient *client,
                                            rdpContext *context,
                                            const RECTANGLE_16 *dirty_rects,
@@ -169,6 +199,20 @@ static UINT64 backend_perf_now_us(void) {
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return ((UINT64)ts.tv_sec * 1000000ULL) + ((UINT64)ts.tv_nsec / 1000ULL);
 #endif
+}
+
+static UINT32 backend_min_u32(UINT32 lhs, UINT32 rhs) {
+  return (lhs < rhs) ? lhs : rhs;
+}
+
+static void backend_perf_add_uint64(UINT64 *counter, UINT64 value) {
+  if (!counter)
+    return;
+
+  if ((UINT64_MAX - *counter) < value)
+    *counter = UINT64_MAX;
+  else
+    *counter += value;
 }
 
 static BOOL backend_should_log_bitmap_perf(UINT64 batch_count,
@@ -322,20 +366,40 @@ static void backend_attach_rdpgfx_context(BackendClient *client,
   client->gdi_ResetGraphics = rdpgfx->ResetGraphics;
   client->gdi_CreateSurface = rdpgfx->CreateSurface;
   client->gdi_DeleteSurface = rdpgfx->DeleteSurface;
+  client->gdi_SolidFill = rdpgfx->SolidFill;
+  client->gdi_SurfaceToSurface = rdpgfx->SurfaceToSurface;
+  client->gdi_SurfaceToCache = rdpgfx->SurfaceToCache;
+  client->gdi_CacheToSurface = rdpgfx->CacheToSurface;
   client->gdi_MapSurfaceToOutput = rdpgfx->MapSurfaceToOutput;
+  client->gdi_MapSurfaceToScaledOutput = rdpgfx->MapSurfaceToScaledOutput;
+  client->gdi_MapSurfaceToWindow = rdpgfx->MapSurfaceToWindow;
+  client->gdi_MapSurfaceToScaledWindow = rdpgfx->MapSurfaceToScaledWindow;
   client->gdi_DeleteEncodingContext = rdpgfx->DeleteEncodingContext;
   client->gdi_OnOpen = rdpgfx->OnOpen;
   client->gdi_OnClose = rdpgfx->OnClose;
   client->gdi_CapsConfirm = rdpgfx->CapsConfirm;
 
-  client->rdpgfx->custom = client;
+  /* Keep rdpgfx->custom owned by FreeRDP GDI. GDI callbacks cast it to
+   *
+   * rdpGdi; OmniRDP callbacks recover BackendClient through g_backend_client.
+
+   */
   client->rdpgfx->OnOpen = backend_rdpgfx_on_open;
   client->rdpgfx->OnClose = backend_rdpgfx_on_close;
   client->rdpgfx->CapsConfirm = backend_rdpgfx_caps_confirm;
   client->rdpgfx->ResetGraphics = backend_rdpgfx_reset_graphics;
   client->rdpgfx->CreateSurface = backend_rdpgfx_create_surface;
   client->rdpgfx->DeleteSurface = backend_rdpgfx_delete_surface;
+  client->rdpgfx->SolidFill = backend_rdpgfx_solid_fill;
+  client->rdpgfx->SurfaceToSurface = backend_rdpgfx_surface_to_surface;
+  client->rdpgfx->SurfaceToCache = backend_rdpgfx_surface_to_cache;
+  client->rdpgfx->CacheToSurface = backend_rdpgfx_cache_to_surface;
   client->rdpgfx->MapSurfaceToOutput = backend_rdpgfx_map_surface_to_output;
+  client->rdpgfx->MapSurfaceToScaledOutput =
+      backend_rdpgfx_map_surface_to_scaled_output;
+  client->rdpgfx->MapSurfaceToWindow = backend_rdpgfx_map_surface_to_window;
+  client->rdpgfx->MapSurfaceToScaledWindow =
+      backend_rdpgfx_map_surface_to_scaled_window;
   client->rdpgfx->StartFrame = backend_rdpgfx_start_frame;
   client->rdpgfx->SurfaceCommand = backend_rdpgfx_surface_command;
   client->rdpgfx->EndFrame = backend_rdpgfx_end_frame;
@@ -601,10 +665,20 @@ static BOOL backend_forward_frame_marker(BackendClient *client,
   return TRUE;
 }
 
+static BackendClient *
+backend_from_rdpgfx_context(const RdpgfxClientContext *context) {
+  BackendClient *client = g_backend_client;
+
+  if (!context || !client || (client->rdpgfx != context))
+    return NULL;
+
+  return client;
+}
+
 static UINT backend_rdpgfx_on_open(RdpgfxClientContext *context,
                                    BOOL *do_caps_advertise,
                                    BOOL *do_frame_acks) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
 
   if (!client)
     return ERROR_INVALID_PARAMETER;
@@ -621,7 +695,7 @@ static UINT backend_rdpgfx_on_open(RdpgfxClientContext *context,
 }
 
 static UINT backend_rdpgfx_on_close(RdpgfxClientContext *context) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
 
   if (!client)
     return ERROR_INVALID_PARAMETER;
@@ -635,7 +709,7 @@ static UINT backend_rdpgfx_on_close(RdpgfxClientContext *context) {
 static UINT
 backend_rdpgfx_caps_confirm(RdpgfxClientContext *context,
                             const RDPGFX_CAPS_CONFIRM_PDU *caps_confirm) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
 
   if (!client || !caps_confirm || !caps_confirm->capsSet)
     return ERROR_INVALID_PARAMETER;
@@ -651,65 +725,191 @@ backend_rdpgfx_caps_confirm(RdpgfxClientContext *context,
 static UINT
 backend_rdpgfx_create_surface(RdpgfxClientContext *context,
                               const RDPGFX_CREATE_SURFACE_PDU *create_surface) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
 
   if (!client || !create_surface)
     return ERROR_INVALID_PARAMETER;
 
-  (void)create_surface;
+  if (client->gdi_CreateSurface)
+    gdi_rc = ((pcRdpgfxCreateSurface)client->gdi_CreateSurface)(context,
+                                                                create_surface);
 
-  return CHANNEL_RC_OK;
+  return gdi_rc;
 }
 
 static UINT
 backend_rdpgfx_delete_surface(RdpgfxClientContext *context,
                               const RDPGFX_DELETE_SURFACE_PDU *delete_surface) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
 
   if (!client || !delete_surface)
     return ERROR_INVALID_PARAMETER;
 
-  (void)delete_surface;
+  if (client->gdi_DeleteSurface)
+    gdi_rc = ((pcRdpgfxDeleteSurface)client->gdi_DeleteSurface)(context,
+                                                                delete_surface);
 
-  return CHANNEL_RC_OK;
+  return gdi_rc;
+}
+
+static UINT backend_rdpgfx_solid_fill(RdpgfxClientContext *context,
+                                      const RDPGFX_SOLID_FILL_PDU *solid_fill) {
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
+
+  if (!client || !solid_fill)
+    return ERROR_INVALID_PARAMETER;
+
+  if (client->gdi_SolidFill)
+    gdi_rc = ((pcRdpgfxSolidFill)client->gdi_SolidFill)(context, solid_fill);
+
+  return gdi_rc;
+}
+
+static UINT backend_rdpgfx_surface_to_surface(
+    RdpgfxClientContext *context,
+    const RDPGFX_SURFACE_TO_SURFACE_PDU *surface_to_surface) {
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
+
+  if (!client || !surface_to_surface)
+    return ERROR_INVALID_PARAMETER;
+
+  if (client->gdi_SurfaceToSurface)
+    gdi_rc = ((pcRdpgfxSurfaceToSurface)client->gdi_SurfaceToSurface)(
+        context, surface_to_surface);
+
+  return gdi_rc;
+}
+
+static UINT backend_rdpgfx_surface_to_cache(
+    RdpgfxClientContext *context,
+    const RDPGFX_SURFACE_TO_CACHE_PDU *surface_to_cache) {
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
+
+  if (!client || !surface_to_cache)
+    return ERROR_INVALID_PARAMETER;
+
+  if (client->gdi_SurfaceToCache)
+    gdi_rc = ((pcRdpgfxSurfaceToCache)client->gdi_SurfaceToCache)(
+        context, surface_to_cache);
+
+  return gdi_rc;
+}
+
+static UINT backend_rdpgfx_cache_to_surface(
+    RdpgfxClientContext *context,
+    const RDPGFX_CACHE_TO_SURFACE_PDU *cache_to_surface) {
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
+
+  if (!client || !cache_to_surface)
+    return ERROR_INVALID_PARAMETER;
+
+  if (client->gdi_CacheToSurface)
+    gdi_rc = ((pcRdpgfxCacheToSurface)client->gdi_CacheToSurface)(
+        context, cache_to_surface);
+
+  return gdi_rc;
 }
 
 static UINT backend_rdpgfx_map_surface_to_output(
     RdpgfxClientContext *context,
     const RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU *map_surface_to_output) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
 
   if (!client || !map_surface_to_output)
     return ERROR_INVALID_PARAMETER;
 
-  (void)map_surface_to_output;
+  if (client->gdi_MapSurfaceToOutput)
+    gdi_rc = ((pcRdpgfxMapSurfaceToOutput)client->gdi_MapSurfaceToOutput)(
+        context, map_surface_to_output);
 
-  return CHANNEL_RC_OK;
+  return gdi_rc;
+}
+
+static UINT backend_rdpgfx_map_surface_to_scaled_output(
+    RdpgfxClientContext *context, const RDPGFX_MAP_SURFACE_TO_SCALED_OUTPUT_PDU
+                                      *map_surface_to_scaled_output) {
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
+
+  if (!client || !map_surface_to_scaled_output)
+    return ERROR_INVALID_PARAMETER;
+
+  if (client->gdi_MapSurfaceToScaledOutput)
+    gdi_rc = ((pcRdpgfxMapSurfaceToScaledOutput)
+                  client->gdi_MapSurfaceToScaledOutput)(
+        context, map_surface_to_scaled_output);
+
+  return gdi_rc;
+}
+
+static UINT backend_rdpgfx_map_surface_to_window(
+    RdpgfxClientContext *context,
+    const RDPGFX_MAP_SURFACE_TO_WINDOW_PDU *map_surface_to_window) {
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
+
+  if (!client || !map_surface_to_window)
+    return ERROR_INVALID_PARAMETER;
+
+  if (client->gdi_MapSurfaceToWindow)
+    gdi_rc = ((pcRdpgfxMapSurfaceToWindow)client->gdi_MapSurfaceToWindow)(
+        context, map_surface_to_window);
+
+  return gdi_rc;
+}
+
+static UINT backend_rdpgfx_map_surface_to_scaled_window(
+    RdpgfxClientContext *context, const RDPGFX_MAP_SURFACE_TO_SCALED_WINDOW_PDU
+                                      *map_surface_to_scaled_window) {
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
+
+  if (!client || !map_surface_to_scaled_window)
+    return ERROR_INVALID_PARAMETER;
+
+  if (client->gdi_MapSurfaceToScaledWindow)
+    gdi_rc = ((pcRdpgfxMapSurfaceToScaledWindow)
+                  client->gdi_MapSurfaceToScaledWindow)(
+        context, map_surface_to_scaled_window);
+
+  return gdi_rc;
 }
 
 static UINT
 backend_rdpgfx_start_frame(RdpgfxClientContext *context,
                            const RDPGFX_START_FRAME_PDU *start_frame) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
 
   if (!client || !start_frame)
     return ERROR_INVALID_PARAMETER;
 
   if (client->gdi_StartFrame)
-    ((pcRdpgfxStartFrame)client->gdi_StartFrame)(context, start_frame);
+    gdi_rc = ((pcRdpgfxStartFrame)client->gdi_StartFrame)(context, start_frame);
 
-  return CHANNEL_RC_OK;
+  return gdi_rc;
 }
 
 static UINT backend_rdpgfx_end_frame(RdpgfxClientContext *context,
                                      const RDPGFX_END_FRAME_PDU *end_frame) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
 
   if (!client || !end_frame)
     return ERROR_INVALID_PARAMETER;
 
   if (client->gdi_EndFrame)
-    ((pcRdpgfxEndFrame)client->gdi_EndFrame)(context, end_frame);
+    gdi_rc = ((pcRdpgfxEndFrame)client->gdi_EndFrame)(context, end_frame);
+
+  if (gdi_rc != CHANNEL_RC_OK)
+    return gdi_rc;
 
   // Backend RDPEGFX EndFrame is a decode/canonical-state boundary only. Do not
   // publish backend GFX PDUs to viewers from this callback; still complete a
@@ -722,48 +922,38 @@ static UINT backend_rdpgfx_end_frame(RdpgfxClientContext *context,
     backend_mark_full_refresh_complete(client);
   }
 
-  return CHANNEL_RC_OK;
+  return gdi_rc;
 }
 
 static UINT backend_rdpgfx_surface_command(RdpgfxClientContext *context,
                                            const RDPGFX_SURFACE_COMMAND *cmd) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
   UINT gdi_rc = CHANNEL_RC_OK;
-  BOOL gdi_chained = FALSE;
-  RECTANGLE_16 dirty_rect = {0};
 
   if (!client || !cmd)
     return ERROR_INVALID_PARAMETER;
 
-  if (client->gdi_SurfaceCommand) {
+  if (client->gdi_SurfaceCommand)
     gdi_rc = ((pcRdpgfxSurfaceCommand)client->gdi_SurfaceCommand)(context, cmd);
-    gdi_chained = TRUE;
-  }
 
-  if (gdi_chained && (gdi_rc == CHANNEL_RC_OK) && (cmd->left <= 0xFFFFU) &&
-      (cmd->top <= 0xFFFFU) && (cmd->right <= 0xFFFFU) &&
-      (cmd->bottom <= 0xFFFFU)) {
-    dirty_rect.left = (UINT16)cmd->left;
-    dirty_rect.top = (UINT16)cmd->top;
-    dirty_rect.right = (UINT16)cmd->right;
-    dirty_rect.bottom = (UINT16)cmd->bottom;
-    backend_ingest_gdi_framebuffer(client, client->context, &dirty_rect, 1);
-  }
-
-  return CHANNEL_RC_OK;
+  return gdi_rc;
 }
 
 static UINT
 backend_rdpgfx_reset_graphics(RdpgfxClientContext *context,
                               const RDPGFX_RESET_GRAPHICS_PDU *reset_graphics) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
   BOOL changed = FALSE;
 
   if (!client || !reset_graphics)
     return ERROR_INVALID_PARAMETER;
 
   if (client->gdi_ResetGraphics)
-    ((pcRdpgfxResetGraphics)client->gdi_ResetGraphics)(context, reset_graphics);
+    gdi_rc = ((pcRdpgfxResetGraphics)client->gdi_ResetGraphics)(context,
+                                                                reset_graphics);
+  if (gdi_rc != CHANNEL_RC_OK)
+    return gdi_rc;
 
   backend_store_desktop_layout(client, reset_graphics->width,
                                reset_graphics->height, &changed);
@@ -783,14 +973,98 @@ backend_rdpgfx_reset_graphics(RdpgfxClientContext *context,
 static UINT backend_rdpgfx_delete_encoding_context(
     RdpgfxClientContext *context,
     const RDPGFX_DELETE_ENCODING_CONTEXT_PDU *delete_encoding_context) {
-  BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  UINT gdi_rc = CHANNEL_RC_OK;
 
   if (!client || !delete_encoding_context)
     return ERROR_INVALID_PARAMETER;
 
-  (void)delete_encoding_context;
+  if (client->gdi_DeleteEncodingContext)
+    gdi_rc = ((pcRdpgfxDeleteEncodingContext)client->gdi_DeleteEncodingContext)(
+        context, delete_encoding_context);
 
-  return CHANNEL_RC_OK;
+  return gdi_rc;
+}
+
+static UINT backend_rdpgfx_update_surface_area(RdpgfxClientContext *context,
+                                               UINT16 surface_id,
+                                               UINT32 rect_count,
+                                               const RECTANGLE_16 *rects) {
+  BackendClient *client = backend_from_rdpgfx_context(context);
+  rdpGdi *gdi = NULL;
+  gdiGfxSurface *surface = NULL;
+  RECTANGLE_16 *dirty_rects = NULL;
+  UINT32 dirty_rect_count = 0;
+  UINT32 i = 0;
+  UINT rc = CHANNEL_RC_OK;
+
+  if (!client || !context || !context->GetSurfaceData)
+    return ERROR_INVALID_PARAMETER;
+  if ((rect_count > 0) && !rects)
+    return ERROR_INVALID_PARAMETER;
+
+  gdi = client->context ? client->context->gdi : NULL;
+  surface = (gdiGfxSurface *)context->GetSurfaceData(context, surface_id);
+  if (!gdi || !gdi->primary_buffer || !surface)
+    return CHANNEL_RC_OK;
+  if (!surface->outputMapped || !surface->data || (surface->scanline == 0))
+    return CHANNEL_RC_OK;
+  if ((gdi->width == 0) || (gdi->height == 0) || (gdi->stride == 0) ||
+      (surface->mappedWidth == 0) || (surface->mappedHeight == 0))
+    return CHANNEL_RC_OK;
+
+  if (rect_count > 0) {
+    dirty_rects = (RECTANGLE_16 *)calloc(rect_count, sizeof(*dirty_rects));
+    if (!dirty_rects)
+      return CHANNEL_RC_NO_MEMORY;
+  }
+
+  for (i = 0; i < rect_count; i++) {
+    const RECTANGLE_16 *rect = &rects[i];
+    const double sx = surface->outputTargetWidth / (double)surface->mappedWidth;
+    const double sy =
+        surface->outputTargetHeight / (double)surface->mappedHeight;
+    const UINT32 src_x = rect->left;
+    const UINT32 src_y = rect->top;
+    const UINT32 src_w =
+        (rect->right > rect->left) ? rect->right - rect->left : 0;
+    const UINT32 src_h =
+        (rect->bottom > rect->top) ? rect->bottom - rect->top : 0;
+    const UINT32 raw_dst_x = surface->outputOriginX + (UINT32)(src_x * sx);
+    const UINT32 raw_dst_y = surface->outputOriginY + (UINT32)(src_y * sy);
+    const UINT32 dst_x = backend_min_u32(raw_dst_x, gdi->width - 1);
+    const UINT32 dst_y = backend_min_u32(raw_dst_y, gdi->height - 1);
+    const UINT32 dst_w =
+        backend_min_u32((UINT32)(src_w * sx), (UINT32)gdi->width - dst_x);
+    const UINT32 dst_h =
+        backend_min_u32((UINT32)(src_h * sy), (UINT32)gdi->height - dst_y);
+
+    if ((src_w == 0) || (src_h == 0) || (raw_dst_x >= gdi->width) ||
+        (raw_dst_y >= gdi->height) || (dst_w == 0) || (dst_h == 0))
+      continue;
+
+    if (!freerdp_image_scale(gdi->primary_buffer, gdi->dstFormat, gdi->stride,
+                             dst_x, dst_y, dst_w, dst_h, surface->data,
+                             surface->format, surface->scanline, src_x, src_y,
+                             src_w, src_h)) {
+      rc = CHANNEL_RC_NULL_DATA;
+      break;
+    }
+
+    if (backend_rect_from_bounds(dst_x, dst_y, dst_x + dst_w - 1U,
+                                 dst_y + dst_h - 1U,
+                                 &dirty_rects[dirty_rect_count]))
+      dirty_rect_count++;
+  }
+
+  if ((rc == CHANNEL_RC_OK) && (dirty_rect_count > 0)) {
+    surface->handleInUpdateSurfaceArea = TRUE;
+    backend_ingest_gdi_framebuffer(client, client->context, dirty_rects,
+                                   dirty_rect_count);
+  }
+
+  free(dirty_rects);
+  return rc;
 }
 
 static void backend_on_channel_connected(void *context,
@@ -804,6 +1078,14 @@ static void backend_on_channel_connected(void *context,
 
   if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) != 0)
     return;
+
+  if (client->context && client->context->gdi &&
+      !gdi_graphics_pipeline_init_ex(
+          client->context->gdi, (RdpgfxClientContext *)e->pInterface, NULL,
+          NULL, backend_rdpgfx_update_surface_area)) {
+    WLog_ERR(TAG, "Failed to initialize backend RDPEGFX GDI decoder");
+    return;
+  }
 
   backend_attach_rdpgfx_context(client, (RdpgfxClientContext *)e->pInterface);
   WLog_INFO(TAG, "Backend RDPEGFX dynamic channel connected");
@@ -1212,35 +1494,52 @@ static BOOL on_surface_bits(rdpContext *context,
                             const SURFACE_BITS_COMMAND *cmd) {
   BackendClient *client = g_backend_client;
   BOOL rc = FALSE;
+  UINT64 decode_start_us = 0;
+  UINT64 decode_us = 0;
   RECTANGLE_16 dirty_rect = {0};
 
   if (!client || !client->orig_surface_bits)
     return FALSE;
 
+  decode_start_us = backend_perf_now_us();
   rc = client->orig_surface_bits(context, cmd);
+  decode_us = backend_perf_now_us() - decode_start_us;
   if (!cmd)
     return rc;
+
+  if (rc)
+    client->surface_bits_decode_count++;
+  else
+    client->surface_bits_decode_failure_count++;
+  backend_perf_add_uint64(&client->surface_bits_decode_time_total_us,
+                          decode_us);
+  if (decode_us > client->surface_bits_decode_time_max_us)
+    client->surface_bits_decode_time_max_us = decode_us;
+  backend_perf_add_uint64(&client->surface_bits_payload_bytes_total,
+                          cmd->bmp.bitmapDataLength);
 
   if (!rc) {
     WLog_WARN(TAG,
               "SurfaceBits decode failed rect=(%u,%u)-(%u,%u) size=%ux%u "
-              "bpp=%u payload=%" PRIu32 " codec=%s(%" PRIu16 ")",
+              "bpp=%u payload=%" PRIu32 " codec=%s(%" PRIu16
+              ") decode_us=%" PRIu64,
               cmd->destLeft, cmd->destTop, cmd->destRight, cmd->destBottom,
               cmd->bmp.width, cmd->bmp.height, cmd->bmp.bpp,
               cmd->bmp.bitmapDataLength,
               backend_surface_bits_codec_name(cmd->bmp.codecID),
-              cmd->bmp.codecID);
+              cmd->bmp.codecID, decode_us);
     return rc;
   }
 
   WLog_INFO(TAG,
             "Received SurfaceBits rect=(%u,%u)-(%u,%u) size=%ux%u bpp=%u "
-            "payload=%" PRIu32 " codec=%s(%" PRIu16 ") cmdType=%" PRIu16,
+            "payload=%" PRIu32 " codec=%s(%" PRIu16 ") cmdType=%" PRIu16
+            " decode_us=%" PRIu64,
             cmd->destLeft, cmd->destTop, cmd->destRight, cmd->destBottom,
             cmd->bmp.width, cmd->bmp.height, cmd->bmp.bpp,
             cmd->bmp.bitmapDataLength,
             backend_surface_bits_codec_name(cmd->bmp.codecID), cmd->bmp.codecID,
-            cmd->cmdType);
+            cmd->cmdType, decode_us);
 
   backend_refresh_desktop_layout(client, context);
   if (backend_rect_from_bounds(cmd->destLeft, cmd->destTop, cmd->destRight,
@@ -1906,6 +2205,9 @@ BOOL backend_set_gfx_decode_only(BackendClient *client, BOOL enabled) {
 
   freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline,
                             client->backend_gfx_decode_only_enabled);
+  if (client->backend_gfx_decode_only_enabled)
+    freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, FALSE);
+  freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE);
   freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
   freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
   freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
@@ -1916,6 +2218,27 @@ BOOL backend_set_gfx_decode_only(BackendClient *client, BOOL enabled) {
 
   WLog_INFO(TAG, "Backend RDPEGFX decode-only gate enabled=%s",
             client->backend_gfx_decode_only_enabled ? "true" : "false");
+  return TRUE;
+}
+
+BOOL backend_set_rfx_enabled(BackendClient *client, BOOL enabled) {
+  rdpSettings *settings = NULL;
+
+  if (!client || !client->context || !client->context->settings)
+    return FALSE;
+
+  settings = client->context->settings;
+  client->backend_rfx_enabled = enabled ? TRUE : FALSE;
+
+  freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec,
+                            client->backend_rfx_enabled);
+  freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE);
+  freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
+  freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
+  freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
+
+  WLog_INFO(TAG, "Backend RemoteFX candidate mode enabled=%s",
+            client->backend_rfx_enabled ? "true" : "false");
   return TRUE;
 }
 
@@ -1962,6 +2285,11 @@ BOOL backend_connect(BackendClient *client) {
   client->bitmap_update_batches_total = 0;
   client->bitmap_update_rectangles_total = 0;
   client->bitmap_update_payload_bytes_total = 0;
+  client->surface_bits_decode_count = 0;
+  client->surface_bits_decode_failure_count = 0;
+  client->surface_bits_decode_time_total_us = 0;
+  client->surface_bits_decode_time_max_us = 0;
+  client->surface_bits_payload_bytes_total = 0;
   client->forwarded_surface_bits_count = 0;
   client->forwarded_surface_bits_bytes = 0;
   client->forwarded_frame_marker_count = 0;

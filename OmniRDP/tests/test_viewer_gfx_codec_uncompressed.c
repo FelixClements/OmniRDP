@@ -123,6 +123,42 @@ static int test_dirty_rect_builds_exclusive_bounds(void) {
   return ok;
 }
 
+static int test_dirty_rect_uses_cropped_snapshot_origin(void) {
+  BYTE pixels[16] = {0};
+  RECTANGLE_16 dirty_rect = {1, 1, 2, 2};
+  RDPGFX_SURFACE_COMMAND command = {0};
+  ViewerFramebufferSnapshot snapshot =
+      make_snapshot(pixels, 4, 4, 8, sizeof(pixels));
+  int ok = 1;
+
+  snapshot.pixel_origin_x = 1;
+  snapshot.pixel_origin_y = 1;
+  snapshot.pixel_width = 2;
+  snapshot.pixel_height = 2;
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(0xA0U + i);
+
+  ok = ok && expect_true(viewer_gfx_uncompressed_build_surface_command_rect(
+                             &snapshot, 12, &dirty_rect, &command),
+                         "cropped dirty snapshot command builds");
+  ok = ok && expect_uint32(command.left, 1, "cropped dirty left");
+  ok = ok && expect_uint32(command.top, 1, "cropped dirty top");
+  ok = ok && expect_uint32(command.right, 3, "cropped dirty exclusive right");
+  ok = ok && expect_uint32(command.bottom, 3, "cropped dirty exclusive bottom");
+  ok = ok && expect_uint32(command.width, 2, "cropped dirty width");
+  ok = ok && expect_uint32(command.height, 2, "cropped dirty height");
+  ok = ok && expect_uint32(command.length, sizeof(pixels),
+                           "cropped dirty payload length");
+  ok = ok && expect_bytes(command.data, pixels, sizeof(pixels),
+                          "cropped dirty payload starts at origin");
+  viewer_gfx_uncompressed_surface_command_reset(&command);
+
+  ok = ok && expect_false(viewer_gfx_uncompressed_build_surface_command(
+                              &snapshot, 12, &command),
+                          "full command rejects cropped snapshot");
+  return ok;
+}
+
 static int test_dirty_rect_edge_bounds(void) {
   BYTE pixels[64] = {0};
   BYTE expected_pixel[4] = {0};
@@ -308,6 +344,7 @@ int main(void) {
 
   ok = ok && test_full_frame_repacks_padded_stride();
   ok = ok && test_dirty_rect_builds_exclusive_bounds();
+  ok = ok && test_dirty_rect_uses_cropped_snapshot_origin();
   ok = ok && test_dirty_rect_edge_bounds();
   ok = ok && test_invalid_inputs();
   ok = ok && test_reset_idempotent();

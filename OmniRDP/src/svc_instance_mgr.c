@@ -1390,6 +1390,16 @@ int inst_mgr_reload_config(InstanceManager *mgr, const char *configPath) {
 
       /* Codec changes */
       if (oldInst->config.codec_nscodec != nc->codec_nscodec ||
+          oldInst->config.backend_gfx_decode_only_enabled !=
+              nc->backend_gfx_decode_only_enabled ||
+          oldInst->config.backend_gfx_rfx_enabled !=
+              nc->backend_gfx_rfx_enabled ||
+          oldInst->config.viewer_gfx_rfx_threading_enabled !=
+              nc->viewer_gfx_rfx_threading_enabled ||
+          oldInst->config.viewer_gfx_dirty_max_in_flight_frames !=
+              nc->viewer_gfx_dirty_max_in_flight_frames ||
+          oldInst->config.viewer_gfx_dirty_max_in_flight_bytes !=
+              nc->viewer_gfx_dirty_max_in_flight_bytes ||
           oldInst->config.codec_remote_fx != nc->codec_remote_fx ||
           oldInst->config.codec_graphics_pipeline !=
               nc->codec_graphics_pipeline ||
@@ -1568,6 +1578,16 @@ int inst_mgr_reload_config(InstanceManager *mgr, const char *configPath) {
           is_breaking = 1;
         }
         if (oldInst->config.codec_nscodec != nc->codec_nscodec ||
+            oldInst->config.backend_gfx_decode_only_enabled !=
+                nc->backend_gfx_decode_only_enabled ||
+            oldInst->config.backend_gfx_rfx_enabled !=
+                nc->backend_gfx_rfx_enabled ||
+            oldInst->config.viewer_gfx_rfx_threading_enabled !=
+                nc->viewer_gfx_rfx_threading_enabled ||
+            oldInst->config.viewer_gfx_dirty_max_in_flight_frames !=
+                nc->viewer_gfx_dirty_max_in_flight_frames ||
+            oldInst->config.viewer_gfx_dirty_max_in_flight_bytes !=
+                nc->viewer_gfx_dirty_max_in_flight_bytes ||
             oldInst->config.codec_remote_fx != nc->codec_remote_fx ||
             oldInst->config.codec_graphics_pipeline !=
                 nc->codec_graphics_pipeline ||
