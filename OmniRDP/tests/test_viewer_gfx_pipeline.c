@@ -96,6 +96,13 @@ static UINT test_end_frame(RdpgfxServerContext *context,
   return test_record_send(TEST_SEND_END);
 }
 
+static UINT test_caps_confirm(RdpgfxServerContext *context,
+                              const RDPGFX_CAPS_CONFIRM_PDU *confirm) {
+  (void)context;
+  (void)confirm;
+  return ERROR_INTERNAL_ERROR;
+}
+
 static void reset_send_recorder(void) {
   memset(g_send_order, 0, sizeof(g_send_order));
   memset(&g_last_reset, 0, sizeof(g_last_reset));
@@ -470,6 +477,37 @@ static int test_step_join_and_baseline_result_transitions(void) {
                          "failed live resize baseline leaves dirty disabled");
 
   uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_caps_advertise_rejects_missing_capsets(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext context = {0};
+  RDPGFX_CAPS_ADVERTISE_PDU advertise = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(
+                 InitializeCriticalSectionAndSpinCount(&server.gfx.lock, 4000),
+                 "server gfx lock init");
+  ok = ok && expect_true(init_test_viewer(&viewer, 800, 600), "viewer init");
+  viewer.id = 7;
+  viewer.gfx.pipeline_server = &server;
+  context.custom = &viewer;
+  context.CapsConfirm = test_caps_confirm;
+  advertise.capsSetCount = 1;
+  advertise.capsSets = NULL;
+
+  ok = ok &&
+       expect_uint32(viewer_gfx_pipeline_caps_advertise(&context, &advertise),
+                     CHANNEL_RC_OK, "missing capsets handled as incompatible");
+  ok = ok && expect_true(!viewer.gfx.caps_ready,
+                         "missing capsets does not confirm caps");
+  ok = ok && expect_true(!viewer.gfx.use_rdpgfx,
+                         "missing capsets does not enable rdpegfx");
+
+  uninit_test_viewer(&viewer);
+  DeleteCriticalSection(&server.gfx.lock);
   return ok;
 }
 
@@ -3270,6 +3308,8 @@ int main(void) {
   if (!test_peer_activation_sets_join_actions())
     return 1;
   if (!test_step_join_and_baseline_result_transitions())
+    return 1;
+  if (!test_caps_advertise_rejects_missing_capsets())
     return 1;
   if (!test_snapshot_validation_rejects_not_ready())
     return 1;

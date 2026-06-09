@@ -1,7 +1,9 @@
 #include "test_utils.h"
 #include "viewer_internal.h"
 #include <assert.h>
+#include <freerdp/channels/rdpgfx.h>
 #include <stdint.h>
+#include <string.h>
 
 static void test_ownership_timeout_transitions(void) {
   ViewerInputOwnershipState state = {0};
@@ -158,6 +160,17 @@ static UINT32 test_gfx_avc_disabled_flag(void) {
 #endif
 }
 
+static int test_gfx_cap_description_formats_version_flags(void) {
+  char buffer[80] = {0};
+  RDPGFX_CAPSET cap = test_gfx_cap(0x12345678U, 0x9ABCDEF0U);
+
+  if (!viewer_gfx_capset_describe(&cap, buffer, sizeof(buffer)))
+    return 1;
+  if (strcmp(buffer, "version=0x12345678 flags=0x9ABCDEF0") != 0)
+    return 1;
+  return 0;
+}
+
 static void test_gfx_supported_clean_cap_selected(void) {
   RDPGFX_CAPSET selected = {0};
   RDPGFX_CAPSET advertised[] = {test_gfx_cap(RDPGFX_CAPVERSION_8, 0)};
@@ -254,17 +267,46 @@ static void test_gfx_unsupported_first_does_not_poison_canonical(void) {
   assert(selected.version == RDPGFX_CAPVERSION_8);
 }
 
-static void test_gfx_canonical_mismatch_falls_back_for_viewer(void) {
+static int test_gfx_canonical_version_accepts_different_allowed_flags(void) {
+  const UINT32 free_rdp_small_cache_flag = 0x00000002U;
   RDPGFX_CAPSET selected = {0};
-  RDPGFX_CAPSET canonical = test_gfx_cap(RDPGFX_CAPVERSION_8, 0);
+  RDPGFX_CAPSET canonical =
+      test_gfx_cap(RDPGFX_CAPVERSION_8, free_rdp_small_cache_flag);
+  RDPGFX_CAPSET advertised[] = {test_gfx_cap(RDPGFX_CAPVERSION_8, 0)};
+
+  if (!viewer_gfx_select_compatible_caps(&canonical, TRUE, advertised, 1,
+                                         &selected))
+    return 1;
+  if (selected.version != RDPGFX_CAPVERSION_8)
+    return 1;
+  if (selected.flags != advertised[0].flags)
+    return 1;
+  return 0;
+}
+
+static int test_gfx_canonical_different_version_falls_back_for_viewer(void) {
+#ifdef RDPGFX_CAPVERSION_81
+  RDPGFX_CAPSET selected = {0};
+  RDPGFX_CAPSET canonical = test_gfx_cap(RDPGFX_CAPVERSION_81, 0);
   RDPGFX_CAPSET advertised[] = {
       test_gfx_cap(RDPGFX_CAPVERSION_8, test_gfx_avc_disabled_flag())};
 
-  if (test_gfx_avc_disabled_flag() == 0)
-    advertised[0].version = UINT32_MAX;
+  if (viewer_gfx_select_compatible_caps(&canonical, TRUE, advertised, 1,
+                                        &selected))
+    return 1;
+#endif
+  return 0;
+}
 
-  assert(!viewer_gfx_select_compatible_caps(&canonical, TRUE, advertised, 1,
-                                            &selected));
+static int test_gfx_canonical_same_version_unknown_flags_rejected(void) {
+  RDPGFX_CAPSET selected = {0};
+  RDPGFX_CAPSET canonical = test_gfx_cap(RDPGFX_CAPVERSION_8, 0);
+  RDPGFX_CAPSET advertised[] = {test_gfx_cap(RDPGFX_CAPVERSION_8, 0x80000000U)};
+
+  if (viewer_gfx_select_compatible_caps(&canonical, TRUE, advertised, 1,
+                                        &selected))
+    return 1;
+  return 0;
 }
 
 #ifdef RDPGFX_CAPVERSION_10
@@ -294,6 +336,8 @@ int main(void) {
   test_gfx_failure_policy_live_rdpgfx_disconnects();
   test_gfx_failure_policy_classic_fallback_stays_classic();
 #ifdef RDPGFX_CAPVERSION_8
+  if (test_gfx_cap_description_formats_version_flags() != 0)
+    return 1;
   test_gfx_supported_clean_cap_selected();
   test_gfx_highest_unsupported_version_rejected_without_downgrade();
   test_gfx_unsupported_avc_flags_rejected();
@@ -301,7 +345,12 @@ int main(void) {
   test_gfx_downgrades_from_unsupported_high_cap();
   test_gfx_canonical_selected_only_from_whitelist();
   test_gfx_unsupported_first_does_not_poison_canonical();
-  test_gfx_canonical_mismatch_falls_back_for_viewer();
+  if (test_gfx_canonical_version_accepts_different_allowed_flags() != 0)
+    return 1;
+  if (test_gfx_canonical_different_version_falls_back_for_viewer() != 0)
+    return 1;
+  if (test_gfx_canonical_same_version_unknown_flags_rejected() != 0)
+    return 1;
 #ifdef RDPGFX_CAPVERSION_10
   test_gfx_prefers_lower_official_version();
 #endif

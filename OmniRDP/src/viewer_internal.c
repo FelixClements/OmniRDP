@@ -84,6 +84,24 @@ BOOL viewer_gfx_caps_is_whitelisted(const RDPGFX_CAPSET *caps) {
   return (caps->flags & ~viewer_gfx_caps_allowed_flags()) == 0;
 }
 
+BOOL viewer_gfx_capset_describe(const RDPGFX_CAPSET *caps, char *buffer,
+                                size_t buffer_size) {
+  int written = 0;
+
+  if (!caps || !buffer || (buffer_size == 0))
+    return FALSE;
+
+  written = snprintf(buffer, buffer_size,
+                     "version=0x%08" PRIX32 " flags=0x%08" PRIX32,
+                     caps->version, caps->flags);
+  if ((written < 0) || ((size_t)written >= buffer_size)) {
+    buffer[0] = '\0';
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
 static BOOL viewer_gfx_caps_is_preferred(const RDPGFX_CAPSET *candidate,
                                          const RDPGFX_CAPSET *current) {
   if (!current)
@@ -120,8 +138,7 @@ BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
       const RDPGFX_CAPSET *caps = &advertised_caps[i];
       if (!viewer_gfx_caps_is_whitelisted(caps))
         continue;
-      if ((caps->version == canonical_caps->version) &&
-          (caps->flags == canonical_caps->flags)) {
+      if (caps->version == canonical_caps->version) {
         *selected_caps = *caps;
         return TRUE;
       }

@@ -3,6 +3,7 @@
 
 #include "viewer_server_internal.h"
 #include <freerdp/settings_types.h>
+#include <stddef.h>
 #include <winpr/wtypes.h>
 
 #ifdef __cplusplus
@@ -30,6 +31,9 @@ BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
                                        RDPGFX_CAPSET *selected_caps);
 
 BOOL viewer_gfx_caps_is_whitelisted(const RDPGFX_CAPSET *caps);
+
+BOOL viewer_gfx_capset_describe(const RDPGFX_CAPSET *caps, char *buffer,
+                                size_t buffer_size);
 
 BOOL viewer_gfx_activation_waits_for_rdpgfx_caps(
     const ViewerGraphicsContext *gfx);

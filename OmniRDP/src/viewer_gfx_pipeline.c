@@ -1160,11 +1160,35 @@ UINT viewer_gfx_pipeline_caps_advertise(
   BOOL caps_ready_was = FALSE;
   BOOL use_rdpgfx_was = FALSE;
   ViewerGfxNegotiationOutcome outcome_was = VIEWER_GFX_NEGOTIATION_PENDING;
+  char cap_desc[80] = {0};
+  char canonical_desc[80] = {0};
 
   if (!viewer || !server || !caps_advertise || !context->CapsConfirm)
     return ERROR_INVALID_PARAMETER;
 
   EnterCriticalSection(&server->gfx.lock);
+  if (server->gfx.canonical_caps_valid &&
+      viewer_gfx_capset_describe(&server->gfx.canonical_caps, canonical_desc,
+                                 sizeof(canonical_desc))) {
+    WLog_INFO(TAG,
+              "Viewer %u RDPEGFX caps advertise: canonical=%s "
+              "advertisedCount=%" PRIu16,
+              viewer->id, canonical_desc, caps_advertise->capsSetCount);
+  } else {
+    WLog_INFO(TAG,
+              "Viewer %u RDPEGFX caps advertise: canonical=none "
+              "advertisedCount=%" PRIu16,
+              viewer->id, caps_advertise->capsSetCount);
+  }
+  if (caps_advertise->capsSets) {
+    for (UINT16 i = 0; i < caps_advertise->capsSetCount; i++) {
+      if (viewer_gfx_capset_describe(&caps_advertise->capsSets[i], cap_desc,
+                                     sizeof(cap_desc))) {
+        WLog_INFO(TAG, "Viewer %u RDPEGFX advertised cap[%" PRIu16 "]: %s",
+                  viewer->id, i, cap_desc);
+      }
+    }
+  }
   selected = viewer_gfx_select_compatible_caps(
       server->gfx.canonical_caps_valid ? &server->gfx.canonical_caps : NULL,
       server->gfx.canonical_caps_valid, caps_advertise->capsSets,
@@ -1197,6 +1221,9 @@ UINT viewer_gfx_pipeline_caps_advertise(
     LeaveCriticalSection(&viewer->gfx.lock);
     return CHANNEL_RC_OK;
   }
+
+  if (viewer_gfx_capset_describe(&caps, cap_desc, sizeof(cap_desc)))
+    WLog_INFO(TAG, "Viewer %u RDPEGFX selected cap: %s", viewer->id, cap_desc);
 
   EnterCriticalSection(&viewer->gfx.lock);
   caps_ready_was = viewer->gfx.caps_ready;
