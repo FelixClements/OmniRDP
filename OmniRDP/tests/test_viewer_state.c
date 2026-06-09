@@ -108,6 +108,53 @@ static void test_viewer_ids_start_at_one(void) {
   assert(viewer_slot_index_to_id(1) == 2);
 }
 
+static int test_viewer_monitor_from_size_uses_inclusive_bounds(void) {
+  MONITOR_DEF monitor = {0};
+
+  if (!viewer_monitor_from_size(1920, 1080, &monitor))
+    return 1;
+  if (monitor.left != 0)
+    return 1;
+  if (monitor.top != 0)
+    return 1;
+  if (monitor.right != 1919)
+    return 1;
+  if (monitor.bottom != 1079)
+    return 1;
+  if (monitor.flags != MONITOR_PRIMARY)
+    return 1;
+  return 0;
+}
+
+static int test_monitor_layout_init_uses_inclusive_monitor_bounds(void) {
+  MonitorLayout layout = {0};
+
+  monitor_layout_init(&layout, 2);
+  if (layout.monitor_count != 2)
+    return 1;
+  if (layout.total_width != 3840)
+    return 1;
+  if (layout.total_height != 1080)
+    return 1;
+  if (layout.monitors[0].left != 0)
+    return 1;
+  if (layout.monitors[0].right != 1919)
+    return 1;
+  if (layout.monitors[0].bottom != 1079)
+    return 1;
+  if (layout.monitors[0].flags != MONITOR_PRIMARY)
+    return 1;
+  if (layout.monitors[1].left != 1920)
+    return 1;
+  if (layout.monitors[1].right != 3839)
+    return 1;
+  if (layout.monitors[1].bottom != 1079)
+    return 1;
+  if (layout.monitors[1].flags != 0)
+    return 1;
+  return 0;
+}
+
 static void test_gfx_failure_policy_pre_activation_allows_fallback(void) {
   ViewerGraphicsContext gfx = {0};
 
@@ -332,6 +379,10 @@ int main(void) {
   test_sustained_lag_timer_resets_after_clear();
   test_repeated_lag_requires_fresh_full_window();
   test_viewer_ids_start_at_one();
+  if (test_viewer_monitor_from_size_uses_inclusive_bounds() != 0)
+    return 1;
+  if (test_monitor_layout_init_uses_inclusive_monitor_bounds() != 0)
+    return 1;
   test_gfx_failure_policy_pre_activation_allows_fallback();
   test_gfx_failure_policy_live_rdpgfx_disconnects();
   test_gfx_failure_policy_classic_fallback_stays_classic();

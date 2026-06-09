@@ -291,8 +291,8 @@ BOOL viewer_monitor_from_size(UINT32 width, UINT32 height,
 
   monitor->left = 0;
   monitor->top = 0;
-  monitor->right = (INT32)width;
-  monitor->bottom = (INT32)height;
+  monitor->right = (INT32)(width - 1U);
+  monitor->bottom = (INT32)(height - 1U);
   monitor->flags = MONITOR_PRIMARY;
   return TRUE;
 }
@@ -322,8 +322,8 @@ void monitor_layout_init(MonitorLayout *layout, UINT32 monitor_count) {
   for (i = 0; i < monitor_count; i++) {
     layout->monitors[i].left = (INT32)(i * 1920);
     layout->monitors[i].top = 0;
-    layout->monitors[i].right = (INT32)((i + 1) * 1920);
-    layout->monitors[i].bottom = 1080;
+    layout->monitors[i].right = (INT32)(((i + 1) * 1920) - 1U);
+    layout->monitors[i].bottom = 1079;
     layout->monitors[i].flags = (i == 0) ? MONITOR_PRIMARY : 0;
 
     fprintf(stderr,

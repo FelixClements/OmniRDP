@@ -1767,9 +1767,9 @@ void backend_set_monitor_count(BackendClient *client, UINT32 monitor_count) {
         monitors[i].x = client->monitor_layout.monitors[i].left;
         monitors[i].y = client->monitor_layout.monitors[i].top;
         monitors[i].width = client->monitor_layout.monitors[i].right -
-                            client->monitor_layout.monitors[i].left;
+                            client->monitor_layout.monitors[i].left + 1;
         monitors[i].height = client->monitor_layout.monitors[i].bottom -
-                             client->monitor_layout.monitors[i].top;
+                             client->monitor_layout.monitors[i].top + 1;
         monitors[i].is_primary =
             (client->monitor_layout.monitors[i].flags & MONITOR_PRIMARY)
                 ? TRUE
@@ -2013,9 +2013,9 @@ BackendClient *backend_init(void) {
       monitors[i].x = client->monitor_layout.monitors[i].left;
       monitors[i].y = client->monitor_layout.monitors[i].top;
       monitors[i].width = client->monitor_layout.monitors[i].right -
-                          client->monitor_layout.monitors[i].left;
+                          client->monitor_layout.monitors[i].left + 1;
       monitors[i].height = client->monitor_layout.monitors[i].bottom -
-                           client->monitor_layout.monitors[i].top;
+                           client->monitor_layout.monitors[i].top + 1;
       monitors[i].is_primary =
           (client->monitor_layout.monitors[i].flags & MONITOR_PRIMARY) ? TRUE
                                                                        : FALSE;

@@ -2736,8 +2736,8 @@ static BOOL peer_reached_state(freerdp_peer *peer, CONNECTION_STATE state) {
     rdpMonitor mon = {0};
     mon.x = layout->monitors[i].left;
     mon.y = layout->monitors[i].top;
-    mon.width = layout->monitors[i].right - layout->monitors[i].left;
-    mon.height = layout->monitors[i].bottom - layout->monitors[i].top;
+    mon.width = layout->monitors[i].right - layout->monitors[i].left + 1;
+    mon.height = layout->monitors[i].bottom - layout->monitors[i].top + 1;
     mon.is_primary =
         (layout->monitors[i].flags & MONITOR_PRIMARY) ? TRUE : FALSE;
     mon.orig_screen = i;
@@ -2875,8 +2875,10 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
           rdpMonitor mon = {0};
           mon.x = layout->monitors[mi].left;
           mon.y = layout->monitors[mi].top;
-          mon.width = layout->monitors[mi].right - layout->monitors[mi].left;
-          mon.height = layout->monitors[mi].bottom - layout->monitors[mi].top;
+          mon.width =
+              layout->monitors[mi].right - layout->monitors[mi].left + 1;
+          mon.height =
+              layout->monitors[mi].bottom - layout->monitors[mi].top + 1;
           mon.is_primary =
               (layout->monitors[mi].flags & MONITOR_PRIMARY) ? TRUE : FALSE;
           mon.orig_screen = mi;
@@ -3344,8 +3346,10 @@ void viewer_server_notify_backend_layout_change(BackendClient *backend,
           rdpMonitor mon = {0};
           mon.x = layout->monitors[mi].left;
           mon.y = layout->monitors[mi].top;
-          mon.width = layout->monitors[mi].right - layout->monitors[mi].left;
-          mon.height = layout->monitors[mi].bottom - layout->monitors[mi].top;
+          mon.width =
+              layout->monitors[mi].right - layout->monitors[mi].left + 1;
+          mon.height =
+              layout->monitors[mi].bottom - layout->monitors[mi].top + 1;
           mon.is_primary =
               (layout->monitors[mi].flags & MONITOR_PRIMARY) ? TRUE : FALSE;
           mon.orig_screen = mi;
