@@ -226,6 +226,10 @@ int main(int argc, char *argv[]) {
   time_t last_stats = time(NULL);
   UINT64 last_tile_count = 0;
   UINT64 last_bitmap_batch_count = 0;
+  UINT64 last_surface_bits_decode_count = 0;
+  PlatformProcessCpuSample last_cpu_sample = {0};
+
+  (void)platform_get_process_cpu_sample(&last_cpu_sample);
 
   while (running && backend_is_connected(client)) {
     if (!backend_iterate(client)) {
@@ -242,6 +246,13 @@ int main(int argc, char *argv[]) {
       const UINT64 bitmap_batches = client->bitmap_update_batches_total;
       const UINT64 bitmap_rectangles = client->bitmap_update_rectangles_total;
       const UINT64 bitmap_bytes = client->bitmap_update_payload_bytes_total;
+      const UINT64 surface_decodes = client->surface_bits_decode_count;
+      const UINT64 surface_decode_failures =
+          client->surface_bits_decode_failure_count;
+      const UINT64 surface_decode_bytes =
+          client->surface_bits_payload_bytes_total;
+      PlatformProcessCpuSample cpu_sample = {0};
+      double process_cpu_percent = 0.0;
       const double avg_rects_per_batch =
           (bitmap_batches > 0)
               ? ((double)bitmap_rectangles / (double)bitmap_batches)
@@ -259,24 +270,44 @@ int main(int argc, char *argv[]) {
       const double fps =
           (seconds > 0.0) ? ((double)(tile_count - last_tile_count) / seconds)
                           : 0.0;
+      const double avg_surface_decode_us =
+          (surface_decodes > 0)
+              ? ((double)client->surface_bits_decode_time_total_us /
+                 (double)surface_decodes)
+              : 0.0;
+
+      if (platform_get_process_cpu_sample(&cpu_sample)) {
+        process_cpu_percent =
+            platform_process_cpu_percent(&last_cpu_sample, &cpu_sample);
+        last_cpu_sample = cpu_sample;
+      }
 
       if ((tile_count != last_tile_count) ||
-          (bitmap_batches != last_bitmap_batch_count)) {
+          (bitmap_batches != last_bitmap_batch_count) ||
+          (surface_decodes != last_surface_bits_decode_count)) {
         printf("[Stats] Tiles: %" PRIu64 " | Bytes: %" PRIu64
                " | Markers: %" PRIu64 " | Rate: %.1f updates/s"
                " | Bitmap batches: %" PRIu64 " rects: %" PRIu64
                " bytes: %" PRIu64 " avgRectBatch: %.2f"
                " avgCbUs: %.1f avgPubUs: %.1f"
-               " maxCbUs: %" PRIu64 " maxPubUs: %" PRIu64 "\n",
+               " maxCbUs: %" PRIu64 " maxPubUs: %" PRIu64
+               " | SurfaceBits decodes: %" PRIu64 " failures: %" PRIu64
+               " codedBytes: %" PRIu64 " avgDecodeUs: %.1f"
+               " maxDecodeUs: %" PRIu64 " | ProcessCPU: %.1f%%\n",
                tile_count, total_bytes, frame_markers, fps, bitmap_batches,
                bitmap_rectangles, bitmap_bytes, avg_rects_per_batch,
                avg_callback_us, avg_publish_us,
                client->bitmap_update_callback_time_max_us,
-               client->bitmap_update_publish_time_max_us);
+               client->bitmap_update_publish_time_max_us, surface_decodes,
+               surface_decode_failures, surface_decode_bytes,
+               avg_surface_decode_us, client->surface_bits_decode_time_max_us,
+               process_cpu_percent);
         last_tile_count = tile_count;
         last_bitmap_batch_count = bitmap_batches;
+        last_surface_bits_decode_count = surface_decodes;
       } else {
-        printf("[Stats] No new forwarded updates\n");
+        printf("[Stats] No new forwarded updates | ProcessCPU: %.1f%%\n",
+               process_cpu_percent);
       }
 
       last_stats = now;

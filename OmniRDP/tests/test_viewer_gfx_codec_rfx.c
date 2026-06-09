@@ -1,6 +1,7 @@
 #include "viewer_gfx_codec_rfx.h"
 
 #include <freerdp/codec/color.h>
+#include <freerdp/settings_types.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -66,6 +67,40 @@ static int test_context_creation_and_status(void) {
   return ok;
 }
 
+static int test_context_default_threading_flags_are_disabled(void) {
+  ViewerGfxRfxContext *context = viewer_gfx_rfx_context_new();
+  int ok = 1;
+
+  ok = ok && expect_true(context != NULL, "default RFX context creates");
+  ok = ok && expect_uint32(viewer_gfx_rfx_test_last_threading_flags(),
+                           THREADING_FLAGS_DISABLE_THREADS,
+                           "default RFX threading disabled");
+
+  viewer_gfx_rfx_context_free(context);
+  return ok;
+}
+
+static int test_context_threaded_mode_uses_threading_flags(void) {
+  ViewerGfxRfxContext *context = viewer_gfx_rfx_context_new_ex(TRUE);
+  int ok = 1;
+
+  ok = ok && expect_true(context != NULL, "threaded RFX context creates");
+  ok = ok && expect_uint32(viewer_gfx_rfx_test_last_threading_flags(), 0,
+                           "threaded RFX context clears disable flag");
+
+  viewer_gfx_rfx_context_free(context);
+
+  context = viewer_gfx_rfx_context_new_ex(FALSE);
+  ok = ok && expect_true(context != NULL,
+                         "explicit non-threaded RFX context creates");
+  ok = ok && expect_uint32(viewer_gfx_rfx_test_last_threading_flags(),
+                           THREADING_FLAGS_DISABLE_THREADS,
+                           "explicit non-threaded RFX context disables");
+
+  viewer_gfx_rfx_context_free(context);
+  return ok;
+}
+
 static int test_full_frame_encode_builds_cavideo_command(void) {
   BYTE pixels[64] = {0};
   ViewerFramebufferSnapshot snapshot = make_snapshot(pixels, 4, 4, 16, 64);
@@ -123,6 +158,48 @@ static int test_dirty_rect_encode_builds_destination_bounds(void) {
   ok = ok && expect_true(command.data != NULL, "dirty RFX payload allocated");
 
   viewer_gfx_rfx_surface_command_reset(&command);
+  viewer_gfx_rfx_context_free(context);
+  return ok;
+}
+
+static int test_dirty_rect_encode_uses_cropped_snapshot_origin(void) {
+  BYTE pixels[36] = {0};
+  ViewerFramebufferSnapshot snapshot = make_snapshot(pixels, 5, 5, 12, 36);
+  RECTANGLE_16 dirty_rect = {1, 2, 3, 4};
+  ViewerGfxRfxContext *context = viewer_gfx_rfx_context_new();
+  RDPGFX_SURFACE_COMMAND command = {0};
+  int ok = 1;
+
+  snapshot.pixel_origin_x = 1;
+  snapshot.pixel_origin_y = 2;
+  snapshot.pixel_width = 3;
+  snapshot.pixel_height = 3;
+  fill_pixels(pixels, sizeof(pixels));
+
+  ok = ok && expect_true(context != NULL,
+                         "RFX context creates for cropped dirty rect");
+  ok = ok && expect_true(viewer_gfx_rfx_build_surface_command_rect(
+                             context, &snapshot, 11, &dirty_rect, &command),
+                         "cropped dirty-rect RFX command builds");
+  ok = ok && expect_uint32(command.surfaceId, 11, "cropped dirty surface id");
+  ok = ok && expect_uint32(command.codecId, RDPGFX_CODECID_CAVIDEO,
+                           "cropped dirty RFX codec id");
+  ok = ok && expect_uint32(command.left, 1, "cropped dirty left");
+  ok = ok && expect_uint32(command.top, 2, "cropped dirty top");
+  ok = ok && expect_uint32(command.right, 4, "cropped dirty exclusive right");
+  ok = ok && expect_uint32(command.bottom, 5, "cropped dirty exclusive bottom");
+  ok = ok && expect_uint32(command.width, 3, "cropped dirty width");
+  ok = ok && expect_uint32(command.height, 3, "cropped dirty height");
+  ok = ok &&
+       expect_true(command.length > 0, "cropped dirty RFX payload nonzero");
+  ok = ok &&
+       expect_true(command.data != NULL, "cropped dirty RFX payload allocated");
+  viewer_gfx_rfx_surface_command_reset(&command);
+
+  ok = ok && expect_false(viewer_gfx_rfx_build_surface_command(
+                              context, &snapshot, 11, &command),
+                          "full RFX command rejects cropped snapshot");
+
   viewer_gfx_rfx_context_free(context);
   return ok;
 }
@@ -271,8 +348,11 @@ int main(void) {
   int ok = 1;
 
   ok = ok && test_context_creation_and_status();
+  ok = ok && test_context_default_threading_flags_are_disabled();
+  ok = ok && test_context_threaded_mode_uses_threading_flags();
   ok = ok && test_full_frame_encode_builds_cavideo_command();
   ok = ok && test_dirty_rect_encode_builds_destination_bounds();
+  ok = ok && test_dirty_rect_encode_uses_cropped_snapshot_origin();
   ok = ok && test_dirty_rect_edge_bounds();
   ok = ok && test_invalid_inputs_are_rejected_and_reset();
   ok = ok && test_replacement_and_reset_cleanup();

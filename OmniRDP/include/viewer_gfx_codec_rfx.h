@@ -14,6 +14,7 @@ const char *viewer_gfx_rfx_disabled_reason(void);
 typedef struct ViewerGfxRfxContext ViewerGfxRfxContext;
 
 ViewerGfxRfxContext *viewer_gfx_rfx_context_new(void);
+ViewerGfxRfxContext *viewer_gfx_rfx_context_new_ex(BOOL threaded);
 void viewer_gfx_rfx_context_free(ViewerGfxRfxContext *context);
 BOOL viewer_gfx_rfx_context_reset(ViewerGfxRfxContext *context, UINT32 width,
                                   UINT32 height);
@@ -32,6 +33,7 @@ void viewer_gfx_rfx_surface_command_reset(RDPGFX_SURFACE_COMMAND *command);
 
 #ifdef VIEWER_GFX_RFX_TESTING
 void viewer_gfx_rfx_test_set_force_context_new_failure(BOOL force_failure);
+UINT32 viewer_gfx_rfx_test_last_threading_flags(void);
 #endif
 
 #ifdef __cplusplus

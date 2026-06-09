@@ -1,6 +1,7 @@
 #include "viewer_publisher.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static int expect_true(BOOL value, const char *message) {
   if (!value) {
@@ -40,6 +41,15 @@ static int expect_int(int actual, int expected, const char *message) {
 static void fill_pixels(BYTE *pixels, size_t count, BYTE seed) {
   for (size_t i = 0; i < count; i++)
     pixels[i] = (BYTE)(seed + (BYTE)i);
+}
+
+static void copy_bytes(BYTE *dest, const BYTE *src, size_t count) {
+  for (size_t i = 0; i < count; i++)
+    dest[i] = src[i];
+}
+
+static size_t pixel_offset(UINT32 x, UINT32 y, UINT32 stride) {
+  return ((size_t)y * (size_t)stride) + ((size_t)x * 4U);
 }
 
 static BOOL setup_framebuffer(ViewerFramebuffer *fb, BYTE *pixels,
@@ -851,6 +861,70 @@ static int test_gfx_dirty_snapshot_generation_filtering(void) {
   return ok;
 }
 
+static int test_gfx_dirty_snapshot_preserves_dirty_pixels_and_metadata(void) {
+  ViewerPublisher publisher = {0};
+  ViewerPublisherMetrics metrics = {0};
+  ViewerFramebuffer fb = {0};
+  ViewerFramebufferMetrics fb_metrics = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE base_pixels[16] = {0};
+  BYTE pixels[16] = {0};
+  RECTANGLE_16 dirty = {1, 1, 1, 1};
+  int ok = 1;
+
+  ok = ok && expect_true(viewer_publisher_init(&publisher), "publisher init");
+  ok = ok &&
+       expect_true(setup_framebuffer(&fb, base_pixels, sizeof(base_pixels)),
+                   "framebuffer setup");
+  copy_bytes(pixels, base_pixels, sizeof(pixels));
+  pixels[0] = 0xD0U;
+  pixels[pixel_offset(1, 1, 8)] = 0xD1U;
+
+  ok = ok &&
+       expect_true(viewer_framebuffer_update_pixels(&fb, pixels, 8, &dirty, 1),
+                   "one-pixel dirty update");
+  ok = ok && expect_true(viewer_publisher_gfx_dirty_snapshot(&publisher, &fb, 0,
+                                                             &snapshot),
+                         "gfx dirty snapshot with one dirty pixel");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "gfx dirty snapshot dirty count");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].left, dirty.left,
+                           "gfx dirty snapshot left preserved");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].top, dirty.top,
+                           "gfx dirty snapshot top preserved");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].right, dirty.right,
+                           "gfx dirty snapshot right preserved");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].bottom, dirty.bottom,
+                           "gfx dirty snapshot bottom preserved");
+  ok = ok && expect_uint32(snapshot.pixel_origin_x, 1,
+                           "gfx dirty snapshot pixel origin x");
+  ok = ok && expect_uint32(snapshot.pixel_origin_y, 1,
+                           "gfx dirty snapshot pixel origin y");
+  ok = ok &&
+       expect_uint32(snapshot.pixel_width, 1, "gfx dirty snapshot pixel width");
+  ok = ok && expect_uint32(snapshot.pixel_height, 1,
+                           "gfx dirty snapshot pixel height");
+  ok = ok && expect_uint32((UINT32)snapshot.pixel_bytes, 4,
+                           "gfx dirty snapshot copies only dirty bounds");
+  ok = ok && expect_uint32(snapshot.pixels[0], pixels[pixel_offset(1, 1, 8)],
+                           "gfx dirty snapshot dirty pixel copied");
+
+  metrics = viewer_publisher_get_metrics(&publisher);
+  ok = ok && expect_uint64(metrics.latest_dirty_area, 1,
+                           "gfx dirty snapshot dirty area recorded");
+  ok = ok && expect_uint64(metrics.queued_bytes, snapshot.pixel_bytes,
+                           "gfx dirty snapshot records cropped snapshot bytes");
+  ok = ok && expect_true(viewer_framebuffer_get_metrics(&fb, &fb_metrics),
+                         "gfx dirty snapshot framebuffer metrics");
+  ok = ok && expect_uint64(fb_metrics.last_snapshot_copied_bytes, 4,
+                           "gfx dirty snapshot measures cropped copy");
+
+  viewer_framebuffer_snapshot_free(&snapshot);
+  viewer_framebuffer_uninit(&fb);
+  viewer_publisher_uninit(&publisher);
+  return ok;
+}
+
 static int test_gfx_dirty_snapshot_too_many_rects_full_frame(void) {
   ViewerPublisher publisher = {0};
   ViewerFramebuffer fb = {0};
@@ -997,6 +1071,8 @@ int main(void) {
   if (!test_stale_consumed_generation_ignored())
     return 1;
   if (!test_gfx_dirty_snapshot_generation_filtering())
+    return 1;
+  if (!test_gfx_dirty_snapshot_preserves_dirty_pixels_and_metadata())
     return 1;
   if (!test_gfx_dirty_snapshot_too_many_rects_full_frame())
     return 1;

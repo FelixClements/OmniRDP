@@ -5,10 +5,32 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void viewer_gfx_uncompressed_pixel_bounds(
+    const ViewerFramebufferSnapshot *snapshot, UINT32 *origin_x,
+    UINT32 *origin_y, UINT32 *pixel_width, UINT32 *pixel_height) {
+  if (!snapshot)
+    return;
+
+  if (origin_x)
+    *origin_x = snapshot->pixel_width ? snapshot->pixel_origin_x : 0U;
+  if (origin_y)
+    *origin_y = snapshot->pixel_height ? snapshot->pixel_origin_y : 0U;
+  if (pixel_width)
+    *pixel_width =
+        snapshot->pixel_width ? snapshot->pixel_width : snapshot->width;
+  if (pixel_height)
+    *pixel_height =
+        snapshot->pixel_height ? snapshot->pixel_height : snapshot->height;
+}
+
 static BOOL viewer_gfx_uncompressed_validate_snapshot(
     const ViewerFramebufferSnapshot *snapshot) {
   size_t minimum_pixel_bytes = 0;
   size_t tight_row_bytes = 0;
+  UINT32 origin_x = 0;
+  UINT32 origin_y = 0;
+  UINT32 pixel_width = 0;
+  UINT32 pixel_height = 0;
 
   if (!snapshot || !snapshot->pixels || (snapshot->width == 0) ||
       (snapshot->height == 0))
@@ -21,24 +43,53 @@ static BOOL viewer_gfx_uncompressed_validate_snapshot(
   if (snapshot->pixel_format != PIXEL_FORMAT_BGRX32)
     return FALSE;
 
-  if ((size_t)snapshot->width > (SIZE_MAX / 4U))
+  viewer_gfx_uncompressed_pixel_bounds(snapshot, &origin_x, &origin_y,
+                                       &pixel_width, &pixel_height);
+  if ((pixel_width == 0) || (pixel_height == 0) ||
+      (origin_x >= snapshot->width) || (origin_y >= snapshot->height) ||
+      (pixel_width > (snapshot->width - origin_x)) ||
+      (pixel_height > (snapshot->height - origin_y)))
     return FALSE;
-  tight_row_bytes = (size_t)snapshot->width * 4U;
+
+  if ((size_t)pixel_width > (SIZE_MAX / 4U))
+    return FALSE;
+  tight_row_bytes = (size_t)pixel_width * 4U;
 
   if ((snapshot->stride == 0) || ((size_t)snapshot->stride < tight_row_bytes))
     return FALSE;
 
-  if ((size_t)(snapshot->height - 1U) >
+  if ((size_t)(pixel_height - 1U) >
       ((SIZE_MAX - tight_row_bytes) / (size_t)snapshot->stride))
     return FALSE;
   minimum_pixel_bytes =
-      ((size_t)(snapshot->height - 1U) * (size_t)snapshot->stride) +
+      ((size_t)(pixel_height - 1U) * (size_t)snapshot->stride) +
       tight_row_bytes;
 
   if (snapshot->pixel_bytes < minimum_pixel_bytes)
     return FALSE;
 
   return TRUE;
+}
+
+static BOOL viewer_gfx_uncompressed_bounds_available(
+    const ViewerFramebufferSnapshot *snapshot, UINT32 left, UINT32 top,
+    UINT32 right, UINT32 bottom) {
+  UINT32 origin_x = 0;
+  UINT32 origin_y = 0;
+  UINT32 pixel_width = 0;
+  UINT32 pixel_height = 0;
+  UINT32 pixel_right = 0;
+  UINT32 pixel_bottom = 0;
+
+  if (!snapshot || (left >= right) || (top >= bottom))
+    return FALSE;
+
+  viewer_gfx_uncompressed_pixel_bounds(snapshot, &origin_x, &origin_y,
+                                       &pixel_width, &pixel_height);
+  pixel_right = origin_x + pixel_width;
+  pixel_bottom = origin_y + pixel_height;
+  return (left >= origin_x) && (top >= origin_y) && (right <= pixel_right) &&
+         (bottom <= pixel_bottom);
 }
 
 static BOOL viewer_gfx_uncompressed_validate_rect(
@@ -84,6 +135,9 @@ static BOOL viewer_gfx_uncompressed_build_surface_command_bounds(
   if ((left >= right) || (top >= bottom) || (right > snapshot->width) ||
       (bottom > snapshot->height))
     return FALSE;
+  if (!viewer_gfx_uncompressed_bounds_available(snapshot, left, top, right,
+                                                bottom))
+    return FALSE;
 
   rect_width = right - left;
   rect_height = bottom - top;
@@ -105,10 +159,17 @@ static BOOL viewer_gfx_uncompressed_build_surface_command_bounds(
     return FALSE;
 
   for (row = 0; row < rect_height; row++) {
-    const BYTE *source = snapshot->pixels +
-                         ((size_t)(top + row) * (size_t)snapshot->stride) +
-                         ((size_t)left * 4U);
+    UINT32 origin_x = 0;
+    UINT32 origin_y = 0;
+    const UINT32 source_y = top + row;
+    const BYTE *source = NULL;
     BYTE *destination = data + ((size_t)row * destination_row_bytes);
+
+    viewer_gfx_uncompressed_pixel_bounds(snapshot, &origin_x, &origin_y, NULL,
+                                         NULL);
+    source = snapshot->pixels +
+             ((size_t)(source_y - origin_y) * (size_t)snapshot->stride) +
+             ((size_t)(left - origin_x) * 4U);
     memmove(destination, source, destination_row_bytes);
   }
 

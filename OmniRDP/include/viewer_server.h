@@ -53,6 +53,12 @@ void viewer_server_set_gfx_enabled(ViewerServer *server, BOOL enabled);
 
 void viewer_server_set_gfx_codec(ViewerServer *server, ViewerGfxCodec codec);
 
+void viewer_server_set_gfx_rfx_threading(ViewerServer *server, BOOL enabled);
+
+void viewer_server_set_gfx_dirty_limits(ViewerServer *server,
+                                        UINT32 max_in_flight_frames,
+                                        UINT64 max_in_flight_bytes);
+
 void viewer_server_set_gfx_diagnostic_full_frame_dirty(ViewerServer *server,
                                                        BOOL enabled);
 

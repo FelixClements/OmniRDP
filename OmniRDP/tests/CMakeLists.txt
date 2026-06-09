@@ -39,6 +39,7 @@ add_executable(test_viewer_classic_queue
 add_executable(test_viewer_gfx_pipeline
     test_viewer_gfx_pipeline.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_pipeline.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_gfx_dirty_limits.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_uncompressed.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_rfx.c
     ${CMAKE_SOURCE_DIR}/src/viewer_internal.c
@@ -57,6 +58,9 @@ add_executable(test_viewer_gfx_codec_rfx
 
 add_executable(test_backend_gfx_decode_only
     test_backend_gfx_decode_only.c
+    ${CMAKE_SOURCE_DIR}/src/backend.c
+    ${CMAKE_SOURCE_DIR}/src/platform_compat.c
+    ${CMAKE_SOURCE_DIR}/src/pointer_shape.c
 )
 
 add_executable(test_backend_rdp_file_options
@@ -269,6 +273,13 @@ target_include_directories(test_backend_rdp_file_options PRIVATE
     ${FREERDP_BUILD}/winpr/include
 )
 
+target_link_libraries(test_backend_gfx_decode_only
+    ${FREERDP_CLIENT_LIB}
+    ${FREERDP_SERVER_LIB}
+    ${FREERDP_LIB}
+    ${WINPR_LIB}
+)
+
 target_link_libraries(test_backend_rdp_file_options
     ${FREERDP_CLIENT_LIB}
     ${FREERDP_SERVER_LIB}
@@ -380,6 +391,7 @@ add_test(NAME test_backend_gfx_decode_only
     COMMAND ${CMAKE_COMMAND}
         -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
         -DTEST_EXECUTABLE_NAME=test_backend_gfx_decode_only${CMAKE_EXECUTABLE_SUFFIX}
+        "-DTEST_DLL_DIR=${FREERDP_BUILD}/libfreerdp/Release\;${FREERDP_BUILD}/winpr/libwinpr/Release\;${FREERDP_BUILD}/client/common/Release\;${FREERDP_BUILD}/server/common/Release\;${CMAKE_SOURCE_DIR}/../artifacts/windows-Release/bin"
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_backend_gfx_decode_only PROPERTIES TIMEOUT 120)

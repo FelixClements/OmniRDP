@@ -3,6 +3,7 @@
 #include "viewer_server_internal.h"
 
 #include <freerdp/codec/color.h>
+#include <freerdp/settings_types.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -44,8 +45,10 @@ static UINT test_reset_graphics(RdpgfxServerContext *context,
       (reset->monitorDefArray == g_expected_reset_source))
     return ERROR_INTERNAL_ERROR;
   g_last_reset = *reset;
-  memcpy(g_last_reset_monitors, reset->monitorDefArray,
-         sizeof(MONITOR_DEF) * reset->monitorCount);
+  if (memcpy_s(g_last_reset_monitors, sizeof(g_last_reset_monitors),
+               reset->monitorDefArray,
+               sizeof(MONITOR_DEF) * reset->monitorCount) != 0)
+    return ERROR_INTERNAL_ERROR;
   return test_record_send(TEST_SEND_RESET);
 }
 
@@ -423,6 +426,24 @@ static int test_step_join_and_baseline_result_transitions(void) {
 
   configure_join_ready_viewer(&server, &viewer);
   viewer.gfx.join_state = VIEWER_JOIN_STATE_PENDING;
+  viewer.gfx.join_strategy = VIEWER_JOIN_STRATEGY_NONE;
+  viewer.gfx.use_rdpgfx = TRUE;
+  viewer_gfx_pipeline_on_baseline_unavailable(&viewer, 450, &result);
+  ok = ok && expect_true(viewer.gfx.join_state == VIEWER_JOIN_STATE_PENDING,
+                         "unavailable baseline keeps rdpgfx join pending");
+  ok = ok && expect_true(viewer.gfx.join_strategy == VIEWER_JOIN_STRATEGY_NONE,
+                         "unavailable baseline avoids classic fallback");
+  ok = ok && expect_true(viewer.gfx.use_rdpgfx,
+                         "unavailable baseline keeps rdpgfx enabled");
+  ok = ok && expect_uint32(result.actions, VIEWER_GFX_JOIN_ACTION_NONE,
+                           "unavailable baseline has no fallback action");
+  viewer_gfx_pipeline_step_join(&server, &viewer, 451, &result);
+  ok = ok && expect_uint32(result.actions, VIEWER_GFX_JOIN_ACTION_SEND_BASELINE,
+                           "pending join retries baseline after unavailable "
+                           "snapshot");
+
+  configure_join_ready_viewer(&server, &viewer);
+  viewer.gfx.join_state = VIEWER_JOIN_STATE_PENDING;
   viewer.gfx.join_strategy = VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK;
   viewer_gfx_pipeline_step_join(&server, &viewer, 500, &result);
   ok = ok && expect_uint32(result.actions,
@@ -602,6 +623,56 @@ static int test_snapshot_rfx_codec_emits_cavideo(void) {
   ok = ok && expect_true(g_last_surface.length > 0, "RFX baseline payload set");
   ok = ok && expect_uint32(viewer.gfx.selected_codec, VIEWER_GFX_CODEC_RFX,
                            "RFX remains selected after success");
+  ok = ok && expect_uint64(viewer.gfx.gfx_encode_count, 1,
+                           "RFX baseline records encode count");
+  ok = ok && expect_uint64(viewer.gfx.gfx_encode_payload_bytes_total,
+                           g_last_surface.length,
+                           "RFX baseline records encode payload bytes");
+  ok = ok && expect_true(viewer.gfx.last_gfx_encode_start_us > 0,
+                         "RFX baseline records encode start");
+  ok = ok && expect_true(viewer.gfx.last_gfx_encode_end_us >=
+                             viewer.gfx.last_gfx_encode_start_us,
+                         "RFX baseline records encode window");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_snapshot_rfx_threading_flag_reaches_codec(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[64] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+  snapshot.pixels = pixels;
+  snapshot.width = 4;
+  snapshot.height = 4;
+  snapshot.stride = 16;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixel_bytes = sizeof(pixels);
+  server.viewer_gfx_rfx_threading_enabled = TRUE;
+  viewer.gfx.rfx_threading_enabled = server.viewer_gfx_rfx_threading_enabled;
+  viewer.gfx.rdpgfx = &rdpgfx;
+  viewer.gfx.caps_ready = TRUE;
+  viewer.gfx.use_rdpgfx = TRUE;
+  viewer.gfx.channel_opened = TRUE;
+  viewer.gfx.preferred_codec = VIEWER_GFX_CODEC_RFX;
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+
+  reset_send_recorder();
+  ok = ok && expect_true(
+                 viewer_gfx_pipeline_send_snapshot(&server, &viewer, &snapshot),
+                 "threaded RFX snapshot sends full-frame baseline");
+  ok = ok && expect_uint32(g_last_surface.codecId, RDPGFX_CODECID_CAVIDEO,
+                           "threaded RFX baseline uses CAVIDEO");
+  ok = ok && expect_uint32(viewer_gfx_rfx_test_last_threading_flags(), 0,
+                           "pipeline passes threaded RFX flag");
 
   uninit_test_viewer(&viewer);
   return ok;
@@ -643,6 +714,67 @@ static int test_snapshot_rfx_context_failure_downgrades_to_uncompressed(void) {
                      "viewer selected codec downgraded");
 
   uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_snapshot_rfx_context_failure_is_per_viewer(void) {
+  ViewerServer server = {0};
+  Viewer failing_viewer = {0};
+  Viewer healthy_viewer = {0};
+  RdpgfxServerContext failing_rdpgfx = {0};
+  RdpgfxServerContext healthy_rdpgfx = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[16] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&failing_viewer, 2, 2),
+                         "failing viewer init");
+  ok = ok && expect_true(init_test_viewer(&healthy_viewer, 2, 2),
+                         "healthy viewer init");
+  init_test_rdpgfx(&failing_rdpgfx);
+  init_test_rdpgfx(&healthy_rdpgfx);
+  snapshot.pixels = pixels;
+  snapshot.width = 2;
+  snapshot.height = 2;
+  snapshot.stride = 8;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixel_bytes = sizeof(pixels);
+
+  failing_viewer.gfx.rdpgfx = &failing_rdpgfx;
+  failing_viewer.gfx.caps_ready = TRUE;
+  failing_viewer.gfx.use_rdpgfx = TRUE;
+  failing_viewer.gfx.channel_opened = TRUE;
+  failing_viewer.gfx.preferred_codec = VIEWER_GFX_CODEC_RFX;
+  failing_viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+
+  healthy_viewer.gfx.rdpgfx = &healthy_rdpgfx;
+  healthy_viewer.gfx.caps_ready = TRUE;
+  healthy_viewer.gfx.use_rdpgfx = TRUE;
+  healthy_viewer.gfx.channel_opened = TRUE;
+  healthy_viewer.gfx.preferred_codec = VIEWER_GFX_CODEC_RFX;
+  healthy_viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+
+  viewer_gfx_rfx_test_set_force_context_new_failure(TRUE);
+  reset_send_recorder();
+  ok = ok && expect_true(viewer_gfx_pipeline_send_snapshot(
+                             &server, &failing_viewer, &snapshot),
+                         "failing viewer falls back and still sends baseline");
+  viewer_gfx_rfx_test_set_force_context_new_failure(FALSE);
+  ok = ok && expect_uint32(failing_viewer.gfx.selected_codec,
+                           VIEWER_GFX_CODEC_UNCOMPRESSED,
+                           "failing viewer downgraded only itself");
+
+  reset_send_recorder();
+  ok = ok && expect_true(viewer_gfx_pipeline_send_snapshot(
+                             &server, &healthy_viewer, &snapshot),
+                         "healthy viewer still sends after peer RFX failure");
+  ok = ok && expect_uint32(g_last_surface.codecId, RDPGFX_CODECID_CAVIDEO,
+                           "healthy viewer keeps RFX codec");
+  ok = ok && expect_uint32(healthy_viewer.gfx.selected_codec,
+                           VIEWER_GFX_CODEC_RFX, "healthy viewer remains RFX");
+
+  uninit_test_viewer(&healthy_viewer);
+  uninit_test_viewer(&failing_viewer);
   return ok;
 }
 
@@ -777,6 +909,30 @@ static int test_dirty_update_eligibility_denials_and_allowed(void) {
 
   viewer.gfx.rdpgfx = NULL;
   uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_server_dirty_limit_setter_applies_and_caps(void) {
+  ViewerServer server = {0};
+  int ok = 1;
+
+  viewer_server_set_gfx_dirty_limits(&server, 2, 8ULL * 1024ULL * 1024ULL);
+  ok = ok && expect_uint32(server.viewer_gfx_dirty_max_in_flight_frames, 2,
+                           "server applies configured dirty frame limit");
+  ok = ok && expect_uint64(server.viewer_gfx_dirty_max_in_flight_bytes,
+                           8ULL * 1024ULL * 1024ULL,
+                           "server applies configured dirty byte limit");
+
+  viewer_server_set_gfx_dirty_limits(
+      &server, VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY + 10U, 0);
+  ok = ok && expect_uint32(server.viewer_gfx_dirty_max_in_flight_frames,
+                           VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY,
+                           "server caps dirty frame limit to map capacity");
+  ok = ok && expect_uint64(server.viewer_gfx_dirty_max_in_flight_bytes,
+                           VIEWER_GFX_DIRTY_MAX_IN_FLIGHT_BYTES,
+                           "zero dirty byte limit restores default");
+
+  viewer_server_set_gfx_dirty_limits(NULL, 2, 8ULL * 1024ULL * 1024ULL);
   return ok;
 }
 
@@ -1018,6 +1174,16 @@ static int test_dirty_update_rfx_codec_emits_cavideo(void) {
   ok = ok && expect_uint32(g_last_surface.top, 1, "RFX dirty top");
   ok = ok && expect_true(viewer.gfx.dirty_in_flight_bytes > 0,
                          "RFX dirty records payload bytes");
+  ok = ok && expect_uint64(viewer.gfx.gfx_encode_count, 1,
+                           "RFX dirty records encode count");
+  ok = ok && expect_uint64(viewer.gfx.gfx_encode_payload_bytes_total,
+                           g_last_surface.length,
+                           "RFX dirty records encode payload bytes");
+  ok = ok && expect_true(viewer.gfx.last_gfx_encode_start_us > 0,
+                         "RFX dirty records encode start");
+  ok = ok && expect_true(viewer.gfx.last_gfx_encode_end_us >=
+                             viewer.gfx.last_gfx_encode_start_us,
+                         "RFX dirty records encode window");
 
   uninit_test_viewer(&viewer);
   return ok;
@@ -1196,6 +1362,8 @@ static int test_dirty_pacing_timeout_suspend_and_ack_recovery(void) {
            VIEWER_GFX_DIRTY_PACING_SUSPENDED, "timeout suspends dirty pacing");
   ok = ok && expect_true(viewer.gfx.dirty_suspended_for_no_ack,
                          "dirty suspended flag set");
+  ok = ok && expect_uint64(viewer.gfx.dirty_ack_timeout_count, 1,
+                           "dirty ack timeout counter increments");
   snapshot.generation = 81;
   ok = ok && expect_true(!viewer_gfx_pipeline_dirty_update_allowed(
                              &server, &viewer, &snapshot, &reason),
@@ -3109,11 +3277,17 @@ int main(void) {
     return 1;
   if (!test_snapshot_rfx_codec_emits_cavideo())
     return 1;
+  if (!test_snapshot_rfx_threading_flag_reaches_codec())
+    return 1;
   if (!test_snapshot_rfx_context_failure_downgrades_to_uncompressed())
+    return 1;
+  if (!test_snapshot_rfx_context_failure_is_per_viewer())
     return 1;
   if (!test_snapshot_send_failure_propagates())
     return 1;
   if (!test_dirty_update_eligibility_denials_and_allowed())
+    return 1;
+  if (!test_server_dirty_limit_setter_applies_and_caps())
     return 1;
   if (!test_surface_invalidation_clears_pipeline_state())
     return 1;

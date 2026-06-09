@@ -52,6 +52,8 @@ backend.domain =
 backend.connect_timeout_ms = 30000
 ; Experimental backend RDPEGFX decode-only path. Default off and independent of viewer GFX.
 backend.gfx.decode_only_enabled = false
+; Experimental backend RemoteFX candidate mode. Default off.
+backend.gfx.rfx_enabled = false
 
 ; Optional RDS Connection Broker/session collection routing.
 ; RDP-file equivalents:
@@ -113,6 +115,12 @@ viewer.throttle_max_updates_per_sec = 0
 ; snapshots, not backend GFX. Currently only uncompressed is supported.
 viewer.gfx.enabled = false
 viewer.gfx.codec = uncompressed
+; Experimental viewer RFX encoder threading. Default off.
+viewer.gfx.rfx_threading_enabled = false
+; Viewer RDPEGFX dirty pacing limits. Defaults preserve one in-flight frame
+; and a 4 MiB in-flight payload cap.
+viewer.gfx.dirty_max_in_flight_frames = 1
+viewer.gfx.dirty_max_in_flight_bytes = 4194304
 ; Diagnostic only. Default off. When true, every viewer RDPEGFX incremental
 ; dirty update is sent as one full-frame dirty rect.
 viewer.gfx.diagnostic.full_frame_dirty = false

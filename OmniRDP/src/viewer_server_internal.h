@@ -129,6 +129,7 @@ typedef struct {
   UINT64 dirty_diag_remerges;
   UINT64 dirty_diag_full_frame_fallbacks;
   UINT64 dirty_diag_successful_sends;
+  UINT64 dirty_ack_timeout_count;
   UINT32 pending_dirty_width;
   UINT32 pending_dirty_height;
   BOOL pending_dirty_full_frame;
@@ -136,9 +137,16 @@ typedef struct {
   const char *pending_dirty_full_frame_reason;
   ViewerGfxCodec preferred_codec;
   ViewerGfxCodec selected_codec;
+  BOOL rfx_threading_enabled;
   ViewerGfxRfxContext *rfx_context;
   UINT64 dirty_last_sent_rect_count;
   UINT64 dirty_last_sent_area;
+  UINT64 gfx_encode_count;
+  UINT64 gfx_encode_time_total_us;
+  UINT64 gfx_encode_time_max_us;
+  UINT64 gfx_encode_payload_bytes_total;
+  UINT64 last_gfx_encode_start_us;
+  UINT64 last_gfx_encode_end_us;
   UINT64 gfx_send_time_total_us;
   UINT64 gfx_send_time_max_us;
   UINT64 last_gfx_send_start_us;
@@ -227,6 +235,9 @@ struct ViewerServer {
   ViewerSecurityConfig security;
   BOOL viewer_gfx_enabled;
   ViewerGfxCodec viewer_gfx_codec;
+  BOOL viewer_gfx_rfx_threading_enabled;
+  UINT32 viewer_gfx_dirty_max_in_flight_frames;
+  UINT64 viewer_gfx_dirty_max_in_flight_bytes;
   BOOL viewer_gfx_diagnostic_full_frame_dirty;
 };
 

@@ -57,6 +57,7 @@ set(SOURCES
     src/viewer_classic_queue.c
     src/viewer_classic_transport.c
     src/viewer_gfx_pipeline.c
+    src/viewer_gfx_dirty_limits.c
     src/viewer_gfx_codec_uncompressed.c
     src/viewer_gfx_codec_rfx.c
     src/viewer_pointer.c

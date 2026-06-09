@@ -7,10 +7,12 @@
  * pipe, and runs the backend+viewer multiplexer loop.
  */
 
+#include <inttypes.h>
 #include <share.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
@@ -137,12 +139,13 @@ static void log_effective_instance_config(const SvcConfig *config,
         inst->reconnect_backoff_multiplier);
   LOG_I("instance_runner",
         "Config display/codecs: monitors=%u size=%ux%u depth=%u "
-        "backend_gfx_decode=%s nscodec=%s "
+        "backend_gfx_decode=%s backend_rfx=%s nscodec=%s "
         "remote_fx=%s gfx=%s h264=%s avc444=%s avc444v2=%s frame_ack=%u",
         inst->display_monitor_count, inst->display_monitor_width,
         inst->display_monitor_height, inst->display_color_depth,
         bool_str(inst->backend_gfx_decode_only_enabled),
-        bool_str(inst->codec_nscodec), bool_str(inst->codec_remote_fx),
+        bool_str(inst->backend_gfx_rfx_enabled), bool_str(inst->codec_nscodec),
+        bool_str(inst->codec_remote_fx),
         bool_str(inst->codec_graphics_pipeline), bool_str(inst->codec_h264),
         bool_str(inst->codec_avc444), bool_str(inst->codec_avc444v2),
         inst->codec_frame_acknowledge);
@@ -601,6 +604,15 @@ int instance_runner_main(int argc, char *argv[]) {
     svc_config_free(config);
     return 1;
   }
+  if (!backend_set_rfx_enabled(client,
+                               inst->backend_gfx_rfx_enabled ? TRUE : FALSE)) {
+    LOG_E("instance_runner",
+          "Failed to configure backend RemoteFX candidate mode");
+    SecureZeroMemory(password, sizeof(password));
+    backend_free(client);
+    svc_config_free(config);
+    return 1;
+  }
 
   backend_set_connect_timeout(client, (UINT32)inst->backend_connect_timeout_ms);
 
@@ -715,6 +727,19 @@ int instance_runner_main(int argc, char *argv[]) {
       server, instance_viewer_gfx_codec(inst->viewer_gfx_codec));
   LOG_I("instance_runner", "Applied viewer GFX codec preference: %s",
         instance_viewer_gfx_codec_name(inst->viewer_gfx_codec));
+  viewer_server_set_gfx_rfx_threading(
+      server, inst->viewer_gfx_rfx_threading_enabled ? TRUE : FALSE);
+  LOG_I("instance_runner",
+        "Applied viewer RFX threading experiment: enabled=%s",
+        bool_str(inst->viewer_gfx_rfx_threading_enabled));
+  viewer_server_set_gfx_dirty_limits(
+      server, inst->viewer_gfx_dirty_max_in_flight_frames,
+      (UINT64)inst->viewer_gfx_dirty_max_in_flight_bytes);
+  LOG_I("instance_runner",
+        "Applied viewer GFX dirty pacing: max_in_flight_frames=%u "
+        "max_in_flight_bytes=%u",
+        inst->viewer_gfx_dirty_max_in_flight_frames,
+        inst->viewer_gfx_dirty_max_in_flight_bytes);
   viewer_server_set_gfx_diagnostic_full_frame_dirty(
       server, inst->viewer_gfx_diagnostic_full_frame_dirty ? TRUE : FALSE);
   LOG_I("instance_runner",
@@ -722,10 +747,14 @@ int instance_runner_main(int argc, char *argv[]) {
         bool_str(inst->viewer_gfx_diagnostic_full_frame_dirty));
   LOG_I("instance_runner",
         "Viewer GFX dirty fallback defaults: enabled=%s codec=%s "
+        "rfx_threading=%s max_in_flight_frames=%u max_in_flight_bytes=%u "
         "diagnostic_full_frame_dirty=%s max_pending_rects=%u "
         "area_fallback_percent=%u consecutive_defer_fallback_count=%u",
         bool_str(inst->viewer_gfx_enabled),
         instance_viewer_gfx_codec_name(inst->viewer_gfx_codec),
+        bool_str(inst->viewer_gfx_rfx_threading_enabled),
+        inst->viewer_gfx_dirty_max_in_flight_frames,
+        inst->viewer_gfx_dirty_max_in_flight_bytes,
         bool_str(inst->viewer_gfx_diagnostic_full_frame_dirty), 128U, 60U, 3U);
 
   /* Register FreeRDP WTS API */
@@ -768,11 +797,100 @@ int instance_runner_main(int argc, char *argv[]) {
   platform_sleep_ms(2000);
 
   /* Main event loop — same pattern as standalone main.c */
+  time_t last_stats = time(NULL);
+  UINT64 last_tile_count = 0;
+  UINT64 last_bitmap_batch_count = 0;
+  UINT64 last_surface_bits_decode_count = 0;
+  PlatformProcessCpuSample last_cpu_sample = {0};
+
+  (void)platform_get_process_cpu_sample(&last_cpu_sample);
+
   while (g_running && backend_is_connected(client)) {
     if (!backend_iterate(client)) {
       printf("Connection lost\n");
       break;
     }
+
+    time_t now = time(NULL);
+    if (now - last_stats >= 2) {
+      const double seconds = difftime(now, last_stats);
+      const UINT64 tile_count = client->forwarded_surface_bits_count;
+      const UINT64 total_bytes = client->forwarded_surface_bits_bytes;
+      const UINT64 frame_markers = client->forwarded_frame_marker_count;
+      const UINT64 bitmap_batches = client->bitmap_update_batches_total;
+      const UINT64 bitmap_rectangles = client->bitmap_update_rectangles_total;
+      const UINT64 bitmap_bytes = client->bitmap_update_payload_bytes_total;
+      const UINT64 surface_decodes = client->surface_bits_decode_count;
+      const UINT64 surface_decode_failures =
+          client->surface_bits_decode_failure_count;
+      const UINT64 surface_decode_bytes =
+          client->surface_bits_payload_bytes_total;
+      PlatformProcessCpuSample cpu_sample = {0};
+      double process_cpu_percent = 0.0;
+      const double avg_rects_per_batch =
+          (bitmap_batches > 0)
+              ? ((double)bitmap_rectangles / (double)bitmap_batches)
+              : 0.0;
+      const double avg_callback_us =
+          (bitmap_batches > 0)
+              ? ((double)client->bitmap_update_callback_time_total_us /
+                 (double)bitmap_batches)
+              : 0.0;
+      const double avg_publish_us =
+          (bitmap_batches > 0)
+              ? ((double)client->bitmap_update_publish_time_total_us /
+                 (double)bitmap_batches)
+              : 0.0;
+      const double fps =
+          (seconds > 0.0) ? ((double)(tile_count - last_tile_count) / seconds)
+                          : 0.0;
+      const double avg_surface_decode_us =
+          (surface_decodes > 0)
+              ? ((double)client->surface_bits_decode_time_total_us /
+                 (double)surface_decodes)
+              : 0.0;
+
+      if (platform_get_process_cpu_sample(&cpu_sample)) {
+        process_cpu_percent =
+            platform_process_cpu_percent(&last_cpu_sample, &cpu_sample);
+        last_cpu_sample = cpu_sample;
+      }
+
+      if ((tile_count != last_tile_count) ||
+          (bitmap_batches != last_bitmap_batch_count) ||
+          (surface_decodes != last_surface_bits_decode_count)) {
+        LOG_I("instance_runner",
+              "Perf stats: tiles=%" PRIu64 " bytes=%" PRIu64 " markers=%" PRIu64
+              " rate=%.1f updates/s"
+              " bitmap_batches=%" PRIu64 " bitmap_rects=%" PRIu64
+              " bitmap_bytes=%" PRIu64 " avg_rect_batch=%.2f"
+              " avg_bitmap_callback_us=%.1f avg_bitmap_publish_us=%.1f"
+              " max_bitmap_callback_us=%" PRIu64
+              " max_bitmap_publish_us=%" PRIu64 " surface_decodes=%" PRIu64
+              " surface_decode_failures=%" PRIu64
+              " surface_coded_bytes=%" PRIu64
+              " avg_surface_decode_us=%.1f max_surface_decode_us=%" PRIu64
+              " process_cpu_percent=%.1f",
+              tile_count, total_bytes, frame_markers, fps, bitmap_batches,
+              bitmap_rectangles, bitmap_bytes, avg_rects_per_batch,
+              avg_callback_us, avg_publish_us,
+              client->bitmap_update_callback_time_max_us,
+              client->bitmap_update_publish_time_max_us, surface_decodes,
+              surface_decode_failures, surface_decode_bytes,
+              avg_surface_decode_us, client->surface_bits_decode_time_max_us,
+              process_cpu_percent);
+        last_tile_count = tile_count;
+        last_bitmap_batch_count = bitmap_batches;
+        last_surface_bits_decode_count = surface_decodes;
+      } else {
+        LOG_I("instance_runner",
+              "Perf stats: no new forwarded updates process_cpu_percent=%.1f",
+              process_cpu_percent);
+      }
+
+      last_stats = now;
+    }
+
     platform_sleep_ms(1);
   }
 
