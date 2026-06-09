@@ -18,7 +18,14 @@ if(_test_executable STREQUAL "")
     message(FATAL_ERROR "Unable to locate built test executable: ${TEST_EXECUTABLE_NAME}")
 endif()
 
-execute_process(COMMAND "${_test_executable}" RESULT_VARIABLE _test_result)
+if(DEFINED TEST_DLL_DIR AND NOT TEST_DLL_DIR STREQUAL "")
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env "PATH=${TEST_DLL_DIR};$ENV{PATH}" "${_test_executable}"
+        RESULT_VARIABLE _test_result
+    )
+else()
+    execute_process(COMMAND "${_test_executable}" RESULT_VARIABLE _test_result)
+endif()
 
 if(NOT _test_result EQUAL 0)
     message(FATAL_ERROR "${TEST_EXECUTABLE_NAME} failed with exit code ${_test_result}")

@@ -1,8 +1,13 @@
-#include "viewer_server.h"
 #include "backend.h"
 #include "platform_compat.h"
 #include "svc_log.h"
+#include "viewer_auth.h"
+#include "viewer_classic_transport.h"
+#include "viewer_gfx_pipeline.h"
 #include "viewer_internal.h"
+#include "viewer_pointer.h"
+#include "viewer_pointer_transport.h"
+#include "viewer_server_internal.h"
 
 #include <freerdp/channels/drdynvc.h>
 #include <freerdp/channels/rdpgfx.h>
@@ -31,14 +36,8 @@
 #define TAG "multiplexer.viewer"
 #define INPUT_IDLE_TIMEOUT_MS 2500U
 #define FULL_REFRESH_TIMEOUT_MS 3000U
-#define VIEWER_WAIT_REPLAY_ACK_TIMEOUT_MS 5000U
 #define VIEWER_RDPEGFX_NEGOTIATION_TIMEOUT_MS 3000U
-#define VIEWER_GFX_MIN_REPLAY_BASELINE_COMMANDS 2U
-#define VIEWER_GFX_MIN_REPLAY_BASELINE_BYTES 4096U
-#define VIEWER_GFX_BACKEND_REFRESH_TIMEOUT_MS 15000U
 #define VIEWER_UPDATE_ACTIVATION_GRACE_MS 250U
-#define VIEWER_CLASSIC_MAX_RECTS_PER_SEND 64U
-#define VIEWER_CLASSIC_MAX_BYTES_PER_SEND (512U * 1024U)
 
 static ViewerServer *g_viewer_server = NULL;
 
@@ -89,22 +88,63 @@ static BOOL viewer_domain_matches_local_alias(const char *viewer_domain) {
 static BOOL viewer_gfx_enter_classic_fallback(ViewerServer *server,
                                               Viewer *viewer, UINT64 now,
                                               const char *reason);
-static BOOL viewer_gfx_request_backend_refresh(ViewerServer *server,
-                                               Viewer *viewer, UINT64 now,
-                                               const char *reason);
-static BOOL viewer_gfx_bootstrap_direct_live(ViewerServer *server,
-                                             Viewer *viewer, UINT64 now,
-                                             const char *reason);
-static void viewer_gfx_queue_clear_locked(ViewerGraphicsContext *gfx);
+static BOOL viewer_gfx_handle_failure(ViewerServer *server, Viewer *viewer,
+                                      UINT64 now, const char *reason);
+static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
+                                                 Viewer *viewer, UINT64 now);
+static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
+                                             Viewer *viewer, UINT64 now);
 static UINT64 viewer_perf_now_us(void);
 static BOOL viewer_should_log_bitmap_perf(UINT64 batch_count, UINT64 publish_us,
                                           UINT32 send_failed_count);
+static ViewerClassicTransport
+viewer_classic_transport_from_viewer(Viewer *viewer);
 static BOOL viewer_send_bitmap_update(Viewer *viewer,
                                       const BITMAP_UPDATE *bitmap);
 static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
                                              const BITMAP_UPDATE *bitmap);
 static BOOL viewer_send_surface_bits(Viewer *viewer,
                                      const SURFACE_BITS_COMMAND *cmd);
+static BOOL viewer_enqueue_classic_event_locked(Viewer *viewer,
+                                                ViewerClassicEvent *event);
+static BOOL
+viewer_enqueue_classic_baseline_from_framebuffer(ViewerServer *server,
+                                                 Viewer *viewer);
+static void viewer_note_classic_queue_state_locked(const Viewer *viewer);
+static void viewer_classic_apply_latest_policy_locked(Viewer *viewer);
+static void viewer_clear_classic_queue_locked(Viewer *viewer);
+
+static void viewer_server_accumulate_gfx_dirty_viewers(
+    ViewerServer *server, const RECTANGLE_16 *dirty_rects,
+    UINT32 dirty_rect_count, BOOL dirty_overflow, UINT64 generation,
+    UINT32 width, UINT32 height);
+
+static void viewer_gfx_apply_caps_result_locked(
+    ViewerServer *server, Viewer *viewer,
+    const ViewerGfxPipelineCapsResult *caps_result, UINT64 now,
+    BOOL *enter_classic_fallback, const char **classic_fallback_reason) {
+  if (!viewer || !caps_result)
+    return;
+
+  if (caps_result->actions & VIEWER_GFX_PIPELINE_CAPS_ACTION_DISABLE_RDPEGFX)
+    viewer_gfx_pipeline_disable_rdpgfx_locked(viewer);
+
+  if (caps_result->actions & VIEWER_GFX_PIPELINE_CAPS_ACTION_BEGIN_JOIN) {
+    viewer_gfx_pipeline_begin_join_locked(viewer, now,
+                                          caps_result->begin_join_reason
+                                              ? caps_result->begin_join_reason
+                                              : "RDPEGFX caps confirmed");
+  }
+
+  if ((caps_result->actions &
+       VIEWER_GFX_PIPELINE_CAPS_ACTION_ENTER_CLASSIC_FALLBACK) &&
+      server && enter_classic_fallback && classic_fallback_reason) {
+    *enter_classic_fallback = TRUE;
+    *classic_fallback_reason = caps_result->classic_fallback_reason
+                                   ? caps_result->classic_fallback_reason
+                                   : "RDPEGFX caps negotiation fallback";
+  }
+}
 
 static BOOL viewer_update_ready(const Viewer *viewer, const char *operation) {
   freerdp_peer *peer = viewer ? viewer->peer : NULL;
@@ -175,6 +215,42 @@ static BOOL viewer_should_log_bitmap_perf(UINT64 batch_count, UINT64 publish_us,
          (publish_us >= 5000ULL) || (send_failed_count > 0);
 }
 
+static ViewerClassicTransport
+viewer_classic_transport_from_viewer(Viewer *viewer) {
+  ViewerClassicTransport transport = {0};
+
+  if (!viewer)
+    return transport;
+
+  transport.peer = viewer->peer;
+  transport.viewer_id = viewer->id;
+  transport.packets_sent = &viewer->packets_sent;
+  transport.packets_failed = &viewer->packets_failed;
+  transport.write_block_events = &viewer->write_block_events;
+  transport.bitmap_updates_sent = &viewer->bitmap_updates_sent;
+  transport.bitmap_updates_failed = &viewer->bitmap_updates_failed;
+  transport.bitmap_rectangles_sent = &viewer->bitmap_rectangles_sent;
+  transport.bitmap_payload_bytes_sent = &viewer->bitmap_payload_bytes_sent;
+  transport.bitmap_write_block_events = &viewer->bitmap_write_block_events;
+  transport.bitmap_send_time_total_us = &viewer->bitmap_send_time_total_us;
+  transport.bitmap_send_time_max_us = &viewer->bitmap_send_time_max_us;
+  transport.bitmap_updates_skipped_writeblock =
+      &viewer->bitmap_updates_skipped_writeblock;
+  transport.surface_bits_updates_sent = &viewer->surface_bits_updates_sent;
+  transport.surface_bits_updates_failed = &viewer->surface_bits_updates_failed;
+  transport.surface_bits_send_time_total_us =
+      &viewer->surface_bits_send_time_total_us;
+  transport.surface_bits_send_time_max_us =
+      &viewer->surface_bits_send_time_max_us;
+  transport.surface_bits_payload_bytes_sent =
+      &viewer->surface_bits_payload_bytes_sent;
+  transport.surface_bits_updates_skipped_writeblock =
+      &viewer->surface_bits_updates_skipped_writeblock;
+  transport.last_viewer_send_start_us = &viewer->last_viewer_send_start_us;
+  transport.last_viewer_send_end_us = &viewer->last_viewer_send_end_us;
+  return transport;
+}
+
 static BOOL viewer_string_has_value(const char *value) {
   return value && value[0];
 }
@@ -213,15 +289,13 @@ static char *viewer_identity_field_to_utf8(const void *field, UINT32 length) {
 }
 
 static BOOL viewer_settings_credentials_to_utf8(freerdp_peer *peer,
-                                                char **viewer_user,
-                                                char **viewer_domain,
-                                                char **viewer_password) {
+                                                ViewerAuthCredentials *out) {
   rdpSettings *settings = NULL;
   const char *settings_user = NULL;
   const char *settings_domain = NULL;
   const char *settings_password = NULL;
 
-  if (!peer || !peer->context)
+  if (!peer || !peer->context || !out)
     return FALSE;
 
   settings = peer->context->settings;
@@ -232,59 +306,38 @@ static BOOL viewer_settings_credentials_to_utf8(freerdp_peer *peer,
   settings_domain = freerdp_settings_get_string(settings, FreeRDP_Domain);
   settings_password = freerdp_settings_get_string(settings, FreeRDP_Password);
 
-  if (!viewer_string_has_value(settings_user) &&
-      !viewer_string_has_value(settings_domain) &&
-      !viewer_string_has_value(settings_password))
-    return FALSE;
+  out->username = _strdup(settings_user ? settings_user : "");
+  out->domain = _strdup(settings_domain ? settings_domain : "");
+  out->password = _strdup(settings_password ? settings_password : "");
 
-  *viewer_user = _strdup(settings_user ? settings_user : "");
-  *viewer_domain = _strdup(settings_domain ? settings_domain : "");
-  *viewer_password = _strdup(settings_password ? settings_password : "");
-
-  if (!*viewer_user || !*viewer_domain || !*viewer_password) {
-    free(*viewer_user);
-    free(*viewer_domain);
-    free(*viewer_password);
-    *viewer_user = NULL;
-    *viewer_domain = NULL;
-    *viewer_password = NULL;
+  if (!out->username || !out->domain || !out->password) {
+    viewer_auth_credentials_clear(out);
     return FALSE;
   }
 
-  return TRUE;
+  return viewer_auth_credentials_usable(out) ? TRUE : FALSE;
 }
 
 static BOOL
 viewer_identity_credentials_to_utf8(const SEC_WINNT_AUTH_IDENTITY *identity,
-                                    char **viewer_user, char **viewer_domain,
-                                    char **viewer_password) {
-  if (!identity)
+                                    ViewerAuthCredentials *out) {
+  if (!identity || !out)
     return FALSE;
 
-  *viewer_user =
+  out->username =
       viewer_identity_field_to_utf8(identity->User, identity->UserLength);
-  *viewer_domain =
+  out->domain =
       viewer_identity_field_to_utf8(identity->Domain, identity->DomainLength);
-  *viewer_password = viewer_identity_field_to_utf8(identity->Password,
-                                                   identity->PasswordLength);
+  out->password = viewer_identity_field_to_utf8(identity->Password,
+                                                identity->PasswordLength);
 
-  if (!*viewer_user || !*viewer_domain || !*viewer_password) {
-    free(*viewer_user);
-    free(*viewer_domain);
-    free(*viewer_password);
-    *viewer_user = NULL;
-    *viewer_domain = NULL;
-    *viewer_password = NULL;
+  if (!out->username || !out->domain || !out->password ||
+      !viewer_auth_credentials_usable(out)) {
+    viewer_auth_credentials_clear(out);
     return FALSE;
   }
 
   return TRUE;
-}
-
-static const char *
-viewer_comparison_domain_label(const char *configured_domain) {
-  return viewer_string_has_value(configured_domain) ? configured_domain
-                                                    : "<local>";
 }
 
 static BOOL viewer_credentials_match_expected(const char *expected_user,
@@ -326,1495 +379,211 @@ static BOOL viewer_backend_credentials_match(const BackendClient *backend,
                                            viewer_domain, viewer_password);
 }
 
-static BOOL viewer_bitmap_bpp_sane(UINT32 bpp) {
-  return (bpp == 8) || (bpp == 15) || (bpp == 16) || (bpp == 24) || (bpp == 32);
+/* ---- Classic queue coordination and policy hooks ---- */
+
+static void viewer_apply_classic_drop_info_locked(
+    Viewer *viewer, const ViewerClassicQueueDropInfo *drop_info,
+    BOOL mark_full_refresh) {
+  if (!viewer || !drop_info || (drop_info->dropped_count == 0))
+    return;
+
+  viewer->bitmap_queue_dropped += drop_info->dropped_count;
+  if (g_viewer_server)
+    viewer_publisher_note_classic_drop_bytes(&g_viewer_server->publisher,
+                                             drop_info->dropped_count,
+                                             drop_info->dropped_payload_bytes);
+  if (mark_full_refresh) {
+    viewer->needs_full_refresh = TRUE;
+    viewer->full_refresh_deadline_ts =
+        platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
+  }
 }
 
-static BOOL viewer_get_desktop_size(const Viewer *viewer, UINT32 *width,
-                                    UINT32 *height) {
-  rdpSettings *settings = NULL;
+static void viewer_apply_surface_bits_drop_info_locked(
+    Viewer *viewer, const ViewerClassicQueueDropInfo *drop_info) {
+  if (!viewer || !drop_info || (drop_info->dropped_count == 0))
+    return;
 
-  if (!width || !height)
-    return FALSE;
-
-  *width = 0;
-  *height = 0;
-  if (!viewer || !viewer->peer || !viewer->peer->context)
-    return FALSE;
-
-  settings = viewer->peer->context->settings;
-  if (!settings)
-    return FALSE;
-
-  *width = freerdp_settings_get_uint32(settings, FreeRDP_DesktopWidth);
-  *height = freerdp_settings_get_uint32(settings, FreeRDP_DesktopHeight);
-  return (*width > 0) && (*height > 0);
+  viewer->surface_bits_queue_dropped += drop_info->dropped_count;
+  if (g_viewer_server)
+    viewer_publisher_note_classic_drop_bytes(&g_viewer_server->publisher,
+                                             drop_info->dropped_count,
+                                             drop_info->dropped_payload_bytes);
 }
 
-static BOOL
-viewer_validate_bitmap_rect(const Viewer *viewer, const BITMAP_UPDATE *bitmap,
-                            const BITMAP_DATA *rect, UINT32 rect_index,
-                            UINT32 desktop_width, UINT32 desktop_height,
-                            const char *operation, BOOL log_invalid) {
-  UINT32 dest_width = 0;
-  UINT32 dest_height = 0;
-  BOOL compressed = FALSE;
-  const char *reason = NULL;
+static void viewer_note_classic_queue_state_locked(const Viewer *viewer) {
+  ViewerServer *server = g_viewer_server;
 
-  if (!bitmap || !rect) {
-    reason = "missing rect";
-    goto invalid;
-  }
+  if (!server || !viewer)
+    return;
 
-  compressed = rect->compressed ? TRUE : FALSE;
-
-  if ((rect->destRight < rect->destLeft) ||
-      (rect->destBottom < rect->destTop)) {
-    reason = "invalid bounds";
-    goto invalid;
-  }
-
-  dest_width = (UINT32)rect->destRight - (UINT32)rect->destLeft + 1U;
-  dest_height = (UINT32)rect->destBottom - (UINT32)rect->destTop + 1U;
-
-  if ((dest_width == 0) || (dest_height == 0) || (rect->width == 0) ||
-      (rect->height == 0)) {
-    reason = "non-positive dimensions";
-    goto invalid;
-  }
-
-  if ((rect->destRight >= desktop_width) ||
-      (rect->destBottom >= desktop_height)) {
-    reason = "outside desktop";
-    goto invalid;
-  }
-
-  if (!viewer_bitmap_bpp_sane(rect->bitsPerPixel)) {
-    reason = "invalid bpp";
-    goto invalid;
-  }
-
-  if ((rect->bitmapLength > 0) && !rect->bitmapDataStream) {
-    reason = "missing bitmap data";
-    goto invalid;
-  }
-
-  return TRUE;
-
-invalid:
-  if (log_invalid) {
-    WLog_WARN(
-        TAG,
-        "Viewer %u dropping BitmapUpdate rect op=%s reason=%s rect=%" PRIu32
-        "/%" PRIu32 " bounds=(%" PRIu16 ",%" PRIu16 ")-(%" PRIu16 ",%" PRIu16
-        ") dest_size=%" PRIu32 "x%" PRIu32 " bitmap_size=%" PRIu16 "x%" PRIu16
-        " desktop=%" PRIu32 "x%" PRIu32 " bpp=%" PRIu32 " flags=0x%" PRIx32
-        " compressed=%s length=%" PRIu32 " data_present=%s",
-        viewer ? viewer->id : 0, operation ? operation : "unknown",
-        reason ? reason : "unknown", rect_index, bitmap ? bitmap->number : 0,
-        rect ? rect->destLeft : 0, rect ? rect->destTop : 0,
-        rect ? rect->destRight : 0, rect ? rect->destBottom : 0, dest_width,
-        dest_height, rect ? rect->width : 0, rect ? rect->height : 0,
-        desktop_width, desktop_height, rect ? (UINT32)rect->bitsPerPixel : 0,
-        rect ? (UINT32)rect->flags : 0, compressed ? "true" : "false",
-        rect ? (UINT32)rect->bitmapLength : 0,
-        rect && rect->bitmapDataStream ? "true" : "false");
-  }
-  return FALSE;
+  viewer_publisher_note_classic_queue_state(
+      &server->publisher,
+      viewer_classic_queue_depth_locked(&viewer->classic_queues),
+      viewer_classic_queue_payload_bytes_locked(&viewer->classic_queues));
 }
 
-static BOOL viewer_send_bitmap_update_chunks(Viewer *viewer,
-                                             const BITMAP_UPDATE *bitmap,
-                                             BOOL update_lock_held,
-                                             const char *operation) {
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
-  BITMAP_DATA chunk_rects[VIEWER_CLASSIC_MAX_RECTS_PER_SEND];
-  BITMAP_UPDATE chunk = {0};
-  UINT32 desktop_width = 0;
-  UINT32 desktop_height = 0;
-  UINT32 valid_sent = 0;
-  UINT32 invalid_dropped = 0;
-  UINT32 chunks_sent = 0;
-  UINT32 i = 0;
-  UINT32 chunk_bytes = 0;
-  UINT64 total_payload_bytes = 0;
-  UINT64 send_time_total_us = 0;
-  BOOL ret = TRUE;
-  BOOL logged_invalid = FALSE;
+static void
+viewer_classic_enqueue_event_direct_locked(Viewer *viewer,
+                                           ViewerClassicEvent *event) {
+  if (!viewer || !event ||
+      (viewer_classic_queue_depth_locked(&viewer->classic_queues) >=
+       VIEWER_CLASSIC_QUEUE_CAPACITY))
+    return;
 
-  if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
-    return FALSE;
+  viewer_classic_queue_enqueue_event_direct_locked(&viewer->classic_queues,
+                                                   event);
+  viewer->bitmap_updates_queued++;
+  viewer_note_classic_queue_state_locked(viewer);
+}
 
-  if (!bitmap->rectangles || (bitmap->number == 0)) {
-    WLog_WARN(TAG,
-              "Viewer %u dropping BitmapUpdate op=%s: count=%" PRIu32
-              " rectangles_present=%s",
-              viewer->id, operation ? operation : "unknown", bitmap->number,
-              bitmap->rectangles ? "true" : "false");
-    return TRUE;
-  }
+static void viewer_classic_apply_latest_policy_locked(Viewer *viewer) {
+  ViewerServer *server = g_viewer_server;
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerClassicEvent *event = NULL;
+  UINT64 queued_bytes = 0;
 
-  if (!viewer_get_desktop_size(viewer, &desktop_width, &desktop_height)) {
-    WLog_WARN(TAG, "Viewer %u dropping BitmapUpdate op=%s: no desktop size",
-              viewer->id, operation ? operation : "unknown");
-    return TRUE;
-  }
+  if (!server || !viewer)
+    return;
 
-  memset(&chunk, 0, sizeof(chunk));
-  chunk.skipCompression = bitmap->skipCompression;
-  chunk.rectangles = chunk_rects;
+  queued_bytes =
+      viewer_classic_queue_payload_bytes_locked(&viewer->classic_queues);
+  if (viewer_publisher_classic_queue_decision(
+          &server->publisher,
+          viewer_classic_queue_depth_locked(&viewer->classic_queues),
+          queued_bytes) !=
+      VIEWER_PUBLISHER_CLASSIC_DECISION_REPLACE_WITH_BASELINE)
+    return;
 
-#define VIEWER_SEND_BITMAP_CHUNK()                                             \
-  do {                                                                         \
-    BOOL chunk_ret = FALSE;                                                    \
-    UINT64 send_started_us = 0;                                                \
-    UINT64 send_us = 0;                                                        \
-    if (chunk.number > 0) {                                                    \
-      send_started_us = viewer_perf_now_us();                                  \
-      if (!update_lock_held)                                                   \
-        rdp_update_lock(peer->context->update);                                \
-      IFCALLRET(peer->context->update->BitmapUpdate, chunk_ret, peer->context, \
-                &chunk);                                                       \
-      if (!update_lock_held)                                                   \
-        rdp_update_unlock(peer->context->update);                              \
-      send_us = viewer_perf_now_us() - send_started_us;                        \
-      send_time_total_us += send_us;                                           \
-      if (send_us > viewer->bitmap_send_time_max_us)                           \
-        viewer->bitmap_send_time_max_us = send_us;                             \
-      if (chunk_ret) {                                                         \
-        viewer->packets_sent++;                                                \
-        viewer->bitmap_updates_sent++;                                         \
-        viewer->bitmap_rectangles_sent += chunk.number;                        \
-        viewer->bitmap_payload_bytes_sent += chunk_bytes;                      \
-        valid_sent += chunk.number;                                            \
-        chunks_sent++;                                                         \
-      } else {                                                                 \
-        viewer->packets_failed++;                                              \
-        viewer->bitmap_updates_failed++;                                       \
-        ret = FALSE;                                                           \
-      }                                                                        \
-      chunk.number = 0;                                                        \
-      chunk_bytes = 0;                                                         \
-    }                                                                          \
-  } while (0)
+  if (!viewer_publisher_classic_latest_snapshot(
+          &server->publisher, &server->framebuffer,
+          viewer->classic_last_generation_sent, &snapshot))
+    return;
 
-  for (i = 0; i < bitmap->number; i++) {
-    const BITMAP_DATA *rect = &bitmap->rectangles[i];
-    UINT32 rect_bytes = rect ? (UINT32)rect->bitmapLength : 0;
-
-    if (!viewer_validate_bitmap_rect(viewer, bitmap, rect, i, desktop_width,
-                                     desktop_height, operation,
-                                     !logged_invalid)) {
-      invalid_dropped++;
-      logged_invalid = TRUE;
-      continue;
-    }
-
-    if ((chunk.number > 0) &&
-        ((chunk.number >= VIEWER_CLASSIC_MAX_RECTS_PER_SEND) ||
-         ((chunk_bytes + rect_bytes) > VIEWER_CLASSIC_MAX_BYTES_PER_SEND))) {
-      VIEWER_SEND_BITMAP_CHUNK();
-      if (!ret)
-        break;
-    }
-
-    chunk_rects[chunk.number++] = *rect;
-    chunk_bytes += rect_bytes;
-    total_payload_bytes += rect_bytes;
-
-    if (chunk.number >= VIEWER_CLASSIC_MAX_RECTS_PER_SEND) {
-      VIEWER_SEND_BITMAP_CHUNK();
-      if (!ret)
-        break;
-    }
-  }
-
-  if (ret && (chunk.number > 0))
-    VIEWER_SEND_BITMAP_CHUNK();
-
-#undef VIEWER_SEND_BITMAP_CHUNK
-
-  viewer->bitmap_send_time_total_us += send_time_total_us;
-
-  if ((valid_sent == 0) && (invalid_dropped > 0)) {
-    WLog_WARN(TAG,
-              "Viewer %u dropped BitmapUpdate op=%s: all rects invalid "
-              "original=%" PRIu32 " invalid=%" PRIu32,
-              viewer->id, operation ? operation : "unknown", bitmap->number,
-              invalid_dropped);
-    return TRUE;
-  }
+  event = viewer_classic_event_from_snapshot(&snapshot);
+  viewer_framebuffer_snapshot_free(&snapshot);
+  if (!event)
+    return;
 
   WLog_INFO(TAG,
-            "Viewer %u BitmapUpdate op=%s summary original=%" PRIu32
-            " valid_sent=%" PRIu32 " invalid_dropped=%" PRIu32
-            " chunks_sent=%" PRIu32 " total_payload=%" PRIu64
-            " max_rects=%u max_bytes=%u send_ok=%s",
-            viewer->id, operation ? operation : "unknown", bitmap->number,
-            valid_sent, invalid_dropped, chunks_sent, total_payload_bytes,
-            VIEWER_CLASSIC_MAX_RECTS_PER_SEND,
-            VIEWER_CLASSIC_MAX_BYTES_PER_SEND, ret ? "true" : "false");
-
-  return ret;
+            "Viewer %u classic latest-state policy replacing %" PRIu32
+            " queued events with framebuffer generation %" PRIu64,
+            viewer->id,
+            viewer_classic_queue_depth_locked(&viewer->classic_queues),
+            viewer_classic_event_generation(event));
+  viewer_clear_classic_queue_locked(viewer);
+  viewer_classic_enqueue_event_direct_locked(viewer, event);
 }
 
-/* ---- Classic bitmap queue: deep-copy helpers ---- */
-
-static ViewerClassicEvent *
-viewer_classic_event_new(const BITMAP_UPDATE *bitmap) {
-  ViewerClassicEvent *event = NULL;
-  UINT32 i = 0;
-
-  if (!bitmap)
-    return NULL;
-
-  event = (ViewerClassicEvent *)calloc(1, sizeof(ViewerClassicEvent));
-  if (!event)
-    return NULL;
-
-  event->bitmap = (BITMAP_UPDATE *)calloc(1, sizeof(BITMAP_UPDATE));
-  if (!event->bitmap) {
-    free(event);
-    return NULL;
-  }
-
-  /* Shallow-copy top-level fields */
-  event->bitmap->number = bitmap->number;
-  event->bitmap->skipCompression = bitmap->skipCompression;
-
-  if (bitmap->number == 0) {
-    event->bitmap->rectangles = NULL;
-    return event;
-  }
-
-  /* Deep-copy the rectangles array */
-  event->bitmap->rectangles =
-      (BITMAP_DATA *)calloc(bitmap->number, sizeof(BITMAP_DATA));
-  if (!event->bitmap->rectangles) {
-    free(event->bitmap);
-    free(event);
-    return NULL;
-  }
-
-  for (i = 0; i < bitmap->number; i++) {
-    /* Copy inline fields */
-    event->bitmap->rectangles[i] = bitmap->rectangles[i];
-
-    /* Deep-copy the bitmap data stream */
-    if (bitmap->rectangles[i].bitmapLength > 0 &&
-        bitmap->rectangles[i].bitmapDataStream) {
-      event->bitmap->rectangles[i].bitmapDataStream =
-          (BYTE *)malloc(bitmap->rectangles[i].bitmapLength);
-      if (!event->bitmap->rectangles[i].bitmapDataStream) {
-        /* Free already-allocated rectangles on failure */
-        for (UINT32 j = 0; j < i; j++) {
-          free(event->bitmap->rectangles[j].bitmapDataStream);
-          event->bitmap->rectangles[j].bitmapDataStream = NULL;
-        }
-        free(event->bitmap->rectangles);
-        free(event->bitmap);
-        free(event);
-        return NULL;
-      }
-      memmove(event->bitmap->rectangles[i].bitmapDataStream,
-              bitmap->rectangles[i].bitmapDataStream,
-              bitmap->rectangles[i].bitmapLength);
-    } else {
-      event->bitmap->rectangles[i].bitmapDataStream = NULL;
-    }
-  }
-
-  return event;
-}
-
-static void viewer_classic_event_free(ViewerClassicEvent *event) {
-  UINT32 i = 0;
-
-  if (!event)
-    return;
-
-  if (event->bitmap) {
-    if (event->bitmap->rectangles) {
-      for (i = 0; i < event->bitmap->number; i++) {
-        free(event->bitmap->rectangles[i].bitmapDataStream);
-      }
-      free(event->bitmap->rectangles);
-    }
-    free(event->bitmap);
-  }
-  free(event);
-}
-
-/* ---- SurfaceBits event: deep-copy and free ---- */
-
-static ViewerSurfaceBitsEvent *
-viewer_surface_bits_event_new(const SURFACE_BITS_COMMAND *cmd) {
-  ViewerSurfaceBitsEvent *event = NULL;
-
-  if (!cmd)
-    return NULL;
-
-  event = (ViewerSurfaceBitsEvent *)calloc(1, sizeof(ViewerSurfaceBitsEvent));
-  if (!event)
-    return NULL;
-
-  /* Shallow-copy all fields */
-  event->cmd = *cmd;
-
-  /* Deep-copy the bitmapData buffer */
-  if (cmd->bmp.bitmapDataLength > 0 && cmd->bmp.bitmapData) {
-    event->cmd.bmp.bitmapData = (BYTE *)malloc(cmd->bmp.bitmapDataLength);
-    if (!event->cmd.bmp.bitmapData) {
-      free(event);
-      return NULL;
-    }
-    memmove(event->cmd.bmp.bitmapData, cmd->bmp.bitmapData,
-            cmd->bmp.bitmapDataLength);
-  } else {
-    event->cmd.bmp.bitmapData = NULL;
-    event->cmd.bmp.bitmapDataLength = 0;
-  }
-
-  return event;
-}
-
-static void viewer_surface_bits_event_free(ViewerSurfaceBitsEvent *event) {
-  if (!event)
-    return;
-
-  free(event->cmd.bmp.bitmapData);
-  free(event);
-}
-
-/* ---- Classic bitmap queue: queue operations ---- */
-
-/* Drop the oldest entry from the classic queue. Caller must hold send_lock. */
-static void viewer_classic_queue_drop_oldest_locked(Viewer *viewer) {
-  ViewerClassicEvent *oldest = NULL;
-
-  if (viewer->classic_queue_count == 0)
-    return;
-
-  oldest = viewer->classic_queue[viewer->classic_queue_head];
-  viewer->classic_queue[viewer->classic_queue_head] = NULL;
-  viewer->classic_queue_head =
-      (viewer->classic_queue_head + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
-  viewer->classic_queue_count--;
-
-  viewer_classic_event_free(oldest);
-  viewer->bitmap_queue_dropped++;
-}
-
-static void viewer_classic_queue_clear_locked(Viewer *viewer) {
-  while (viewer->classic_queue_count > 0)
-    viewer_classic_queue_drop_oldest_locked(viewer);
-}
-
-/* Enqueue a deep-copied BITMAP_UPDATE for a viewer.
- * Called from the backend thread under viewer->send_lock.
- * Returns TRUE on success, FALSE if the viewer should be disconnected. */
-static BOOL viewer_classic_enqueue_locked(Viewer *viewer,
-                                          const BITMAP_UPDATE *bitmap) {
-  ViewerClassicEvent *event = NULL;
-
-  if (!viewer || !bitmap)
-    return FALSE;
-
-  /* If queue is full, drop oldest entries to make room */
-  while (viewer->classic_queue_count >= VIEWER_CLASSIC_QUEUE_CAPACITY) {
-    WLog_WARN(TAG, "Viewer %u classic queue full (%u entries), dropping oldest",
-              viewer->id, viewer->classic_queue_count);
-    viewer_classic_queue_drop_oldest_locked(viewer);
-
-    /* After dropping, mark viewer for full refresh to resync */
-    viewer->needs_full_refresh = TRUE;
-    viewer->full_refresh_deadline_ts =
-        platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
-  }
-
-  event = viewer_classic_event_new(bitmap);
-  if (!event) {
-    WLog_ERR(TAG, "Viewer %u failed to allocate classic event", viewer->id);
-    return FALSE;
-  }
-
-  viewer->classic_queue[viewer->classic_queue_tail] = event;
-  viewer->classic_queue_tail =
-      (viewer->classic_queue_tail + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
-  viewer->classic_queue_count++;
-  viewer->bitmap_updates_queued++;
-
-  /* Signal the viewer thread that a new event is available */
-  if (viewer->classic_event)
-    SetEvent(viewer->classic_event);
-
-  return TRUE;
-}
-
-/* Enqueue a pre-built event into the viewer's classic queue.
- * Caller must hold send_lock. The event must have been deep-copied
- * by the caller before acquiring the lock. Returns TRUE on success. */
-static BOOL viewer_classic_enqueue_event_locked(Viewer *viewer,
-                                                ViewerClassicEvent *event) {
-  if (!viewer || !event)
-    return FALSE;
-
-  /* If queue is full, drop oldest entries to make room */
-  while (viewer->classic_queue_count >= VIEWER_CLASSIC_QUEUE_CAPACITY) {
-    WLog_WARN(TAG, "Viewer %u classic queue full (%u entries), dropping oldest",
-              viewer->id, viewer->classic_queue_count);
-    viewer_classic_queue_drop_oldest_locked(viewer);
-
-    /* After dropping, mark viewer for full refresh to resync */
-    viewer->needs_full_refresh = TRUE;
-    viewer->full_refresh_deadline_ts =
-        platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
-  }
-
-  viewer->classic_queue[viewer->classic_queue_tail] = event;
-  viewer->classic_queue_tail =
-      (viewer->classic_queue_tail + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
-  viewer->classic_queue_count++;
-  viewer->bitmap_updates_queued++;
-
-  /* Signal the viewer thread that a new event is available */
-  if (viewer->classic_event)
-    SetEvent(viewer->classic_event);
-
-  return TRUE;
-}
-
-/* Dequeue the oldest event from the classic queue. Caller must hold send_lock.
- * Returns NULL if queue is empty. Caller must free the returned event. */
-static ViewerClassicEvent *viewer_classic_dequeue_locked(Viewer *viewer) {
-  ViewerClassicEvent *event = NULL;
-
-  if (!viewer || (viewer->classic_queue_count == 0))
-    return NULL;
-
-  event = viewer->classic_queue[viewer->classic_queue_head];
-  viewer->classic_queue[viewer->classic_queue_head] = NULL;
-  viewer->classic_queue_head =
-      (viewer->classic_queue_head + 1) % VIEWER_CLASSIC_QUEUE_CAPACITY;
-  viewer->classic_queue_count--;
-
-  return event;
-}
-
-/* ---- SurfaceBits queue: queue operations ---- */
-
-/* Drop the oldest entry from the SurfaceBits queue. Caller must hold send_lock.
- */
-static void viewer_surface_bits_queue_drop_oldest_locked(Viewer *viewer) {
-  ViewerSurfaceBitsEvent *oldest = NULL;
-
-  if (viewer->surface_bits_queue_count == 0)
-    return;
-
-  oldest = viewer->surface_bits_queue[viewer->surface_bits_queue_head];
-  viewer->surface_bits_queue[viewer->surface_bits_queue_head] = NULL;
-  viewer->surface_bits_queue_head = (viewer->surface_bits_queue_head + 1) %
-                                    VIEWER_SURFACE_BITS_QUEUE_CAPACITY;
-  viewer->surface_bits_queue_count--;
-
-  viewer_surface_bits_event_free(oldest);
-  viewer->surface_bits_queue_dropped++;
-}
-
-static void viewer_surface_bits_queue_clear_locked(Viewer *viewer) {
-  while (viewer->surface_bits_queue_count > 0)
-    viewer_surface_bits_queue_drop_oldest_locked(viewer);
-}
-
-/* Enqueue a pre-built SurfaceBits event into the viewer's queue.
- * Caller must hold send_lock. Returns TRUE on success. */
 static BOOL
-viewer_surface_bits_enqueue_event_locked(Viewer *viewer,
-                                         ViewerSurfaceBitsEvent *event) {
+viewer_enqueue_classic_baseline_from_framebuffer(ViewerServer *server,
+                                                 Viewer *viewer) {
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerClassicEvent *event = NULL;
+  BOOL queued = FALSE;
+
+  if (!server || !viewer)
+    return FALSE;
+
+  if (!viewer_publisher_classic_baseline_snapshot(
+          &server->publisher, &server->framebuffer, &snapshot))
+    return FALSE;
+
+  event = viewer_classic_event_from_snapshot(&snapshot);
+  viewer_framebuffer_snapshot_free(&snapshot);
+  if (!event)
+    return FALSE;
+
+  EnterCriticalSection(&viewer->send_lock);
+  queued = viewer_enqueue_classic_event_locked(viewer, event);
+  LeaveCriticalSection(&viewer->send_lock);
+
+  if (!queued) {
+    viewer_classic_event_free(event);
+    return FALSE;
+  }
+
+  WLog_INFO(TAG, "Viewer %u queued classic framebuffer baseline", viewer->id);
+  return TRUE;
+}
+
+static void viewer_clear_classic_queue_locked(Viewer *viewer) {
+  ViewerClassicQueueDropInfo drop_info = {0};
+
+  if (!viewer)
+    return;
+
+  viewer_classic_queue_clear_locked(&viewer->classic_queues, &drop_info);
+  viewer_apply_classic_drop_info_locked(viewer, &drop_info, FALSE);
+  viewer_note_classic_queue_state_locked(viewer);
+}
+
+static BOOL viewer_enqueue_classic_event_locked(Viewer *viewer,
+                                                ViewerClassicEvent *event) {
+  ViewerClassicQueueDropInfo drop_info = {0};
+  BOOL enqueued = FALSE;
+  UINT32 depth = 0;
+
   if (!viewer || !event)
     return FALSE;
 
-  /* If queue is full, drop oldest entries to make room */
-  while (viewer->surface_bits_queue_count >=
-         VIEWER_SURFACE_BITS_QUEUE_CAPACITY) {
+  depth = viewer_classic_queue_depth_locked(&viewer->classic_queues);
+  if (depth >= VIEWER_CLASSIC_QUEUE_CAPACITY)
+    WLog_WARN(TAG, "Viewer %u classic queue full (%u entries), dropping oldest",
+              viewer->id, depth);
+
+  enqueued = viewer_classic_queue_enqueue_event_locked(&viewer->classic_queues,
+                                                       event, &drop_info);
+  viewer_apply_classic_drop_info_locked(viewer, &drop_info, TRUE);
+  if (enqueued)
+    viewer->bitmap_updates_queued++;
+  viewer_note_classic_queue_state_locked(viewer);
+  viewer_classic_apply_latest_policy_locked(viewer);
+  return enqueued;
+}
+
+static ViewerClassicEvent *viewer_dequeue_classic_event_locked(Viewer *viewer) {
+  ViewerClassicEvent *event = NULL;
+
+  if (!viewer)
+    return NULL;
+
+  event = viewer_classic_queue_dequeue_locked(&viewer->classic_queues);
+  if (event)
+    viewer_note_classic_queue_state_locked(viewer);
+  return event;
+}
+
+static BOOL
+viewer_enqueue_surface_bits_event_locked(Viewer *viewer,
+                                         ViewerSurfaceBitsEvent *event) {
+  ViewerClassicQueueDropInfo drop_info = {0};
+  BOOL enqueued = FALSE;
+  UINT32 depth = 0;
+
+  if (!viewer || !event)
+    return FALSE;
+
+  depth = viewer_surface_bits_queue_depth_locked(&viewer->classic_queues);
+  if (depth >= VIEWER_SURFACE_BITS_QUEUE_CAPACITY) {
     WLog_WARN(TAG,
               "Viewer %u SurfaceBits queue full (%u entries), dropping oldest",
-              viewer->id, viewer->surface_bits_queue_count);
-    viewer_surface_bits_queue_drop_oldest_locked(viewer);
-
-    /* Note: do NOT set needs_full_refresh here. SurfaceBits ARE the
-     * refresh data — setting needs_full_refresh would cause the pump
-     * to drop all queued SurfaceBits, creating a deadlock. */
+              viewer->id, depth);
   }
 
-  viewer->surface_bits_queue[viewer->surface_bits_queue_tail] = event;
-  viewer->surface_bits_queue_tail = (viewer->surface_bits_queue_tail + 1) %
-                                    VIEWER_SURFACE_BITS_QUEUE_CAPACITY;
-  viewer->surface_bits_queue_count++;
-  viewer->surface_bits_updates_queued++;
-
-  /* Signal the viewer thread that a new event is available */
-  if (viewer->classic_event)
-    SetEvent(viewer->classic_event);
-
-  return TRUE;
+  enqueued = viewer_surface_bits_queue_enqueue_event_locked(
+      &viewer->classic_queues, event, &drop_info);
+  viewer_apply_surface_bits_drop_info_locked(viewer, &drop_info);
+  if (enqueued)
+    viewer->surface_bits_updates_queued++;
+  return enqueued;
 }
 
-/* Dequeue the oldest event from the SurfaceBits queue. Caller must hold
- * send_lock. Returns NULL if queue is empty. Caller must free the returned
- * event. */
 static ViewerSurfaceBitsEvent *
-viewer_surface_bits_dequeue_locked(Viewer *viewer) {
-  ViewerSurfaceBitsEvent *event = NULL;
-
-  if (!viewer || (viewer->surface_bits_queue_count == 0))
-    return NULL;
-
-  event = viewer->surface_bits_queue[viewer->surface_bits_queue_head];
-  viewer->surface_bits_queue[viewer->surface_bits_queue_head] = NULL;
-  viewer->surface_bits_queue_head = (viewer->surface_bits_queue_head + 1) %
-                                    VIEWER_SURFACE_BITS_QUEUE_CAPACITY;
-  viewer->surface_bits_queue_count--;
-
-  return event;
-}
-
-static const char *viewer_join_state_name(ViewerJoinState state) {
-  switch (state) {
-  case VIEWER_JOIN_STATE_NONE:
-    return "NONE";
-  case VIEWER_JOIN_STATE_PENDING:
-    return "PENDING";
-  case VIEWER_JOIN_STATE_WAIT_NEXT_SAFE_FRAME:
-    return "WAIT_NEXT_SAFE_FRAME";
-  case VIEWER_JOIN_STATE_REPLAYING:
-    return "REPLAYING";
-  case VIEWER_JOIN_STATE_WAIT_REPLAY_ACK:
-    return "WAIT_REPLAY_ACK";
-  case VIEWER_JOIN_STATE_WAIT_BACKEND_REFRESH:
-    return "WAIT_BACKEND_REFRESH";
-  case VIEWER_JOIN_STATE_LIVE:
-    return "LIVE";
-  case VIEWER_JOIN_STATE_REJECTED:
-    return "REJECTED";
-  default:
-    return "UNKNOWN";
-  }
-}
-
-static const char *viewer_join_strategy_name(ViewerJoinStrategy strategy) {
-  switch (strategy) {
-  case VIEWER_JOIN_STRATEGY_NONE:
-    return "NONE";
-  case VIEWER_JOIN_STRATEGY_REPLAY_SAFE_FRAME:
-    return "REPLAY_SAFE_FRAME";
-  case VIEWER_JOIN_STRATEGY_WAIT_NEXT_SAFE_FRAME:
-    return "WAIT_NEXT_SAFE_FRAME";
-  case VIEWER_JOIN_STRATEGY_BACKEND_REFRESH:
-    return "BACKEND_REFRESH";
-  case VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK:
-    return "CLASSIC_FALLBACK";
-  case VIEWER_JOIN_STRATEGY_REJECT:
-    return "REJECT";
-  default:
-    return "UNKNOWN";
-  }
-}
-
-static void viewer_gfx_event_unref(ViewerGfxEvent *event);
-static BOOL viewer_send_gfx_event(Viewer *viewer, ViewerGfxEvent *event);
-
-static BOOL viewer_gfx_is_frame_event(ViewerGfxEventType type) {
-  return (type == VIEWER_GFX_EVENT_START_FRAME) ||
-         (type == VIEWER_GFX_EVENT_SURFACE_COMMAND) ||
-         (type == VIEWER_GFX_EVENT_END_FRAME);
-}
-
-static void
-viewer_gfx_reset_graphics_pdu_reset(RDPGFX_RESET_GRAPHICS_PDU *reset_graphics) {
-  if (!reset_graphics)
-    return;
-
-  free(reset_graphics->monitorDefArray);
-  memset(reset_graphics, 0, sizeof(*reset_graphics));
-}
-
-static BOOL
-viewer_gfx_reset_graphics_pdu_copy(RDPGFX_RESET_GRAPHICS_PDU *destination,
-                                   const RDPGFX_RESET_GRAPHICS_PDU *source) {
-  size_t monitor_bytes = 0;
-
-  if (!destination || !source)
-    return FALSE;
-
-  memset(destination, 0, sizeof(*destination));
-  *destination = *source;
-  destination->monitorDefArray = NULL;
-
-  if (source->monitorCount == 0)
-    return TRUE;
-
-  if (!source->monitorDefArray)
-    return FALSE;
-
-  monitor_bytes = sizeof(MONITOR_DEF) * source->monitorCount;
-  destination->monitorDefArray = (MONITOR_DEF *)malloc(monitor_bytes);
-  if (!destination->monitorDefArray)
-    return FALSE;
-
-  memmove(destination->monitorDefArray, source->monitorDefArray, monitor_bytes);
-  return TRUE;
-}
-
-static ViewerGfxEvent *viewer_gfx_event_alloc(ViewerGfxEventType type) {
-  ViewerGfxEvent *event = (ViewerGfxEvent *)calloc(1, sizeof(ViewerGfxEvent));
-  if (!event)
-    return NULL;
-
-  event->refcount = 1;
-  event->type = type;
-  return event;
-}
-
-static ViewerGfxEvent *viewer_gfx_event_new_reset_graphics(
-    const RDPGFX_RESET_GRAPHICS_PDU *reset_graphics) {
-  ViewerGfxEvent *event =
-      viewer_gfx_event_alloc(VIEWER_GFX_EVENT_RESET_GRAPHICS);
-  if (!event)
-    return NULL;
-
-  if (!viewer_gfx_reset_graphics_pdu_copy(&event->u.reset_graphics,
-                                          reset_graphics)) {
-    free(event);
-    return NULL;
-  }
-
-  return event;
-}
-
-static ViewerGfxEvent *
-viewer_gfx_event_new_surface_command(const RDPGFX_SURFACE_COMMAND *cmd) {
-  ViewerGfxEvent *event =
-      viewer_gfx_event_alloc(VIEWER_GFX_EVENT_SURFACE_COMMAND);
-  if (!event)
-    return NULL;
-
-  event->u.surface_command = *cmd;
-  event->u.surface_command.data = NULL;
-  event->u.surface_command.extra = NULL;
-
-  if (cmd->length > 0) {
-    if (!cmd->data) {
-      free(event);
-      return NULL;
-    }
-    event->u.surface_command.data = (BYTE *)malloc(cmd->length);
-    if (!event->u.surface_command.data) {
-      free(event);
-      return NULL;
-    }
-    memmove(event->u.surface_command.data, cmd->data, cmd->length);
-  }
-
-  return event;
-}
-
-static ViewerGfxEvent *viewer_gfx_event_new_simple(ViewerGfxEventType type,
-                                                   const void *payload,
-                                                   size_t payload_size) {
-  ViewerGfxEvent *event = viewer_gfx_event_alloc(type);
-  if (!event)
-    return NULL;
-
-  if (payload_size > 0 && !payload) {
-    free(event);
-    return NULL;
-  }
-
-  memmove(&event->u, payload, payload_size);
-  return event;
-}
-
-static void viewer_gfx_event_ref(ViewerGfxEvent *event) {
-  if (event)
-    InterlockedIncrement(&event->refcount);
-}
-
-static void viewer_gfx_event_unref(ViewerGfxEvent *event) {
-  if (!event)
-    return;
-
-  if (InterlockedDecrement(&event->refcount) != 0)
-    return;
-
-  switch (event->type) {
-  case VIEWER_GFX_EVENT_RESET_GRAPHICS:
-    viewer_gfx_reset_graphics_pdu_reset(&event->u.reset_graphics);
-    break;
-
-  case VIEWER_GFX_EVENT_SURFACE_COMMAND:
-    free(event->u.surface_command.data);
-    event->u.surface_command.data = NULL;
-    break;
-
-  default:
-    break;
-  }
-
-  free(event);
-}
-
-static UINT64 viewer_gfx_event_payload_bytes(const ViewerGfxEvent *event) {
-  if (!event)
-    return 0;
-
-  if (event->type == VIEWER_GFX_EVENT_SURFACE_COMMAND)
-    return event->u.surface_command.length;
-
-  return 0;
-}
-
-static void viewer_gfx_log_refcount_change(const char *owner, UINT32 frame_id,
-                                           LONG old_count, LONG new_count) {
-  WLog_DBG(TAG, "Frame %" PRIu32 " refcount owner=%s %ld -> %ld", frame_id,
-           owner ? owner : "unknown", old_count, new_count);
-}
-
-static ViewerGfxCompleteFrame *viewer_gfx_complete_frame_new(void) {
-  ViewerGfxCompleteFrame *frame =
-      (ViewerGfxCompleteFrame *)calloc(1, sizeof(*frame));
-
-  if (!frame)
-    return NULL;
-
-  frame->refcount = 1;
-  frame->replay_safe = TRUE;
-  frame->events = (ViewerGfxEvent **)calloc(VIEWER_GFX_MAX_FRAME_EVENTS,
-                                            sizeof(ViewerGfxEvent *));
-  if (!frame->events) {
-    free(frame);
-    return NULL;
-  }
-
-  return frame;
-}
-
-static void viewer_gfx_complete_frame_ref(ViewerGfxCompleteFrame *frame) {
-  LONG old_count = 0;
-  LONG new_count = 0;
-
-  if (!frame)
-    return;
-
-  old_count = InterlockedIncrement(&frame->refcount) - 1;
-  new_count = old_count + 1;
-  viewer_gfx_log_refcount_change("frame-ref", frame->frame_id, old_count,
-                                 new_count);
-}
-
-static void viewer_gfx_complete_frame_unref(ViewerGfxCompleteFrame *frame) {
-  LONG new_count = 0;
-  LONG old_count = 0;
-  UINT32 i = 0;
-
-  if (!frame)
-    return;
-
-  new_count = InterlockedDecrement(&frame->refcount);
-  old_count = new_count + 1;
-  viewer_gfx_log_refcount_change("frame-unref", frame->frame_id, old_count,
-                                 new_count);
-  if (new_count != 0)
-    return;
-
-  WLog_INFO(TAG, "Freeing complete frame object for frameId=%" PRIu32,
-            frame->frame_id);
-  for (i = 0; i < frame->event_count; i++)
-    viewer_gfx_event_unref(frame->events[i]);
-  free(frame->events);
-  free(frame);
-}
-
-static BOOL
-viewer_gfx_complete_frame_append_event(ViewerGfxCompleteFrame *frame,
-                                       ViewerGfxEvent *event) {
-  if (!frame || !event)
-    return FALSE;
-
-  if (frame->event_count >= VIEWER_GFX_MAX_FRAME_EVENTS) {
-    WLog_ERR(TAG,
-             "Frame %" PRIu32
-             " exceeded max events=%u; dropping incomplete capture",
-             frame->frame_id, VIEWER_GFX_MAX_FRAME_EVENTS);
-    return FALSE;
-  }
-
-  viewer_gfx_event_ref(event);
-  frame->events[frame->event_count++] = event;
-  return TRUE;
-}
-
-static void
-viewer_gfx_log_frame_buffer_state_locked(const ViewerGfxFrameBuffer *buffer,
-                                         const char *reason) {
-  UINT32 capture_frame_id = 0;
-
-  if (!buffer)
-    return;
-
-  if (buffer->capture_frame)
-    capture_frame_id = buffer->capture_frame->frame_id;
-
-  WLog_INFO(TAG,
-            "Frame ring state reason=%s filled=%" PRIu32 "/%u nextSlot=%" PRIu32
-            " oldest=%" PRIu32 " newest=%" PRIu32 " capture=%" PRIu32,
-            reason ? reason : "unknown", buffer->filled_slots,
-            VIEWER_GFX_FRAME_RING_CAPACITY, buffer->next_slot,
-            buffer->oldest_frame_id, buffer->newest_frame_id, capture_frame_id);
-}
-
-static void
-viewer_gfx_frame_buffer_recompute_ids_locked(ViewerGfxFrameBuffer *buffer) {
-  UINT32 i = 0;
-  UINT32 oldest = 0;
-  UINT32 newest = 0;
-  BOOL have_frame = FALSE;
-
-  if (!buffer)
-    return;
-
-  buffer->filled_slots = 0;
-  for (i = 0; i < VIEWER_GFX_FRAME_RING_CAPACITY; i++) {
-    ViewerGfxCompleteFrame *frame = buffer->slots[i];
-    if (!frame)
-      continue;
-
-    buffer->filled_slots++;
-    if (!have_frame) {
-      oldest = frame->frame_id;
-      newest = frame->frame_id;
-      have_frame = TRUE;
-      continue;
-    }
-
-    if (frame->frame_id < oldest)
-      oldest = frame->frame_id;
-    if (frame->frame_id > newest)
-      newest = frame->frame_id;
-  }
-
-  buffer->oldest_frame_id = have_frame ? oldest : 0;
-  buffer->newest_frame_id = have_frame ? newest : 0;
-}
-
-static BOOL viewer_gfx_frame_buffer_init(ViewerGfxFrameBuffer *buffer) {
-  if (!buffer || buffer->initialized)
-    return buffer && buffer->initialized;
-
-  if (!InitializeCriticalSectionAndSpinCount(&buffer->lock, 4000)) {
-    WLog_ERR(TAG, "Failed to initialize RDPEGFX frame buffer lock");
-    return FALSE;
-  }
-  buffer->initialized = TRUE;
-  return TRUE;
-}
-
-static void viewer_gfx_frame_buffer_reset_locked(ViewerGfxFrameBuffer *buffer) {
-  UINT32 i = 0;
-  ViewerGfxCompleteFrame *saved_golden = NULL;
-
-  if (!buffer)
-    return;
-
-  if (buffer->capture_frame) {
-    WLog_WARN(TAG,
-              "Discarding incomplete frame frameId=%" PRIu32
-              " during frame ring reset",
-              buffer->capture_frame->frame_id);
-    viewer_gfx_complete_frame_unref(buffer->capture_frame);
-    buffer->capture_frame = NULL;
-  }
-
-  /* Preserve the golden CAPROGRESSIVE frame in slot 0 across the reset.
-   * ResetGraphics clears the graphics pipeline state, but the pixel
-   * data in a CAPROGRESSIVE frame remains a valid full-screen baseline
-   * for late-joining viewers. Without this, every ResetGraphics (which
-   * arrives on backend refresh or session reconfiguration) destroys
-   * the replay baseline we carefully built up. */
-  if (buffer->slots[0] && buffer->slots[0]->complete &&
-      (buffer->slots[0]->codec_mask & (1ULL << RDPGFX_CODECID_CAPROGRESSIVE))) {
-    saved_golden = buffer->slots[0];
-    buffer->slots[0] = NULL;
-    WLog_INFO(TAG,
-              "Preserving golden CAPROGRESSIVE frame %" PRIu32
-              " across ring reset",
-              saved_golden->frame_id);
-  }
-
-  for (i = 0; i < VIEWER_GFX_FRAME_RING_CAPACITY; i++) {
-    if (!buffer->slots[i])
-      continue;
-
-    WLog_INFO(TAG, "Evicting frame %" PRIu32 " from ring slot %" PRIu32,
-              buffer->slots[i]->frame_id, i);
-    viewer_gfx_complete_frame_unref(buffer->slots[i]);
-    buffer->slots[i] = NULL;
-  }
-
-  /* Restore the saved golden frame to slot 0 */
-  if (saved_golden) {
-    buffer->slots[0] = saved_golden;
-    saved_golden = NULL;
-  }
-
-  buffer->next_slot = (buffer->slots[0] ? 1 : 0);
-  buffer->filled_slots = (buffer->slots[0] ? 1 : 0);
-  buffer->oldest_frame_id = 0;
-  buffer->newest_frame_id = 0;
-  viewer_gfx_log_frame_buffer_state_locked(buffer, "reset");
-}
-
-static void viewer_gfx_frame_buffer_uninit(ViewerGfxFrameBuffer *buffer) {
-  if (!buffer || !buffer->initialized)
-    return;
-
-  viewer_gfx_frame_buffer_reset_locked(buffer);
-  DeleteCriticalSection(&buffer->lock);
-  memset(buffer, 0, sizeof(*buffer));
-}
-
-static BOOL viewer_gfx_frame_buffer_begin_frame_locked(
-    ViewerGfxFrameBuffer *buffer, const RDPGFX_START_FRAME_PDU *start_frame,
-    ViewerGfxEvent *event) {
-  ViewerGfxCompleteFrame *frame = NULL;
-
-  if (!buffer || !start_frame || !event)
-    return FALSE;
-
-  if (buffer->capture_frame) {
-    WLog_WARN(TAG,
-              "Discarding incomplete frame frameId=%" PRIu32
-              " due to new StartFrame frameId=%" PRIu32,
-              buffer->capture_frame->frame_id, start_frame->frameId);
-    viewer_gfx_complete_frame_unref(buffer->capture_frame);
-    buffer->capture_frame = NULL;
-  }
-
-  WLog_INFO(TAG, "Allocating frame capture buffer for frameId=%" PRIu32,
-            start_frame->frameId);
-  frame = viewer_gfx_complete_frame_new();
-  if (!frame) {
-    WLog_ERR(TAG,
-             "Failed to allocate frame capture buffer for frameId=%" PRIu32,
-             start_frame->frameId);
-    return FALSE;
-  }
-
-  frame->frame_id = start_frame->frameId;
-  frame->capture_started_ts = platform_get_timestamp_ms();
-  WLog_INFO(TAG, "Allocated complete frame object for frameId=%" PRIu32,
-            frame->frame_id);
-
-  if (!viewer_gfx_complete_frame_append_event(frame, event)) {
-    viewer_gfx_complete_frame_unref(frame);
-    WLog_ERR(TAG,
-             "Frame %" PRIu32 " capture failed; live forwarding continues but "
-             "replay buffer unavailable",
-             start_frame->frameId);
-    return FALSE;
-  }
-
-  buffer->capture_frame = frame;
-  return TRUE;
-}
-
-static BOOL viewer_gfx_frame_buffer_append_surface_command_locked(
-    ViewerGfxFrameBuffer *buffer, const RDPGFX_SURFACE_COMMAND *cmd,
-    ViewerGfxEvent *event) {
-  ViewerGfxCompleteFrame *frame = NULL;
-  ViewerGfxCodecReplayPolicy replay_policy = VIEWER_GFX_CODEC_REPLAY_UNSAFE;
-
-  if (!buffer || !cmd || !event)
-    return FALSE;
-
-  frame = buffer->capture_frame;
-  if (!frame)
-    return FALSE;
-
-  if (!viewer_gfx_complete_frame_append_event(frame, event)) {
-    WLog_ERR(TAG,
-             "Frame %" PRIu32 " capture failed; live forwarding continues but "
-             "replay buffer unavailable",
-             frame->frame_id);
-    viewer_gfx_complete_frame_unref(frame);
-    buffer->capture_frame = NULL;
-    return FALSE;
-  }
-
-  frame->surface_command_count++;
-  frame->total_payload_bytes += viewer_gfx_event_payload_bytes(event);
-  replay_policy = viewer_gfx_codec_replay_policy(cmd->codecId, NULL);
-  if (cmd->codecId < 64)
-    frame->codec_mask |= (1ULL << cmd->codecId);
-  else
-    frame->codec_mask |= (1ULL << 63);
-  if (replay_policy != VIEWER_GFX_CODEC_REPLAY_SAFE)
-    frame->replay_safe = FALSE;
-  return TRUE;
-}
-
-static BOOL
-viewer_gfx_frame_buffer_end_frame_locked(ViewerGfxFrameBuffer *buffer,
-                                         const RDPGFX_END_FRAME_PDU *end_frame,
-                                         ViewerGfxEvent *event) {
-  ViewerGfxCompleteFrame *frame = NULL;
-  UINT32 slot_index = 0;
-
-  if (!buffer || !end_frame || !event)
-    return FALSE;
-
-  frame = buffer->capture_frame;
-  if (!frame)
-    return FALSE;
-
-  if (frame->frame_id != end_frame->frameId) {
-    WLog_ERR(TAG,
-             "Buffered frame %" PRIu32
-             " invalid or incomplete; evicting and using fallback refresh",
-             frame->frame_id);
-    viewer_gfx_complete_frame_unref(frame);
-    buffer->capture_frame = NULL;
-    return FALSE;
-  }
-
-  if (!viewer_gfx_complete_frame_append_event(frame, event)) {
-    WLog_ERR(TAG,
-             "Frame %" PRIu32 " capture failed; live forwarding continues but "
-             "replay buffer unavailable",
-             frame->frame_id);
-    viewer_gfx_complete_frame_unref(frame);
-    buffer->capture_frame = NULL;
-    return FALSE;
-  }
-
-  frame->capture_completed_ts = platform_get_timestamp_ms();
-  frame->complete = TRUE;
-  buffer->capture_frame = NULL;
-
-  /* When the ring is full, find the WORST frame to evict.
-   *
-   * CAPROGRESSIVE (codecId=9) frames are full-screen updates always
-   * preferred over ClearCodec (codecId=8) tile-based partial updates.
-   *
-   * If the golden slot (0) has a CAPROGRESSIVE frame and there's at
-   * least one non-CAPROGRESSIVE frame in another slot, pick the worst
-   * non-CAPROGRESSIVE slot instead of evicting the golden frame. */
-  if (buffer->filled_slots >= VIEWER_GFX_FRAME_RING_CAPACITY) {
-    UINT32 evict_slot = 0;
-    int evict_score = INT_MIN;
-    UINT32 best_non_gfx_slot = UINT32_MAX;
-    int best_non_gfx_score = INT_MIN;
-    BOOL new_is_worse_than_all = TRUE;
-    BOOL golden_is_gfx =
-        buffer->slots[0] && buffer->slots[0]->complete &&
-        (buffer->slots[0]->codec_mask & (1ULL << RDPGFX_CODECID_CAPROGRESSIVE));
-    UINT32 i;
-
-    for (i = 0; i < VIEWER_GFX_FRAME_RING_CAPACITY; i++) {
-      ViewerGfxCompleteFrame *f = buffer->slots[i];
-      int f_score;
-      if (!f || !f->complete)
-        continue;
-
-      f_score = (int)f->surface_command_count;
-      if (!(f->codec_mask & (1ULL << RDPGFX_CODECID_CAPROGRESSIVE)))
-        f_score += 10000;
-
-      if (f_score > evict_score) {
-        evict_score = f_score;
-        evict_slot = i;
-      }
-
-      /* Track best non-CAPROGRESSIVE frame as golden protector */
-      if (f_score >= 10000 && f_score > best_non_gfx_score) {
-        best_non_gfx_score = f_score;
-        best_non_gfx_slot = i;
-      }
-
-      {
-        int new_score = (int)frame->surface_command_count;
-        if (!(frame->codec_mask & (1ULL << RDPGFX_CODECID_CAPROGRESSIVE)))
-          new_score += 10000;
-        if (new_score <= f_score)
-          new_is_worse_than_all = FALSE;
-      }
-    }
-
-    /* If golden slot has CAPROGRESSIVE and would be evicted, redirect
-     * eviction to the worst non-CAPROGRESSIVE slot instead. */
-    if (golden_is_gfx && (evict_slot == 0) &&
-        (best_non_gfx_slot != UINT32_MAX)) {
-      evict_slot = best_non_gfx_slot;
-      evict_score = best_non_gfx_score;
-      WLog_INFO(TAG,
-                "Protecting golden CAPROGRESSIVE frame in slot 0; evicting "
-                "slot %" PRIu32 " instead",
-                best_non_gfx_slot);
-    }
-
-    if (new_is_worse_than_all) {
-      WLog_INFO(TAG,
-                "Discarding frame %" PRIu32 " (%" PRIu32 " cmds, %" PRIu64
-                " bytes): worse than all ring frames",
-                frame->frame_id, frame->surface_command_count,
-                frame->total_payload_bytes);
-      viewer_gfx_complete_frame_unref(frame);
-      viewer_gfx_frame_buffer_recompute_ids_locked(buffer);
-      return TRUE;
-    }
-
-    slot_index = evict_slot;
-    WLog_INFO(TAG,
-              "Ring full: evicting frame %" PRIu32 " (score %d, %" PRIu32
-              " cmds, %" PRIu64 " bytes) from slot %" PRIu32,
-              buffer->slots[evict_slot]->frame_id, evict_score,
-              buffer->slots[evict_slot]->surface_command_count,
-              buffer->slots[evict_slot]->total_payload_bytes, evict_slot);
-    viewer_gfx_complete_frame_unref(buffer->slots[evict_slot]);
-    buffer->slots[evict_slot] = NULL;
-  } else {
-    slot_index = buffer->next_slot;
-    buffer->next_slot = (slot_index + 1U) % VIEWER_GFX_FRAME_RING_CAPACITY;
-  }
-
-  WLog_INFO(
-      TAG, "Adding frame %" PRIu32 " (%" PRIu64 " bytes) to ring slot %" PRIu32,
-      frame->frame_id, frame->total_payload_bytes, slot_index);
-  buffer->slots[slot_index] = frame;
-
-  /* If the new frame is CAPROGRESSIVE, ensure it's in slot 0 (golden).
-   * Swap it with whatever is in slot 0 unless slot 0 already has a
-   * BETTER CAPROGRESSIVE frame (fewer commands = better baseline). */
-  if (frame->codec_mask & (1ULL << RDPGFX_CODECID_CAPROGRESSIVE)) {
-    UINT32 golden_slot = 0;
-    if (slot_index != golden_slot) {
-      ViewerGfxCompleteFrame *current_golden = buffer->slots[golden_slot];
-      BOOL current_is_gfx =
-          current_golden &&
-          (current_golden->codec_mask & (1ULL << RDPGFX_CODECID_CAPROGRESSIVE));
-      BOOL new_has_clearcodec =
-          (frame->codec_mask & (1ULL << RDPGFX_CODECID_CLEARCODEC)) != 0;
-      BOOL golden_has_clearcodec =
-          current_golden && (current_golden->codec_mask &
-                             (1ULL << RDPGFX_CODECID_CLEARCODEC)) != 0;
-
-      /* Never replace a pure CAPROGRESSIVE golden frame with a
-       * mixed frame that also contains ClearCodec tile commands.
-       * A frame with ClearCodec tiles is a partial update — its
-       * CAPROGRESSIVE portion may be tiny (e.g. 245 bytes) and
-       * not a usable full-screen baseline. */
-      if (current_is_gfx && !golden_has_clearcodec && new_has_clearcodec) {
-        /* Golden is pure CAPROGRESSIVE, new is mixed — skip */
-      } else {
-        int new_score = (int)frame->surface_command_count;
-        int golden_score = current_golden
-                               ? (int)current_golden->surface_command_count +
-                                     (current_is_gfx ? 0 : 10000)
-                               : INT_MAX;
-
-        if (new_score < golden_score ||
-            (new_score == golden_score &&
-             frame->frame_id > current_golden->frame_id)) {
-          buffer->slots[golden_slot] = frame;
-          buffer->slots[slot_index] = current_golden;
-          WLog_INFO(
-              TAG, "Swapped CAPROGRESSIVE frame %" PRIu32 " into golden slot 0",
-              frame->frame_id);
-        }
-      }
-    }
-  }
-
-  viewer_gfx_frame_buffer_recompute_ids_locked(buffer);
-  viewer_gfx_log_frame_buffer_state_locked(buffer, "end-frame commit");
-  return TRUE;
-}
-
-static ViewerGfxCompleteFrame *
-viewer_gfx_frame_buffer_latest_locked(const ViewerGfxFrameBuffer *buffer) {
-  ViewerGfxCompleteFrame *newest = NULL;
-  UINT32 i = 0;
-
-  if (!buffer || (buffer->filled_slots == 0))
-    return NULL;
-
-  for (i = 0; i < VIEWER_GFX_FRAME_RING_CAPACITY; i++) {
-    ViewerGfxCompleteFrame *frame = buffer->slots[i];
-    if (!frame || !frame->complete)
-      continue;
-
-    if (!newest || (frame->frame_id > newest->frame_id))
-      newest = frame;
-  }
-
-  if (!newest)
-    return NULL;
-
-  viewer_gfx_complete_frame_ref(newest);
-  return newest;
-}
-
-static ViewerGfxCompleteFrame *viewer_gfx_frame_buffer_latest_replayable_locked(
-    const ViewerGfxFrameBuffer *buffer, UINT32 minimum_frame_id) {
-  ViewerGfxCompleteFrame *best = NULL;
-  UINT32 i = 0;
-
-  if (!buffer || (buffer->filled_slots == 0))
-    return NULL;
-
-  for (i = 0; i < VIEWER_GFX_FRAME_RING_CAPACITY; i++) {
-    ViewerGfxCompleteFrame *frame = buffer->slots[i];
-
-    if (!frame || !frame->complete || !frame->replay_safe ||
-        (frame->surface_command_count == 0) ||
-        (frame->frame_id < minimum_frame_id))
-      continue;
-
-    /* Avoid replaying tiny delta-only frames as late-join baselines.
-     * They may be protocol-valid but still render as black/stale screens
-     * because mstsc has no meaningful self-contained pixels to present. */
-    if ((frame->surface_command_count <
-         VIEWER_GFX_MIN_REPLAY_BASELINE_COMMANDS) &&
-        (frame->total_payload_bytes < VIEWER_GFX_MIN_REPLAY_BASELINE_BYTES))
-      continue;
-
-    /* Prefer frames that use CAPROGRESSIVE (codecId=9) over ClearCodec
-     * (codecId=8). CAPROGRESSIVE frames are always full-screen updates
-     * (even a single command covers the entire surface). ClearCodec
-     * frames are tile-based partial updates — a "1 command" ClearCodec
-     * frame updates just ONE 64x64 tile, leaving the rest black.
-     *
-     * Ranking: CAPROGRESSIVE > ClearCodec. Within same codec type:
-     * fewer commands preferred, tie-break by larger payload. */
-    {
-      BOOL frame_is_gfx =
-          (frame->codec_mask & (1ULL << RDPGFX_CODECID_CAPROGRESSIVE)) != 0;
-      BOOL best_is_gfx =
-          best &&
-          ((best->codec_mask & (1ULL << RDPGFX_CODECID_CAPROGRESSIVE)) != 0);
-      BOOL frame_has_cc =
-          (frame->codec_mask & (1ULL << RDPGFX_CODECID_CLEARCODEC)) != 0;
-      BOOL best_has_cc =
-          best &&
-          ((best->codec_mask & (1ULL << RDPGFX_CODECID_CLEARCODEC)) != 0);
-      int better = 0;
-      if (frame_is_gfx && !best_is_gfx)
-        better = 1;
-      else if (!frame_is_gfx && best_is_gfx)
-        better = -1;
-      /* When both have CAPROGRESSIVE, prefer pure CAPROGRESSIVE
-       * over mixed (CAPROGRESSIVE + ClearCodec). A mixed frame
-       * may have only a tiny CAPROGRESSIVE supplement (e.g., 245
-       * bytes) alongside many ClearCodec tile commands — not a
-       * usable full-screen baseline. */
-      else if (frame_is_gfx && best_is_gfx && !frame_has_cc && best_has_cc)
-        better = 1;
-      else if (frame_is_gfx && best_is_gfx && frame_has_cc && !best_has_cc)
-        better = -1;
-      else if (frame->surface_command_count < best->surface_command_count)
-        better = 1;
-      else if (frame->surface_command_count == best->surface_command_count &&
-               frame->total_payload_bytes > best->total_payload_bytes)
-        better = 1;
-      if (!best || (better > 0))
-        best = frame;
-    }
-  }
-
-  if (!best)
-    return NULL;
-
-  viewer_gfx_complete_frame_ref(best);
-  return best;
-}
-
-static void viewer_gfx_set_join_state_locked(Viewer *viewer,
-                                             ViewerJoinState state,
-                                             ViewerJoinStrategy strategy,
-                                             const char *reason) {
-  ViewerJoinState old_state = VIEWER_JOIN_STATE_NONE;
-  ViewerJoinStrategy old_strategy = VIEWER_JOIN_STRATEGY_NONE;
-
-  if (!viewer)
-    return;
-
-  old_state = viewer->gfx.join_state;
-  old_strategy = viewer->gfx.join_strategy;
-  viewer->gfx.join_state = state;
-  viewer->gfx.join_strategy = strategy;
-
-  if ((old_state != state) || (old_strategy != strategy)) {
-    WLog_INFO(
-        TAG,
-        "Viewer %u join transition %s/%s -> %s/%s reason=%s "
-        "targetFrame=%" PRIu32 " refreshGeneration=%" PRIu64,
-        viewer->id, viewer_join_state_name(old_state),
-        viewer_join_strategy_name(old_strategy), viewer_join_state_name(state),
-        viewer_join_strategy_name(strategy), reason ? reason : "unspecified",
-        viewer->gfx.join_target_frame_id, viewer->gfx.join_refresh_generation);
-  }
-}
-
-static void viewer_gfx_begin_join_locked(Viewer *viewer, UINT64 now,
-                                         const char *reason) {
-  if (!viewer)
-    return;
-
-  viewer->gfx.join_target_frame_id = 0;
-  viewer->gfx.join_refresh_generation = 0;
-  viewer->gfx.join_start_ts = now;
-  viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_PENDING,
-                                   VIEWER_JOIN_STRATEGY_NONE, reason);
-}
-
-static void viewer_gfx_finish_late_join_locked(Viewer *viewer,
-                                               const char *reason) {
-  if (!viewer)
-    return;
-
-  viewer->gfx.join_refresh_generation = 0;
-  viewer->gfx.last_activated_ts = platform_get_timestamp_ms();
-  /* Clear any partially-enqueued events that arrived during the join gate.
-   * Frame events (StartFrame, SurfaceCommands, EndFrame) arrive from the
-   * backend asynchronously. If a StartFrame was skipped but SurfaceCommands
-   * were enqueued after the LIVE transition, the viewer would receive a
-   * partial frame (SurfaceCommands without StartFrame) which violates the
-   * RDPEGFX protocol and causes mstsc to disconnect. Clearing the queue
-   * ensures the viewer starts clean with the next complete frame. */
-  viewer_gfx_queue_clear_locked(&viewer->gfx);
-  viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_LIVE,
-                                   VIEWER_JOIN_STRATEGY_NONE, reason);
-}
-
-static BOOL
-viewer_gfx_viewer_accepts_live_locked(const ViewerGraphicsContext *gfx) {
-  return gfx && (gfx->join_state == VIEWER_JOIN_STATE_LIVE);
-}
-
-static void viewer_gfx_queue_pop_head_locked(ViewerGraphicsContext *gfx) {
-  ViewerGfxEvent *event = NULL;
-
-  if (!gfx || (gfx->queue_count == 0))
-    return;
-
-  event = gfx->queue[gfx->queue_head];
-  gfx->queue[gfx->queue_head] = NULL;
-  gfx->queue_head = (gfx->queue_head + 1U) % VIEWER_GFX_QUEUE_CAPACITY;
-  gfx->queue_count--;
-
-  if (event && (event->type == VIEWER_GFX_EVENT_END_FRAME) &&
-      (gfx->pending_frame_count > 0))
-    gfx->pending_frame_count--;
-
-  viewer_gfx_event_unref(event);
-}
-
-static BOOL
-viewer_gfx_drop_oldest_complete_frame_locked(ViewerGraphicsContext *gfx) {
-  UINT32 index = 0;
-  UINT32 scanned = 0;
-
-  if (!gfx || (gfx->queue_count == 0))
-    return FALSE;
-
-  index = gfx->queue_head;
-  while (scanned < gfx->queue_count) {
-    ViewerGfxEvent *event = gfx->queue[index];
-    if (!event)
-      return FALSE;
-    if (!viewer_gfx_is_frame_event(event->type))
-      return FALSE;
-    if (event->type == VIEWER_GFX_EVENT_END_FRAME)
-      break;
-
-    index = (index + 1U) % VIEWER_GFX_QUEUE_CAPACITY;
-    scanned++;
-  }
-
-  if (scanned >= gfx->queue_count)
-    return FALSE;
-
-  do {
-    ViewerGfxEvent *event = gfx->queue[gfx->queue_head];
-    BOOL done = event && (event->type == VIEWER_GFX_EVENT_END_FRAME);
-    viewer_gfx_queue_pop_head_locked(gfx);
-    if (done)
-      break;
-  } while (gfx->queue_count > 0);
-
-  return TRUE;
-}
-
-static BOOL viewer_gfx_enqueue_locked(ViewerGraphicsContext *gfx,
-                                      ViewerGfxEvent *event) {
-  BOOL frame_event = FALSE;
-
-  if (!gfx || !event)
-    return FALSE;
-
-  frame_event = viewer_gfx_is_frame_event(event->type);
-  while ((gfx->queue_count >= VIEWER_GFX_QUEUE_CAPACITY) ||
-         (frame_event &&
-          (gfx->pending_frame_count >= VIEWER_GFX_MAX_PENDING_FRAMES))) {
-    if (!viewer_gfx_drop_oldest_complete_frame_locked(gfx))
-      return FALSE;
-  }
-
-  gfx->queue[gfx->queue_tail] = event;
-  gfx->queue_tail = (gfx->queue_tail + 1U) % VIEWER_GFX_QUEUE_CAPACITY;
-  gfx->queue_count++;
-
-  if (event->type == VIEWER_GFX_EVENT_END_FRAME)
-    gfx->pending_frame_count++;
-
-  return TRUE;
-}
-
-static ViewerGfxEvent *viewer_gfx_dequeue_locked(ViewerGraphicsContext *gfx) {
-  ViewerGfxEvent *event = NULL;
-
-  if (!gfx || (gfx->queue_count == 0))
-    return NULL;
-
-  event = gfx->queue[gfx->queue_head];
-  gfx->queue[gfx->queue_head] = NULL;
-  gfx->queue_head = (gfx->queue_head + 1U) % VIEWER_GFX_QUEUE_CAPACITY;
-  gfx->queue_count--;
-
-  if (event && (event->type == VIEWER_GFX_EVENT_END_FRAME) &&
-      (gfx->pending_frame_count > 0))
-    gfx->pending_frame_count--;
-
-  return event;
-}
-
-static void viewer_gfx_queue_clear_locked(ViewerGraphicsContext *gfx) {
-  while (gfx && (gfx->queue_count > 0)) {
-    ViewerGfxEvent *event = viewer_gfx_dequeue_locked(gfx);
-    viewer_gfx_event_unref(event);
-  }
-}
-
-static void viewer_disable_rdpgfx_locked(Viewer *viewer) {
-  if (!viewer)
-    return;
-
-  viewer_gfx_queue_clear_locked(&viewer->gfx);
-  viewer->gfx.ready = FALSE;
-  viewer->gfx.use_rdpgfx = FALSE;
-  viewer->gfx.caps_ready = FALSE;
-  viewer->gfx.rdpgfx_temporarily_disabled = TRUE;
-  viewer->gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
+viewer_dequeue_surface_bits_event_locked(Viewer *viewer) {
+  return viewer
+             ? viewer_surface_bits_queue_dequeue_locked(&viewer->classic_queues)
+             : NULL;
 }
 
 static BOOL viewer_gfx_publisher_state_init(ViewerGfxPublisherState *gfx) {
@@ -1825,790 +594,31 @@ static BOOL viewer_gfx_publisher_state_init(ViewerGfxPublisherState *gfx) {
     WLog_ERR(TAG, "Failed to initialize shared RDPEGFX publisher lock");
     return FALSE;
   }
-  if (!viewer_gfx_frame_buffer_init(&gfx->frame_buffer)) {
-    DeleteCriticalSection(&gfx->lock);
-    return FALSE;
-  }
+
   gfx->initialized = TRUE;
-  WLog_INFO(TAG, "Initialized shared RDPEGFX frame ring capacity=%u",
-            VIEWER_GFX_FRAME_RING_CAPACITY);
   return TRUE;
-}
-
-static void
-viewer_gfx_publisher_state_reset_locked(ViewerGfxPublisherState *gfx) {
-  ViewerGraphicsSurfaceState saved_surfaces[VIEWER_GFX_MAX_ACTIVE_SURFACES];
-
-  if (!gfx)
-    return;
-
-  WLog_INFO(TAG, "Resetting publisher state: preserving surface map, clearing "
-                 "current frame and ring");
-  viewer_gfx_reset_graphics_pdu_reset(&gfx->latest_reset_graphics);
-
-  /* Preserve the active surface map across ResetGraphics. The oracle
-   * identified that clearing surfaces[] breaks late-join bootstrap:
-   * the surface preamble and replay frame reference surface IDs that
-   * must exist in the publisher state. If the Windows VM hasn't sent
-   * new CreateSurface/MapSurfaceToOutput yet, the preamble sends 0
-   * surfaces and the viewer gets no renderable baseline. */
-  memmove(saved_surfaces, gfx->surfaces, sizeof(saved_surfaces));
-  memset(gfx->surfaces, 0, sizeof(gfx->surfaces));
-  viewer_gfx_frame_buffer_reset_locked(&gfx->frame_buffer);
-  /* Restore surfaces after ring reset (which preserves golden frame) */
-  memmove(gfx->surfaces, saved_surfaces, sizeof(saved_surfaces));
-
-  gfx->has_latest_reset_graphics = FALSE;
-  gfx->in_frame = FALSE;
-  gfx->current_frame_id = 0;
 }
 
 static void viewer_gfx_publisher_state_uninit(ViewerGfxPublisherState *gfx) {
   if (!gfx || !gfx->initialized)
     return;
 
-  EnterCriticalSection(&gfx->lock);
-  viewer_gfx_publisher_state_reset_locked(gfx);
-  LeaveCriticalSection(&gfx->lock);
-  viewer_gfx_frame_buffer_uninit(&gfx->frame_buffer);
   DeleteCriticalSection(&gfx->lock);
   memset(gfx, 0, sizeof(*gfx));
 }
 
-static ViewerGraphicsSurfaceState *
-viewer_gfx_find_surface_locked(ViewerGfxPublisherState *gfx,
-                               UINT16 surface_id) {
-  UINT32 i = 0;
-
-  if (!gfx)
-    return NULL;
-
-  for (i = 0; i < VIEWER_GFX_MAX_ACTIVE_SURFACES; i++) {
-    ViewerGraphicsSurfaceState *surface = &gfx->surfaces[i];
-    if (surface->in_use && (surface->create_surface.surfaceId == surface_id))
-      return surface;
-  }
-
-  return NULL;
-}
-
-static ViewerGraphicsSurfaceState *
-viewer_gfx_upsert_surface_locked(ViewerGfxPublisherState *gfx,
-                                 UINT16 surface_id) {
-  ViewerGraphicsSurfaceState *empty = NULL;
-  UINT32 i = 0;
-
-  if (!gfx)
-    return NULL;
-
-  for (i = 0; i < VIEWER_GFX_MAX_ACTIVE_SURFACES; i++) {
-    ViewerGraphicsSurfaceState *surface = &gfx->surfaces[i];
-    if (surface->in_use && (surface->create_surface.surfaceId == surface_id))
-      return surface;
-    if (!surface->in_use && !empty)
-      empty = surface;
-  }
-
-  if (empty) {
-    memset(empty, 0, sizeof(*empty));
-    empty->in_use = TRUE;
-  }
-
-  return empty;
-}
-
-static void viewer_gfx_remove_surface_locked(ViewerGfxPublisherState *gfx,
-                                             UINT16 surface_id) {
-  ViewerGraphicsSurfaceState *surface =
-      viewer_gfx_find_surface_locked(gfx, surface_id);
-  if (surface)
-    memset(surface, 0, sizeof(*surface));
-}
-
-static const RDPGFX_CAPSET *
-viewer_gfx_choose_caps(const ViewerGfxPublisherState *server_gfx,
-                       const RDPGFX_CAPS_ADVERTISE_PDU *caps_advertise) {
-  UINT16 i = 0;
-  const RDPGFX_CAPSET *best = NULL;
-
-  if (!caps_advertise)
-    return NULL;
-
-  if (server_gfx && server_gfx->canonical_caps_valid) {
-    for (i = 0; i < caps_advertise->capsSetCount; i++) {
-      const RDPGFX_CAPSET *caps = &caps_advertise->capsSets[i];
-      if ((caps->version == server_gfx->canonical_caps.version) &&
-          (caps->flags == server_gfx->canonical_caps.flags))
-        return caps;
-    }
-
-    return NULL;
-  }
-
-  for (i = 0; i < caps_advertise->capsSetCount; i++) {
-    const RDPGFX_CAPSET *caps = &caps_advertise->capsSets[i];
-    if (!best || (caps->version > best->version))
-      best = caps;
-  }
-
-  return best;
-}
-
-static BOOL
-viewer_gfx_try_schedule_late_join_replay_locked(ViewerServer *server,
-                                                Viewer *viewer, UINT64 now) {
-  ViewerGfxCompleteFrame *latest = NULL;
-  ViewerLateJoinPolicyInputs inputs = {0};
-  ViewerJoinStrategy strategy = VIEWER_JOIN_STRATEGY_NONE;
-  UINT32 newest_frame_id = 0;
-  UINT32 minimum_frame_id = 0;
-  UINT64 join_refresh_generation = 0;
-  BOOL recent_unsafe_codec_activity = FALSE;
-  UINT32 i = 0;
-
-  if (!server || !viewer)
-    return FALSE;
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  minimum_frame_id = viewer->gfx.join_target_frame_id;
-  join_refresh_generation = viewer->gfx.join_refresh_generation;
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  EnterCriticalSection(&server->gfx.lock);
-  newest_frame_id = server->gfx.frame_buffer.newest_frame_id;
-  if (server->gfx.in_frame) {
-    UINT32 old_min = minimum_frame_id;
-    /* Only skip the in-progress frame if the viewer was specifically
-     * targeting it. A new viewer with minimum_frame_id=0 should be
-     * able to replay completed frames that are already in the ring,
-     * even when another frame is being captured concurrently. */
-    if (minimum_frame_id == server->gfx.current_frame_id) {
-      minimum_frame_id = server->gfx.current_frame_id + 1U;
-      WLog_DBG(TAG,
-               "Viewer %u try-schedule: frame %" PRIu32
-               " in progress, skipping it",
-               viewer->id, server->gfx.current_frame_id);
-    } else if (minimum_frame_id > server->gfx.current_frame_id) {
-      WLog_DBG(TAG,
-               "Viewer %u try-schedule: frame %" PRIu32
-               " in progress, minFid %" PRIu32 " already ahead",
-               viewer->id, server->gfx.current_frame_id, minimum_frame_id);
-    }
-  }
-
-  WLog_INFO(TAG,
-            "Viewer %u try-schedule: ring scan minFid=%" PRIu32
-            " newest=%" PRIu32 " filled=%" PRIu32 "/%u inFrame=%d",
-            viewer->id, minimum_frame_id, newest_frame_id,
-            server->gfx.frame_buffer.filled_slots,
-            VIEWER_GFX_FRAME_RING_CAPACITY, server->gfx.in_frame ? 1 : 0);
-
-  for (i = 0; i < VIEWER_GFX_FRAME_RING_CAPACITY; i++) {
-    const ViewerGfxCompleteFrame *frame = server->gfx.frame_buffer.slots[i];
-
-    if (!frame || !frame->complete || (frame->frame_id < minimum_frame_id) ||
-        (frame->surface_command_count == 0))
-      continue;
-
-    if (!frame->replay_safe) {
-      recent_unsafe_codec_activity = TRUE;
-      break;
-    }
-  }
-
-  latest = viewer_gfx_frame_buffer_latest_replayable_locked(
-      &server->gfx.frame_buffer, minimum_frame_id);
-
-  inputs.rdpgfx_enabled = TRUE;
-  inputs.channel_opened = TRUE;
-  inputs.caps_compatible = TRUE;
-  inputs.backend_frame_in_progress = server->gfx.in_frame;
-  inputs.complete_frame_available = (latest != NULL);
-  inputs.replay_safe_codecs_only = (latest != NULL);
-  LeaveCriticalSection(&server->gfx.lock);
-
-  if (recent_unsafe_codec_activity && (join_refresh_generation == 0)) {
-    if (latest) {
-      WLog_INFO(TAG,
-                "Viewer %u no replay-safe frames; attempting replay of latest "
-                "frame %" PRIu32 " (unsafe codecs may cause partial decode)",
-                viewer->id, latest->frame_id);
-      viewer->gfx.join_target_frame_id = latest->frame_id;
-      viewer_gfx_set_join_state_locked(
-          viewer, VIEWER_JOIN_STATE_PENDING,
-          VIEWER_JOIN_STRATEGY_REPLAY_SAFE_FRAME,
-          "attempting unsafe-codec replay as bootstrap");
-      LeaveCriticalSection(&viewer->gfx.lock);
-      /* later steps in step_join will call viewer_gfx_replay_frame */
-      return TRUE;
-    }
-
-    if (latest)
-      viewer_gfx_complete_frame_unref(latest);
-    return viewer_gfx_bootstrap_direct_live(
-        server, viewer, now,
-        "no frames in ring; bootstrapping via surface preamble only");
-  }
-
-  if (recent_unsafe_codec_activity) {
-    inputs.complete_frame_available = FALSE;
-    inputs.replay_safe_codecs_only = FALSE;
-  }
-
-  strategy = viewer_late_join_select_strategy(&inputs);
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  if ((viewer->gfx.join_start_ts == 0) && (now > 0))
-    viewer->gfx.join_start_ts = now;
-
-  switch (strategy) {
-  case VIEWER_JOIN_STRATEGY_REPLAY_SAFE_FRAME:
-    if (latest) {
-      /* When a backend refresh is in the pipeline, do NOT allow replay
-       * -- the viewer must wait for the refresh to complete and receive
-       * a fresh baseline via the surface preamble + live stream. Replay
-       * at this stage risks selecting a delta-only frame that provides
-       * an insufficient visual baseline for the fresh viewer. */
-      if (viewer->gfx.join_refresh_generation != 0) {
-        WLog_INFO(TAG,
-                  "Viewer %u skipping replay frame %" PRIu32
-                  " during backend refresh cycle (refreshGen=%" PRIu64 ")",
-                  viewer->id, latest->frame_id,
-                  viewer->gfx.join_refresh_generation);
-        viewer_gfx_set_join_state_locked(
-            viewer, VIEWER_JOIN_STATE_WAIT_BACKEND_REFRESH,
-            VIEWER_JOIN_STRATEGY_BACKEND_REFRESH,
-            "replay blocked during backend refresh cycle");
-        break;
-      }
-
-      viewer->gfx.join_start_ts = now;
-      viewer->gfx.join_target_frame_id = latest->frame_id;
-      viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_PENDING,
-                                       strategy, "safe replay frame selected");
-    }
-    break;
-
-  case VIEWER_JOIN_STRATEGY_WAIT_NEXT_SAFE_FRAME:
-    /* Only set the start timestamp on first entry to this state.
-     * Subsequent calls must preserve the original timestamp so the
-     * timeout in step_join can actually fire. Resetting it on every
-     * iteration prevents the timeout from ever triggering. */
-    if (viewer->gfx.join_strategy != VIEWER_JOIN_STRATEGY_WAIT_NEXT_SAFE_FRAME)
-      viewer->gfx.join_start_ts = now;
-    viewer->gfx.join_target_frame_id = newest_frame_id + 1U;
-    if (viewer->gfx.join_refresh_generation != 0) {
-      viewer_gfx_set_join_state_locked(
-          viewer, VIEWER_JOIN_STATE_WAIT_BACKEND_REFRESH,
-          VIEWER_JOIN_STRATEGY_BACKEND_REFRESH,
-          "waiting for replay-safe frame after backend refresh");
-    } else {
-      viewer_gfx_set_join_state_locked(
-          viewer, VIEWER_JOIN_STATE_WAIT_NEXT_SAFE_FRAME, strategy,
-          "waiting for next replay-safe frame");
-    }
-    break;
-
-  default:
-    viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_PENDING,
-                                     strategy, "strategy selected");
-    break;
-  }
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  if (latest)
-    viewer_gfx_complete_frame_unref(latest);
-
-  return (strategy == VIEWER_JOIN_STRATEGY_REPLAY_SAFE_FRAME) ||
-         (strategy == VIEWER_JOIN_STRATEGY_WAIT_NEXT_SAFE_FRAME);
-}
-
-static BOOL viewer_gfx_replay_frame(ViewerServer *server, Viewer *viewer,
-                                    ViewerGfxCompleteFrame *frame) {
-  ViewerGfxEvent *reset_event = NULL;
-  ViewerGfxEvent **create_events = NULL;
-  ViewerGfxEvent **map_events = NULL;
-  UINT32 active_surface_count = 0;
-  UINT32 mapped_surface_count = 0;
-  UINT32 create_index = 0;
-  UINT32 map_index = 0;
-  UINT32 i = 0;
-  UINT64 started_ts = 0;
-  UINT64 elapsed_ms = 0;
-  BOOL ok = TRUE;
-  BOOL has_reset = FALSE;
-
-  if (!server || !viewer || !frame || !frame->complete ||
-      (frame->event_count < 2))
-    return FALSE;
-
-  EnterCriticalSection(&server->gfx.lock);
-  if (server->gfx.has_latest_reset_graphics) {
-    reset_event =
-        viewer_gfx_event_new_reset_graphics(&server->gfx.latest_reset_graphics);
-    if (!reset_event)
-      ok = FALSE;
-    has_reset = TRUE;
-  }
-
-  if (ok) {
-    for (i = 0; i < VIEWER_GFX_MAX_ACTIVE_SURFACES; i++) {
-      if (server->gfx.surfaces[i].in_use) {
-        active_surface_count++;
-        if (server->gfx.surfaces[i].mapped)
-          mapped_surface_count++;
-      }
-    }
-
-    if (active_surface_count > 0) {
-      create_events = (ViewerGfxEvent **)calloc(active_surface_count,
-                                                sizeof(ViewerGfxEvent *));
-      if (!create_events)
-        ok = FALSE;
-    }
-
-    if (ok && (mapped_surface_count > 0)) {
-      map_events = (ViewerGfxEvent **)calloc(mapped_surface_count,
-                                             sizeof(ViewerGfxEvent *));
-      if (!map_events)
-        ok = FALSE;
-    }
-  }
-
-  if (ok) {
-    for (i = 0; i < VIEWER_GFX_MAX_ACTIVE_SURFACES; i++) {
-      const ViewerGraphicsSurfaceState *surface = &server->gfx.surfaces[i];
-
-      if (!surface->in_use)
-        continue;
-
-      create_events[create_index] = viewer_gfx_event_new_simple(
-          VIEWER_GFX_EVENT_CREATE_SURFACE, &surface->create_surface,
-          sizeof(surface->create_surface));
-      if (!create_events[create_index++]) {
-        ok = FALSE;
-        break;
-      }
-
-      if (!surface->mapped)
-        continue;
-
-      map_events[map_index] =
-          viewer_gfx_event_new_simple(VIEWER_GFX_EVENT_MAP_SURFACE_TO_OUTPUT,
-                                      &surface->map_surface_to_output,
-                                      sizeof(surface->map_surface_to_output));
-      if (!map_events[map_index++]) {
-        ok = FALSE;
-        break;
-      }
-    }
-  }
-
-  LeaveCriticalSection(&server->gfx.lock);
-
-  if (!ok) {
-    WLog_WARN(
-        TAG,
-        "Viewer %u replay scheduling failed; falling back to backend refresh",
-        viewer->id);
-    goto cleanup;
-  }
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  if ((viewer->gfx.join_state != VIEWER_JOIN_STATE_PENDING) &&
-      (viewer->gfx.join_state != VIEWER_JOIN_STATE_WAIT_BACKEND_REFRESH) &&
-      (viewer->gfx.join_state != VIEWER_JOIN_STATE_WAIT_NEXT_SAFE_FRAME)) {
-    LeaveCriticalSection(&viewer->gfx.lock);
-    ok = FALSE;
-    goto cleanup;
-  }
-
-  viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_REPLAYING,
-                                   viewer->gfx.join_strategy,
-                                   "sending replay baseline");
-  started_ts = platform_get_timestamp_ms();
-  viewer->gfx.join_start_ts = started_ts;
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  WLog_INFO(TAG,
-            "Replaying frame %" PRIu32 " to viewer %u: %" PRIu32
-            " events, %" PRIu32 " commands",
-            frame->frame_id, viewer->id, frame->event_count,
-            frame->surface_command_count);
-  WLog_INFO(TAG,
-            "Viewer %u replay preamble: reset=%d activeSurfaces=%" PRIu32
-            " mappedSurfaces=%" PRIu32,
-            viewer->id, has_reset ? 1 : 0, active_surface_count,
-            mapped_surface_count);
-
-  EnterCriticalSection(&viewer->send_lock);
-  if (reset_event && !viewer_send_gfx_event(viewer, reset_event))
-    ok = FALSE;
-
-  for (i = 0; ok && (i < active_surface_count); i++)
-    ok = viewer_send_gfx_event(viewer, create_events[i]);
-
-  for (i = 0; ok && (i < mapped_surface_count); i++)
-    ok = viewer_send_gfx_event(viewer, map_events[i]);
-
-  {
-    UINT32 cmd_idx = 0;
-    for (i = 0; ok && (i < frame->event_count); i++) {
-      ViewerGfxEvent *event = frame->events[i];
-      WLog_INFO(TAG,
-                "Viewer %u replay %" PRIu32 "/%" PRIu32
-                ": eventType=%u frameId=%" PRIu32,
-                viewer->id, i + 1U, frame->event_count, event->type,
-                frame->frame_id);
-      if (event->type == VIEWER_GFX_EVENT_SURFACE_COMMAND) {
-        cmd_idx++;
-        WLog_INFO(TAG,
-                  "Viewer %u replay command %" PRIu32 "/%" PRIu32
-                  ": surfaceId=%" PRIu16 " codecId=%" PRIu16 " length=%" PRIu32,
-                  viewer->id, cmd_idx, frame->surface_command_count,
-                  event->u.surface_command.surfaceId,
-                  event->u.surface_command.codecId,
-                  event->u.surface_command.length);
-      }
-      ok = viewer_send_gfx_event(viewer, event);
-      if (!ok) {
-        WLog_ERR(TAG,
-                 "Viewer %u replay failed at event %" PRIu32 "/%" PRIu32
-                 "; disconnecting",
-                 viewer->id, i + 1U, frame->event_count);
-        break;
-      }
-    }
-  }
-
-  if (ok) {
-    viewer->needs_full_refresh = FALSE;
-    viewer->full_refresh_deadline_ts = 0;
-  }
-  LeaveCriticalSection(&viewer->send_lock);
-
-  if (!ok) {
-    viewer->stop_requested = TRUE;
-    WLog_ERR(TAG, "Viewer %u replay failed: queue/send error, disconnecting",
-             viewer->id);
-    goto cleanup;
-  }
-
-  elapsed_ms = platform_get_timestamp_ms() - started_ts;
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer->gfx.join_target_frame_id = frame->frame_id;
-  viewer->gfx.last_presented_timestamp = platform_get_timestamp_ms();
-  viewer_gfx_finish_late_join_locked(
-      viewer, "replay baseline sent; switching to live stream");
-  LeaveCriticalSection(&viewer->gfx.lock);
-  WLog_INFO(TAG, "Frame %" PRIu32 " replayed to viewer %u in %" PRIu64 " ms",
-            frame->frame_id, viewer->id, elapsed_ms);
-  WLog_INFO(TAG,
-            "Viewer %u replay baseline frame=%" PRIu32
-            " complete; live stream enabled",
-            viewer->id, frame->frame_id);
-
-  if (server->backend) {
-    (void)backend_request_full_refresh(server->backend);
-    WLog_INFO(TAG,
-              "Viewer %u requested backend full refresh after replay cutover",
-              viewer->id);
-  }
-
-cleanup:
-  if (reset_event)
-    viewer_gfx_event_unref(reset_event);
-  if (create_events) {
-    for (i = 0; i < active_surface_count; i++)
-      viewer_gfx_event_unref(create_events[i]);
-    free(create_events);
-  }
-  if (map_events) {
-    for (i = 0; i < mapped_surface_count; i++)
-      viewer_gfx_event_unref(map_events[i]);
-    free(map_events);
-  }
-
-  return ok;
-}
-
-static UINT
-viewer_rdpgfx_caps_advertise(RdpgfxServerContext *context,
-                             const RDPGFX_CAPS_ADVERTISE_PDU *caps_advertise) {
-  Viewer *viewer = context ? (Viewer *)context->custom : NULL;
-  ViewerServer *server = g_viewer_server;
-  RDPGFX_CAPSET caps = {0};
-  RDPGFX_CAPS_CONFIRM_PDU confirm = {0};
-  const RDPGFX_CAPSET *selected = NULL;
-  UINT rc = CHANNEL_RC_OK;
-  BOOL caps_ready_was = FALSE;
-  BOOL use_rdpgfx_was = FALSE;
-  ViewerGfxNegotiationOutcome outcome_was = VIEWER_GFX_NEGOTIATION_PENDING;
-
-  if (!viewer || !server || !caps_advertise || !context->CapsConfirm)
-    return ERROR_INVALID_PARAMETER;
-
-  EnterCriticalSection(&server->gfx.lock);
-  selected = viewer_gfx_choose_caps(&server->gfx, caps_advertise);
-  if (selected) {
-    caps = *selected;
-    if (!server->gfx.canonical_caps_valid) {
-      server->gfx.canonical_caps = caps;
-      server->gfx.canonical_caps_valid = TRUE;
-    }
-  }
-  LeaveCriticalSection(&server->gfx.lock);
-
-  if (!selected) {
-    WLog_WARN(TAG,
-              "Viewer %u advertised incompatible RDPEGFX caps; staying on "
-              "classic path",
-              viewer->id);
-    EnterCriticalSection(&viewer->gfx.lock);
-    if (viewer->gfx.negotiation_outcome ==
-        VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK) {
-      LeaveCriticalSection(&viewer->gfx.lock);
-      return CHANNEL_RC_OK;
-    }
-    viewer_disable_rdpgfx_locked(viewer);
-    LeaveCriticalSection(&viewer->gfx.lock);
-    if (viewer->activated)
-      (void)viewer_gfx_enter_classic_fallback(server, viewer,
-                                              platform_get_timestamp_ms(),
-                                              "incompatible RDPEGFX caps");
-    return CHANNEL_RC_OK;
-  }
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  caps_ready_was = viewer->gfx.caps_ready;
-  use_rdpgfx_was = viewer->gfx.use_rdpgfx;
-  outcome_was = viewer->gfx.negotiation_outcome;
-
-  /* If caps were already confirmed, suppress duplicate caps confirm before
-   * sending anything on the wire. A duplicate CapsConfirm resets the active
-   * cap set and can trigger a re-negotiation cycle that breaks the channel. */
-  if (caps_ready_was && use_rdpgfx_was) {
-    WLog_DBG(TAG,
-             "Viewer %u suppressing duplicate caps confirm (join_state=%s "
-             "caps_ready=%d)",
-             viewer->id, viewer_join_state_name(viewer->gfx.join_state),
-             caps_ready_was);
-    LeaveCriticalSection(&viewer->gfx.lock);
-    return CHANNEL_RC_OK;
-  }
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  confirm.capsSet = &caps;
-  rc = context->CapsConfirm(context, &confirm);
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  if (rc == CHANNEL_RC_OK) {
-    viewer->gfx.confirmed_caps = caps;
-    viewer->gfx.caps_ready = TRUE;
-    viewer->gfx.use_rdpgfx = TRUE;
-    viewer->gfx.rdpgfx_temporarily_disabled = FALSE;
-    viewer->gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_RDPEGFX_READY;
-
-    if (!caps_ready_was || !use_rdpgfx_was ||
-        (outcome_was != VIEWER_GFX_NEGOTIATION_RDPEGFX_READY)) {
-      WLog_INFO(TAG, "Viewer %u RDPEGFX caps confirm progressed negotiation",
-                viewer->id);
-    }
-
-    if (viewer->activated &&
-        viewer_gfx_pending_activation_begins_rdpgfx_join(&viewer->gfx)) {
-      viewer_gfx_begin_join_locked(viewer, platform_get_timestamp_ms(),
-                                   "RDPEGFX caps confirmed after activation");
-      WLog_INFO(TAG,
-                "Viewer %u RDPEGFX caps confirmed after activation; gating "
-                "live stream until replay/full refresh",
-                viewer->id);
-    }
-  } else {
-    viewer_disable_rdpgfx_locked(viewer);
-  }
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  if ((rc != CHANNEL_RC_OK) && viewer->activated)
-    (void)viewer_gfx_enter_classic_fallback(server, viewer,
-                                            platform_get_timestamp_ms(),
-                                            "RDPEGFX caps confirm failed");
-
-  return rc;
-}
-
-static UINT viewer_rdpgfx_frame_acknowledge(
-    RdpgfxServerContext *context,
-    const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frame_acknowledge) {
-  Viewer *viewer = context ? (Viewer *)context->custom : NULL;
-
-  if (!viewer || !frame_acknowledge)
-    return ERROR_INVALID_PARAMETER;
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer->gfx.last_ack_frame_id = frame_acknowledge->frameId;
-  viewer->gfx.last_presented_timestamp = platform_get_timestamp_ms();
-  if ((viewer->gfx.join_state == VIEWER_JOIN_STATE_WAIT_REPLAY_ACK) &&
-      viewer_late_join_ack_releases_live(viewer->gfx.join_target_frame_id,
-                                         viewer->gfx.last_ack_frame_id)) {
-    viewer_gfx_finish_late_join_locked(viewer, "replay ack received");
-  }
-  LeaveCriticalSection(&viewer->gfx.lock);
-  return CHANNEL_RC_OK;
-}
-
-static BOOL viewer_send_gfx_event(Viewer *viewer, ViewerGfxEvent *event) {
-  UINT status = CHANNEL_RC_OK;
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
-
-  if (!viewer || !event || !peer || !viewer->gfx.rdpgfx ||
-      !viewer->gfx.use_rdpgfx)
-    return FALSE;
-
-  if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
-    viewer->write_block_events++;
-    if (!peer->DrainOutputBuffer || (peer->DrainOutputBuffer(peer) < 0) ||
-        peer->IsWriteBlocked(peer)) {
-      viewer->packets_failed++;
-      return FALSE;
-    }
-  }
-
-  switch (event->type) {
-  case VIEWER_GFX_EVENT_RESET_GRAPHICS:
-    status = viewer->gfx.rdpgfx->ResetGraphics(viewer->gfx.rdpgfx,
-                                               &event->u.reset_graphics);
-    break;
-
-  case VIEWER_GFX_EVENT_CREATE_SURFACE:
-    status = viewer->gfx.rdpgfx->CreateSurface(viewer->gfx.rdpgfx,
-                                               &event->u.create_surface);
-    break;
-
-  case VIEWER_GFX_EVENT_DELETE_SURFACE:
-    status = viewer->gfx.rdpgfx->DeleteSurface(viewer->gfx.rdpgfx,
-                                               &event->u.delete_surface);
-    break;
-
-  case VIEWER_GFX_EVENT_MAP_SURFACE_TO_OUTPUT:
-    status = viewer->gfx.rdpgfx->MapSurfaceToOutput(
-        viewer->gfx.rdpgfx, &event->u.map_surface_to_output);
-    break;
-
-  case VIEWER_GFX_EVENT_START_FRAME:
-    status = viewer->gfx.rdpgfx->StartFrame(viewer->gfx.rdpgfx,
-                                            &event->u.start_frame);
-    break;
-
-  case VIEWER_GFX_EVENT_SURFACE_COMMAND:
-    status = viewer->gfx.rdpgfx->SurfaceCommand(viewer->gfx.rdpgfx,
-                                                &event->u.surface_command);
-    break;
-
-  case VIEWER_GFX_EVENT_END_FRAME:
-    status =
-        viewer->gfx.rdpgfx->EndFrame(viewer->gfx.rdpgfx, &event->u.end_frame);
-    break;
-
-  case VIEWER_GFX_EVENT_DELETE_ENCODING_CONTEXT:
-    status = viewer->gfx.rdpgfx->DeleteEncodingContext(
-        viewer->gfx.rdpgfx, &event->u.delete_encoding_context);
-    break;
-  }
-
-  if (status == CHANNEL_RC_OK) {
-    viewer->packets_sent++;
-    return TRUE;
-  }
-
-  viewer->packets_failed++;
-  return FALSE;
-}
-
 static BOOL viewer_pump_gfx(Viewer *viewer) {
-  ViewerGfxEvent *event = NULL;
-  UINT32 pumped_frame_events = 0;
-  UINT32 pumped_surface_commands = 0;
-  BOOL gated = FALSE;
-
-  if (!viewer)
-    return FALSE;
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  if (viewer->gfx.rdpgfx_temporarily_disabled || !viewer->gfx.channel_opened ||
-      !viewer->gfx.caps_ready || !viewer->gfx.use_rdpgfx) {
-    LeaveCriticalSection(&viewer->gfx.lock);
-    return TRUE;
-  }
-  gated = (viewer->gfx.join_state != VIEWER_JOIN_STATE_LIVE) &&
-          (viewer->gfx.queue_count > 0);
-  if (gated) {
-    WLog_DBG(TAG,
-             "Viewer %u pump-gfx: %" PRIu32
-             " events queued but join_state=%s (gated)",
-             viewer->id, viewer->gfx.queue_count,
-             viewer_join_state_name(viewer->gfx.join_state));
-  }
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  for (;;) {
-    EnterCriticalSection(&viewer->gfx.lock);
-    if (viewer->gfx.join_state != VIEWER_JOIN_STATE_LIVE) {
-      LeaveCriticalSection(&viewer->gfx.lock);
-      break;
-    }
-    event = viewer_gfx_dequeue_locked(&viewer->gfx);
-    LeaveCriticalSection(&viewer->gfx.lock);
-
-    if (!event)
-      break;
-
-    EnterCriticalSection(&viewer->send_lock);
-    if (!viewer_send_gfx_event(viewer, event)) {
-      LeaveCriticalSection(&viewer->send_lock);
-      WLog_ERR(TAG, "Viewer %u pump-gfx send failed (type=%u); disconnecting",
-               viewer->id, event->type);
-      viewer_gfx_event_unref(event);
-      return FALSE;
-    }
-    LeaveCriticalSection(&viewer->send_lock);
-
-    EnterCriticalSection(&viewer->gfx.lock);
-    viewer->gfx.last_delivered_event_type = event->type;
-    viewer->gfx.last_delivered_ts = platform_get_timestamp_ms();
-    if (event->type == VIEWER_GFX_EVENT_END_FRAME) {
-      viewer->gfx.last_delivered_frame_id = event->u.end_frame.frameId;
-      pumped_frame_events++;
-    } else if (event->type == VIEWER_GFX_EVENT_SURFACE_COMMAND) {
-      pumped_surface_commands++;
-    }
-    LeaveCriticalSection(&viewer->gfx.lock);
-
-    viewer_gfx_event_unref(event);
-  }
-
-  if (pumped_frame_events > 0) {
-    WLog_INFO(
-        TAG,
-        "Viewer %u pump-gfx: delivered %" PRIu32 " frames (lastFid=%" PRIu32
-        ") + %" PRIu32 " surfaceCmds, remainingQ=%" PRIu32,
-        viewer->id, pumped_frame_events, viewer->gfx.last_delivered_frame_id,
-        pumped_surface_commands, viewer->gfx.queue_count);
-  }
-
+  (void)viewer;
   return TRUE;
 }
 
-/* Drain the classic bitmap queue and send updates to the viewer.
- * Called from the viewer thread. Returns TRUE on success, FALSE on
- * fatal error (viewer should be disconnected). */
 static BOOL viewer_pump_classic(Viewer *viewer) {
   ViewerClassicEvent *event = NULL;
   UINT32 pumped = 0;
   UINT32 coalesced = 0;
   UINT32 sb_pumped = 0;
   BOOL classic_fallback = FALSE;
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
+  ViewerClassicTransport transport = {0};
 
   if (!viewer)
     return FALSE;
@@ -2624,13 +634,14 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
   if (!viewer_update_ready(viewer, "pump-classic"))
     return TRUE;
 
-  /* Hold rdp_update_lock across the entire drain loop so that mstsc receives
+  transport = viewer_classic_transport_from_viewer(viewer);
+
+  /* Hold the update batch across the entire drain loop so that mstsc receives
 
    * * all bitmap updates as a continuous stream without rendering between
    *
    * individual sends. */
-  if (peer && peer->context && peer->context->update)
-    rdp_update_lock(peer->context->update);
+  (void)viewer_classic_transport_begin_batch(&transport);
 
   for (;;) {
     /* Drain one queued backend BITMAP_UPDATE at a time. Coalescing is disabled
@@ -2640,22 +651,22 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
      * helper below. */
     EnterCriticalSection(&viewer->send_lock);
 
-    /* Skip if viewer needs full refresh (will resync via refresh path) */
-    if (viewer->needs_full_refresh) {
-      /* Drop all queued updates — they're stale relative to the
-       * upcoming full refresh */
-      if (viewer->classic_queue_count > 0) {
-        WLog_INFO(TAG,
-                  "Viewer %u pump-classic: dropping %" PRIu32
-                  " queued updates (needs full refresh)",
-                  viewer->id, viewer->classic_queue_count);
-        viewer_classic_queue_clear_locked(viewer);
-      }
+    if (viewer_publisher_classic_pump_decision(
+            viewer->needs_full_refresh,
+            viewer_classic_queue_depth_locked(&viewer->classic_queues)) ==
+        VIEWER_PUBLISHER_CLASSIC_PUMP_DROP_BITMAPS_FOR_FULL_REFRESH) {
+      UINT32 classic_depth =
+          viewer_classic_queue_depth_locked(&viewer->classic_queues);
+      WLog_INFO(TAG,
+                "Viewer %u pump-classic: dropping %" PRIu32
+                " queued updates (needs full refresh)",
+                viewer->id, classic_depth);
+      viewer_clear_classic_queue_locked(viewer);
       LeaveCriticalSection(&viewer->send_lock);
       break;
     }
 
-    event = viewer_classic_dequeue_locked(viewer);
+    event = viewer_dequeue_classic_event_locked(viewer);
     LeaveCriticalSection(&viewer->send_lock);
 
     if (!event)
@@ -2671,10 +682,11 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
 
     /* Send the bitmap update, split into bounded chunks if necessary.
      *
-     * rdp_update_lock is already held across the entire pump loop, so mstsc
+     * The update batch is already held across the entire pump loop, so mstsc
 
      * * receives all updates as a continuous stream. */
-    if (!viewer_send_bitmap_update_locked(viewer, event->bitmap)) {
+    if (!viewer_send_bitmap_update_locked(viewer,
+                                          viewer_classic_event_bitmap(event))) {
       WLog_WARN(TAG, "Viewer %u pump-classic: send failed", viewer->id);
       viewer_classic_event_free(event);
       /* Send failure is not fatal — the viewer may recover */
@@ -2682,6 +694,10 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
     }
 
     pumped++;
+    if (viewer_classic_event_generation(event) >
+        viewer->classic_last_generation_sent)
+      viewer->classic_last_generation_sent =
+          viewer_classic_event_generation(event);
     viewer_classic_event_free(event);
   }
 
@@ -2694,15 +710,17 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
     ViewerSurfaceBitsEvent *sb_event = NULL;
 
     EnterCriticalSection(&viewer->send_lock);
-    sb_event = viewer_surface_bits_dequeue_locked(viewer);
+    sb_event = viewer_dequeue_surface_bits_event_locked(viewer);
     LeaveCriticalSection(&viewer->send_lock);
 
     if (!sb_event)
       break;
 
-    /* Send outside send_lock — rdp_update_lock provides FreeRDP's own sync,
+    /* Send outside send_lock — the transport batch provides FreeRDP's own
+     * sync,
      * and the event data is locally owned after dequeue. */
-    if (!viewer_send_surface_bits(viewer, &sb_event->cmd)) {
+    if (!viewer_classic_transport_send_surface_bits(
+            &transport, viewer_surface_bits_event_command(sb_event), FALSE)) {
       WLog_WARN(TAG, "Viewer %u pump-classic: SurfaceBits send failed",
                 viewer->id);
       viewer_surface_bits_event_free(sb_event);
@@ -2720,102 +738,10 @@ static BOOL viewer_pump_classic(Viewer *viewer) {
               viewer->id, pumped, coalesced, sb_pumped);
   }
 
-  /* Release the update lock acquired at the top of this function. */
-  if (peer && peer->context && peer->context->update)
-    rdp_update_unlock(peer->context->update);
+  /* Release the update batch acquired at the top of this function. */
+  viewer_classic_transport_end_batch(&transport);
 
   return TRUE;
-}
-
-static BOOL viewer_server_publish_gfx_event(BackendClient *backend,
-                                            ViewerGfxEvent *event) {
-  ViewerServer *server = g_viewer_server;
-  BOOL sent_any = FALSE;
-  int i = 0;
-
-  if (!server || (server->backend != backend) || !event) {
-    viewer_gfx_event_unref(event);
-    return FALSE;
-  }
-
-  EnterCriticalSection(&server->lock);
-  for (i = 0; i < MAX_VIEWERS; i++) {
-    Viewer *viewer = &server->viewers[i];
-    BOOL enqueue = FALSE;
-    BOOL waiting_for_ack = FALSE;
-    BOOL overflowed = FALSE;
-    ViewerJoinState join_state = VIEWER_JOIN_STATE_NONE;
-
-    if (!viewer->peer || !viewer->connected || !viewer->activated ||
-        viewer->stop_requested)
-      continue;
-
-    EnterCriticalSection(&viewer->gfx.lock);
-    enqueue = !viewer->gfx.rdpgfx_temporarily_disabled &&
-              viewer->gfx.channel_opened && viewer->gfx.caps_ready &&
-              viewer_gfx_negotiation_is_rdpgfx_ready(&viewer->gfx) &&
-              viewer_gfx_viewer_accepts_live_locked(&viewer->gfx);
-    join_state = viewer->gfx.join_state;
-    if (!enqueue && !viewer->gfx.rdpgfx_temporarily_disabled &&
-        viewer->gfx.channel_opened && viewer->gfx.caps_ready &&
-        viewer_gfx_negotiation_is_rdpgfx_ready(&viewer->gfx) &&
-        (viewer->gfx.join_state != VIEWER_JOIN_STATE_LIVE)) {
-      WLog_DBG(TAG,
-               "Viewer %u skipping live enqueue type=%u during late-join "
-               "replay gate (join=%s)",
-               viewer->id, event->type,
-               viewer_join_state_name(viewer->gfx.join_state));
-    }
-    waiting_for_ack =
-        (viewer->gfx.join_state == VIEWER_JOIN_STATE_WAIT_REPLAY_ACK);
-    if (enqueue && (event->type == VIEWER_GFX_EVENT_RESET_GRAPHICS)) {
-      UINT64 elapsed =
-          platform_get_timestamp_ms() - viewer->gfx.last_activated_ts;
-      if (elapsed < 5000) {
-        WLog_INFO(TAG,
-                  "Viewer %u skipping ResetGraphics (activated %" PRIu64
-                  " ms ago)",
-                  viewer->id, elapsed);
-        enqueue = FALSE;
-      }
-    }
-    if (enqueue) {
-      viewer_gfx_event_ref(event);
-      if (!viewer_gfx_enqueue_locked(&viewer->gfx, event)) {
-        overflowed = waiting_for_ack;
-        if (!overflowed) {
-          WLog_ERR(TAG,
-                   "Viewer %u queue overflow (count=%" PRIu32
-                   " pending=%" PRIu32 "); disconnecting",
-                   viewer->id, viewer->gfx.queue_count,
-                   viewer->gfx.pending_frame_count);
-          viewer->stop_requested = TRUE;
-        }
-        viewer_gfx_event_unref(event);
-      } else {
-        sent_any = TRUE;
-      }
-    }
-    if (overflowed) {
-      viewer_gfx_queue_clear_locked(&viewer->gfx);
-      viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_PENDING,
-                                       VIEWER_JOIN_STRATEGY_BACKEND_REFRESH,
-                                       "WAIT_REPLAY_ACK queue overflow");
-    }
-    LeaveCriticalSection(&viewer->gfx.lock);
-  }
-  LeaveCriticalSection(&server->lock);
-
-  if (event->type == VIEWER_GFX_EVENT_END_FRAME) {
-    WLog_INFO(TAG, "GFX publish endFrame fid=%" PRIu32 " sent=%d",
-              event->u.end_frame.frameId, sent_any);
-  } else if (event->type == VIEWER_GFX_EVENT_START_FRAME) {
-    WLog_DBG(TAG, "GFX publish startFrame fid=%" PRIu32 " sent=%d",
-             event->u.start_frame.frameId, sent_any);
-  }
-
-  viewer_gfx_event_unref(event);
-  return sent_any;
 }
 
 static void viewer_get_backend_layout(BackendClient *backend, UINT32 *width,
@@ -2878,67 +804,50 @@ static BOOL viewer_graphics_context_init(ViewerGraphicsContext *gfx) {
     WLog_ERR(TAG, "Failed to initialize viewer RDPEGFX context lock");
     return FALSE;
   }
+  gfx->preferred_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
+  gfx->selected_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
   gfx->initialized = TRUE;
   return TRUE;
 }
 
 static void viewer_graphics_context_reset(ViewerGraphicsContext *gfx,
                                           BackendClient *backend) {
-  UINT32 width = 0;
-  UINT32 height = 0;
+  (void)backend;
 
   if (!gfx)
     return;
 
-  viewer_get_backend_layout(backend, &width, &height, NULL);
-  gfx->negotiated_width = width;
-  gfx->negotiated_height = height;
   gfx->post_connect_complete = FALSE;
   gfx->ready = FALSE;
-  gfx->force_full_present = TRUE;
-  gfx->use_rdpgfx = FALSE;
+  gfx->preferred_codec = g_viewer_server ? g_viewer_server->viewer_gfx_codec
+                                         : VIEWER_GFX_CODEC_UNCOMPRESSED;
+  gfx->selected_codec = gfx->preferred_codec;
+  viewer_gfx_pipeline_invalidate_surface_locked(gfx);
   gfx->channel_opened = FALSE;
   gfx->vcm_progress_logged = FALSE;
   gfx->drdynvc_joined = FALSE;
   gfx->caps_ready = FALSE;
-  gfx->rdpgfx_temporarily_disabled = FALSE;
-  gfx->negotiation_outcome = VIEWER_GFX_NEGOTIATION_PENDING;
   gfx->drdynvc_state = DRDYNVC_STATE_NONE;
-  gfx->join_state = VIEWER_JOIN_STATE_NONE;
-  gfx->join_strategy = VIEWER_JOIN_STRATEGY_NONE;
-  gfx->join_target_frame_id = 0;
-  gfx->join_start_ts = 0;
-  gfx->join_refresh_generation = 0;
-  gfx->last_delivered_frame_id = 0;
-  gfx->last_delivered_event_type = 0;
-  gfx->last_delivered_ts = 0;
-  gfx->last_activated_ts = 0;
-  gfx->queue_head = 0;
-  gfx->queue_tail = 0;
-  gfx->queue_count = 0;
-  gfx->pending_frame_count = 0;
+  viewer_gfx_pipeline_reset_join_state_locked(gfx);
+  viewer_gfx_pipeline_reset_dirty_state_locked(gfx);
 }
 
 static void viewer_graphics_context_uninit(ViewerGraphicsContext *gfx) {
   if (!gfx || !gfx->initialized)
     return;
 
-  EnterCriticalSection(&gfx->lock);
-  viewer_gfx_queue_clear_locked(gfx);
-  if (gfx->rdpgfx) {
-    if (gfx->channel_opened && gfx->rdpgfx->Close)
-      (void)gfx->rdpgfx->Close(gfx->rdpgfx);
-    rdpgfx_server_context_free(gfx->rdpgfx);
-    gfx->rdpgfx = NULL;
-  }
-  if (gfx->vcm) {
-    WTSCloseServer(gfx->vcm);
-    gfx->vcm = NULL;
-  }
-  LeaveCriticalSection(&gfx->lock);
-
   DeleteCriticalSection(&gfx->lock);
   memset(gfx, 0, sizeof(*gfx));
+}
+
+static void viewer_auth_state_reset(Viewer *viewer) {
+  if (!viewer)
+    return;
+
+  viewer->auth_state = VIEWER_AUTH_STATE_NONE;
+  viewer->auth_deferred_required = FALSE;
+  viewer->auth_deferred_checked = FALSE;
+  viewer->auth_deferred_accepted = FALSE;
 }
 
 static BOOL viewer_send_state_init(Viewer *viewer) {
@@ -2961,18 +870,12 @@ static BOOL viewer_send_state_init(Viewer *viewer) {
   viewer->bitmap_updates_skipped_throttle = 0;
   viewer->bitmap_updates_queued = 0;
   viewer->bitmap_queue_dropped = 0;
+  viewer->classic_last_generation_sent = 0;
   viewer->consecutive_lag_intervals = 0;
   viewer->sustained_lag_start_ts = 0;
   viewer->last_pointer_position_generation = 0;
   viewer->last_pointer_shape_generation = 0;
-  viewer->classic_queue_head = 0;
-  viewer->classic_queue_tail = 0;
-  viewer->classic_queue_count = 0;
-  memset(viewer->classic_queue, 0, sizeof(viewer->classic_queue));
-  viewer->surface_bits_queue_head = 0;
-  viewer->surface_bits_queue_tail = 0;
-  viewer->surface_bits_queue_count = 0;
-  memset(viewer->surface_bits_queue, 0, sizeof(viewer->surface_bits_queue));
+  memset(&viewer->classic_queues, 0, sizeof(viewer->classic_queues));
   viewer->surface_bits_updates_sent = 0;
   viewer->surface_bits_updates_failed = 0;
   viewer->surface_bits_updates_skipped_writeblock = 0;
@@ -2982,8 +885,7 @@ static BOOL viewer_send_state_init(Viewer *viewer) {
   viewer->surface_bits_send_time_total_us = 0;
   viewer->surface_bits_send_time_max_us = 0;
   viewer->surface_bits_payload_bytes_sent = 0;
-  viewer->classic_event = CreateEventA(NULL, TRUE, FALSE, NULL);
-  if (!viewer->classic_event) {
+  if (!viewer_classic_queues_init(&viewer->classic_queues)) {
     DeleteCriticalSection(&viewer->send_lock);
     return FALSE;
   }
@@ -2991,19 +893,22 @@ static BOOL viewer_send_state_init(Viewer *viewer) {
 }
 
 static void viewer_send_state_uninit(Viewer *viewer) {
-  if (!viewer || !viewer->classic_event)
+  if (!viewer || !viewer_classic_queues_event(&viewer->classic_queues))
     return;
 
   /* Free any remaining classic queue entries */
   EnterCriticalSection(&viewer->send_lock);
-  viewer_classic_queue_clear_locked(viewer);
-  viewer_surface_bits_queue_clear_locked(viewer);
+  viewer_clear_classic_queue_locked(viewer);
+  {
+    ViewerClassicQueueDropInfo surface_drop_info = {0};
+    viewer_surface_bits_queue_clear_locked(&viewer->classic_queues,
+                                           &surface_drop_info);
+    viewer_apply_surface_bits_drop_info_locked(viewer, &surface_drop_info);
+  }
+  viewer->classic_last_generation_sent = 0;
   LeaveCriticalSection(&viewer->send_lock);
 
-  if (viewer->classic_event) {
-    CloseHandle(viewer->classic_event);
-    viewer->classic_event = NULL;
-  }
+  viewer_classic_queues_uninit(&viewer->classic_queues);
 
   DeleteCriticalSection(&viewer->send_lock);
 }
@@ -3027,12 +932,14 @@ static void viewer_cleanup_slot_finish_locked(Viewer *viewer) {
   viewer->activated = FALSE;
   viewer->counted_in_viewer_count = FALSE;
   viewer->cleanup_in_progress = FALSE;
+  viewer_auth_state_reset(viewer);
   viewer->publish_ref_count = 0;
   viewer->needs_full_refresh = FALSE;
   viewer->stop_requested = FALSE;
   viewer->full_refresh_deadline_ts = 0;
   viewer->last_pointer_position_generation = 0;
   viewer->last_pointer_shape_generation = 0;
+  viewer->classic_last_generation_sent = 0;
 }
 
 static void viewer_wait_for_publish_refs(ViewerServer *server, Viewer *viewer) {
@@ -3060,6 +967,7 @@ static void viewer_cleanup_slot(ViewerServer *server, Viewer *viewer) {
   viewer_wait_for_publish_refs(server, viewer);
 
   viewer_send_state_uninit(viewer);
+  viewer_gfx_pipeline_uninit(viewer);
   viewer_graphics_context_uninit(&viewer->gfx);
 
   if (server) {
@@ -3163,6 +1071,51 @@ static void viewer_release_publish_ref(ViewerServer *server, Viewer *viewer) {
   LeaveCriticalSection(&server->lock);
 }
 
+static void viewer_server_accumulate_gfx_dirty_viewers(
+    ViewerServer *server, const RECTANGLE_16 *dirty_rects,
+    UINT32 dirty_rect_count, BOOL dirty_overflow, UINT64 generation,
+    UINT32 width, UINT32 height) {
+  Viewer *targets[MAX_VIEWERS] = {0};
+  size_t target_count = 0;
+
+  if (!server || (generation == 0) || (width == 0) || (height == 0))
+    return;
+
+  EnterCriticalSection(&server->lock);
+  for (int i = 0; i < MAX_VIEWERS; i++) {
+    Viewer *viewer = &server->viewers[i];
+
+    if (!viewer_try_add_publish_ref_locked(viewer))
+      continue;
+
+    targets[target_count++] = viewer;
+  }
+  LeaveCriticalSection(&server->lock);
+
+  for (size_t i = 0; i < target_count; i++) {
+    Viewer *viewer = targets[i];
+    BOOL signal_viewer = FALSE;
+
+    EnterCriticalSection(&viewer->gfx.lock);
+    if (viewer->gfx.initialized && viewer->gfx.use_rdpgfx &&
+        viewer->gfx.caps_ready && viewer->gfx.channel_opened &&
+        !viewer->gfx.rdpgfx_temporarily_disabled &&
+        (viewer->gfx.join_state == VIEWER_JOIN_STATE_LIVE) &&
+        viewer->gfx.dirty_updates_enabled &&
+        (generation > viewer->gfx.dirty_last_sent_generation)) {
+      signal_viewer = viewer_gfx_pipeline_pending_dirty_add_locked(
+          &viewer->gfx, dirty_rects, dirty_rect_count, dirty_overflow,
+          generation, width, height);
+    }
+    LeaveCriticalSection(&viewer->gfx.lock);
+
+    if (signal_viewer)
+      viewer_classic_queues_signal(&viewer->classic_queues);
+
+    viewer_release_publish_ref(server, viewer);
+  }
+}
+
 static BOOL viewer_slot_available_locked(Viewer *viewer) {
   if (!viewer || viewer->peer || viewer->context || viewer->cleanup_in_progress)
     return FALSE;
@@ -3178,54 +1131,6 @@ static BOOL viewer_slot_available_locked(Viewer *viewer) {
   return TRUE;
 }
 
-static void viewer_pointer_shape_entry_reset(PointerShapeEntry *shape) {
-  if (!shape)
-    return;
-
-  free(shape->xorMaskData);
-  free(shape->andMaskData);
-  memset(shape, 0, sizeof(*shape));
-}
-
-static BOOL viewer_pointer_shape_entry_copy(PointerShapeEntry *destination,
-                                            const PointerShapeEntry *source) {
-  if (!destination || !source)
-    return FALSE;
-
-  memset(destination, 0, sizeof(*destination));
-  *destination = *source;
-  destination->xorMaskData = NULL;
-  destination->andMaskData = NULL;
-
-  if (source->xorMaskLength > 0) {
-    if (!source->xorMaskData)
-      return FALSE;
-    destination->xorMaskData = (BYTE *)malloc(source->xorMaskLength);
-    if (!destination->xorMaskData) {
-      viewer_pointer_shape_entry_reset(destination);
-      return FALSE;
-    }
-    memmove(destination->xorMaskData, source->xorMaskData,
-            source->xorMaskLength);
-  }
-
-  if (source->andMaskLength > 0) {
-    if (!source->andMaskData) {
-      viewer_pointer_shape_entry_reset(destination);
-      return FALSE;
-    }
-    destination->andMaskData = (BYTE *)malloc(source->andMaskLength);
-    if (!destination->andMaskData) {
-      viewer_pointer_shape_entry_reset(destination);
-      return FALSE;
-    }
-    memmove(destination->andMaskData, source->andMaskData,
-            source->andMaskLength);
-  }
-
-  return TRUE;
-}
-
 static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   ViewerServer *server = g_viewer_server;
   freerdp_peer *peer = viewer ? viewer->peer : NULL;
@@ -3234,18 +1139,13 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   UINT16 pointer_y = 0;
   UINT32 pointer_type = SYSPTR_DEFAULT;
   BOOL pointer_visible = TRUE;
-  PointerShapeEntry *active_shape = NULL;
   PointerShapeEntry shape_copy = {0};
-  POINTER_SYSTEM_UPDATE pointer_system = {0};
-  POINTER_POSITION_UPDATE pointer_position = {0};
-  POINTER_COLOR_UPDATE pointer_color = {0};
-  POINTER_NEW_UPDATE pointer_new = {0};
+  BOOL has_active_shape = FALSE;
+  ViewerPointerSnapshot pointer_snapshot = {0};
+  ViewerPointerUpdatePlan pointer_plan = {0};
+  ViewerPointerTransport pointer_transport = {0};
   UINT64 position_generation = 0;
   UINT64 shape_generation = 0;
-  BOOL shape_changed = FALSE;
-  BOOL position_changed = FALSE;
-  BOOL send_shape = FALSE;
-  BOOL send_position = FALSE;
   BOOL sent = TRUE;
 
   if (!viewer || !server || !backend || !peer || !peer->context ||
@@ -3256,82 +1156,76 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
   if (!viewer_update_ready(viewer, "pointer"))
     return FALSE;
 
-  backend_get_pointer_snapshot(backend, &pointer_x, &pointer_y,
-                               &pointer_visible, &pointer_type, &active_shape,
-                               &position_generation, &shape_generation);
+  if (!backend_get_pointer_snapshot_copy(
+          backend, &pointer_x, &pointer_y, &pointer_visible, &pointer_type,
+          &shape_copy, &has_active_shape, &position_generation,
+          &shape_generation))
+    return FALSE;
   WLog_INFO(TAG, "viewer_forward_pointer: x=%u y=%u visible=%d gen=%llu->%llu",
             pointer_x, pointer_y, pointer_visible,
             (unsigned long long)viewer->last_pointer_position_generation,
             (unsigned long long)position_generation);
-  if (active_shape &&
-      !viewer_pointer_shape_entry_copy(&shape_copy, active_shape))
+  pointer_snapshot.x = pointer_x;
+  pointer_snapshot.y = pointer_y;
+  pointer_snapshot.visible = pointer_visible;
+  pointer_snapshot.type = pointer_type;
+  pointer_snapshot.active_shape = &shape_copy;
+  pointer_snapshot.has_active_shape = has_active_shape;
+  pointer_snapshot.position_generation = position_generation;
+  pointer_snapshot.shape_generation = shape_generation;
+  if (!viewer_pointer_plan_from_snapshot(
+          &pointer_snapshot, viewer->last_pointer_position_generation,
+          viewer->last_pointer_shape_generation, force, &pointer_plan)) {
+    pointer_shape_entry_reset(&shape_copy);
     return FALSE;
-
-  shape_changed =
-      force || (shape_generation != viewer->last_pointer_shape_generation);
-  position_changed = force || (position_generation !=
-                               viewer->last_pointer_position_generation);
-  send_shape = shape_changed;
-  send_position = position_changed && pointer_visible;
+  }
   /* disabled: (void)viewer_forward_pointer; logging kept for debug */
-  WLog_INFO(TAG, "  shape=%d pos=%d send_shape=%d send_position=%d",
-            shape_changed, position_changed, send_shape, send_position);
+  WLog_INFO(
+      TAG, "  shape=%d pos=%d send_shape=%d send_position=%d",
+      force || (shape_generation != viewer->last_pointer_shape_generation),
+      force ||
+          (position_generation != viewer->last_pointer_position_generation),
+      pointer_plan.send_system || pointer_plan.send_color ||
+          pointer_plan.send_new,
+      pointer_plan.send_position);
 
-  if (!send_shape && !send_position) {
-    viewer_pointer_shape_entry_reset(&shape_copy);
+  if (!pointer_plan.send_system && !pointer_plan.send_color &&
+      !pointer_plan.send_new && !pointer_plan.send_position) {
+    pointer_shape_entry_reset(&shape_copy);
+    return TRUE;
+  }
+
+  if (pointer_plan.send_position && !pointer_plan.send_system &&
+      !pointer_plan.send_color && !pointer_plan.send_new) {
+    /* Position-only pointer updates are intentionally suppressed; acknowledge
+
+     * * them so this viewer does not retry that plan forever. */
+    viewer->last_pointer_position_generation = position_generation;
+    pointer_shape_entry_reset(&shape_copy);
     return TRUE;
   }
 
   if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
     if (!peer->DrainOutputBuffer || (peer->DrainOutputBuffer(peer) < 0) ||
         peer->IsWriteBlocked(peer)) {
-      viewer_pointer_shape_entry_reset(&shape_copy);
+      pointer_shape_entry_reset(&shape_copy);
       return FALSE;
     }
   }
 
-  pointer_position.xPos = pointer_x;
-  pointer_position.yPos = pointer_y;
-  pointer_system.type = pointer_visible ? pointer_type : SYSPTR_NULL;
-  pointer_color.cacheIndex = shape_copy.cacheIndex;
-  pointer_color.hotSpotX = shape_copy.hotSpotX;
-  pointer_color.hotSpotY = shape_copy.hotSpotY;
-  pointer_color.width = shape_copy.width;
-  pointer_color.height = shape_copy.height;
-  pointer_color.lengthAndMask = shape_copy.andMaskLength;
-  pointer_color.lengthXorMask = shape_copy.xorMaskLength;
-  pointer_color.xorMaskData = shape_copy.xorMaskData;
-  pointer_color.andMaskData = shape_copy.andMaskData;
-  pointer_new.xorBpp = shape_copy.xorBpp;
-  pointer_new.colorPtrAttr = pointer_color;
+  pointer_transport.peer = peer;
+  pointer_transport.classic_transport =
+      viewer_classic_transport_from_viewer(viewer);
+  sent = viewer_pointer_transport_send_plan(&pointer_transport, &pointer_plan);
 
-  rdp_update_lock(peer->context->update);
-  if (send_shape) {
-    if (!pointer_visible || !active_shape) {
-      IFCALLRET(peer->context->update->pointer->PointerSystem, sent,
-                peer->context, &pointer_system);
-    } else if ((shape_copy.xorBpp > 0) &&
-               peer->context->update->pointer->PointerNew) {
-      IFCALLRET(peer->context->update->pointer->PointerNew, sent, peer->context,
-                &pointer_new);
-    } else {
-      IFCALLRET(peer->context->update->pointer->PointerColor, sent,
-                peer->context, &pointer_color);
-    }
-  }
-
-  if (sent && send_position && peer->context->update->pointer->PointerPosition)
-    IFCALLRET(peer->context->update->pointer->PointerPosition, sent,
-              peer->context, &pointer_position);
-  rdp_update_unlock(peer->context->update);
-
-  viewer_pointer_shape_entry_reset(&shape_copy);
+  pointer_shape_entry_reset(&shape_copy);
   if (!sent)
     return FALSE;
 
-  WLog_INFO(TAG, "  sending: send_pos=%d sent=%d final_gen=%llu", send_position,
-            sent, (unsigned long long)position_generation);
-  if (send_position)
+  WLog_INFO(TAG, "  sending: send_pos=%d sent=%d final_gen=%llu",
+            pointer_plan.send_position, sent,
+            (unsigned long long)position_generation);
+  if (pointer_plan.send_position)
     viewer->last_pointer_position_generation = position_generation;
   viewer->last_pointer_shape_generation = shape_generation;
   return TRUE;
@@ -3339,65 +1233,33 @@ static BOOL viewer_forward_pointer(Viewer *viewer, BOOL force) {
 
 static BOOL viewer_send_surface_bits(Viewer *viewer,
                                      const SURFACE_BITS_COMMAND *cmd) {
-  BOOL ret = FALSE;
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
-  UINT64 send_started_us = 0;
-  UINT64 send_us = 0;
+  ViewerClassicTransport transport =
+      viewer_classic_transport_from_viewer(viewer);
 
-  if (!viewer || !peer || !peer->context || !peer->context->update || !cmd)
+  if (!viewer || !cmd)
     return FALSE;
 
   if (!viewer_update_ready(viewer, "SurfaceBits"))
     return FALSE;
 
-  /* Option A: Skip on write-block — don't stall the viewer thread */
-  if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
-    viewer->write_block_events++;
-    viewer->surface_bits_updates_skipped_writeblock++;
-    return FALSE;
-  }
-
-  send_started_us = viewer_perf_now_us();
-  rdp_update_lock(peer->context->update);
-  IFCALLRET(peer->context->update->SurfaceBits, ret, peer->context, cmd);
-  rdp_update_unlock(peer->context->update);
-  send_us = viewer_perf_now_us() - send_started_us;
-  viewer->surface_bits_send_time_total_us += send_us;
-  if (send_us > viewer->surface_bits_send_time_max_us)
-    viewer->surface_bits_send_time_max_us = send_us;
-  if (ret) {
-    viewer->packets_sent++;
-    viewer->surface_bits_updates_sent++;
-    viewer->surface_bits_payload_bytes_sent += cmd->bmp.bitmapDataLength;
-  } else {
-    viewer->packets_failed++;
-    viewer->surface_bits_updates_failed++;
-  }
-  return ret;
+  return viewer_classic_transport_send_surface_bits(&transport, cmd, FALSE);
 }
 
 static BOOL viewer_send_bitmap_update(Viewer *viewer,
                                       const BITMAP_UPDATE *bitmap) {
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
+  ViewerClassicTransport transport =
+      viewer_classic_transport_from_viewer(viewer);
 
-  if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
+  if (!viewer || !bitmap)
     return FALSE;
 
   if (!viewer_update_ready(viewer, "BitmapUpdate"))
     return FALSE;
 
-  if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
-    viewer->write_block_events++;
-    viewer->bitmap_write_block_events++;
-    viewer->bitmap_updates_skipped_writeblock++;
-    return FALSE;
-  }
-
-  return viewer_send_bitmap_update_chunks(viewer, bitmap, FALSE,
-                                          "BitmapUpdate");
+  return viewer_classic_transport_send_bitmap_update(&transport, bitmap);
 }
 
-/* Same as viewer_send_bitmap_update but assumes rdp_update_lock is already
+/* Same as viewer_send_bitmap_update but assumes the update batch is already
  *
  * held. Used by viewer_pump_classic to batch multiple sends under a single
  * lock
@@ -3405,45 +1267,31 @@ static BOOL viewer_send_bitmap_update(Viewer *viewer,
  * updates. */
 static BOOL viewer_send_bitmap_update_locked(Viewer *viewer,
                                              const BITMAP_UPDATE *bitmap) {
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
+  ViewerClassicTransport transport =
+      viewer_classic_transport_from_viewer(viewer);
 
-  if (!viewer || !peer || !peer->context || !peer->context->update || !bitmap)
+  if (!viewer || !bitmap)
     return FALSE;
 
   if (!viewer_update_ready(viewer, "BitmapUpdateLocked"))
     return FALSE;
 
-  if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer)) {
-    viewer->write_block_events++;
-    viewer->bitmap_write_block_events++;
-    viewer->bitmap_updates_skipped_writeblock++;
-    return FALSE;
-  }
-
-  return viewer_send_bitmap_update_chunks(viewer, bitmap, TRUE,
-                                          "BitmapUpdateLocked");
+  return viewer_classic_transport_send_bitmap_update_batched(&transport,
+                                                             bitmap);
 }
 
 static BOOL viewer_send_frame_marker(Viewer *viewer,
                                      const SURFACE_FRAME_MARKER *marker) {
-  BOOL ret = FALSE;
-  freerdp_peer *peer = viewer ? viewer->peer : NULL;
+  ViewerClassicTransport transport =
+      viewer_classic_transport_from_viewer(viewer);
 
-  if (!viewer || !peer || !peer->context || !peer->context->update || !marker)
+  if (!viewer || !marker)
     return FALSE;
 
   if (!viewer_update_ready(viewer, "SurfaceFrameMarker"))
     return FALSE;
 
-  rdp_update_lock(peer->context->update);
-  IFCALLRET(peer->context->update->SurfaceFrameMarker, ret, peer->context,
-            marker);
-  rdp_update_unlock(peer->context->update);
-  if (ret)
-    viewer->packets_sent++;
-  else
-    viewer->packets_failed++;
-  return ret;
+  return viewer_classic_transport_send_frame_marker(&transport, marker);
 }
 
 static Viewer *find_viewer_by_peer(freerdp_peer *peer) {
@@ -3498,82 +1346,13 @@ static BOOL can_viewer_send_input(Viewer *viewer) {
   return allowed;
 }
 
-static BOOL viewer_gfx_handshake_ready_locked(const Viewer *viewer) {
-  return viewer && viewer->activated && viewer->gfx.post_connect_complete &&
-         (viewer->gfx.drdynvc_state == DRDYNVC_STATE_READY) &&
-         viewer->gfx.channel_opened && viewer->gfx.caps_ready &&
-         viewer_gfx_negotiation_is_rdpgfx_ready(&viewer->gfx) &&
-         !viewer->gfx.rdpgfx_temporarily_disabled;
-}
-
-static ViewerGfxCompleteFrame *
-viewer_gfx_lookup_replay_frame(ViewerServer *server, UINT32 minimum_frame_id) {
-  ViewerGfxCompleteFrame *frame = NULL;
-
-  if (!server)
-    return NULL;
-
-  EnterCriticalSection(&server->gfx.lock);
-  frame = viewer_gfx_frame_buffer_latest_replayable_locked(
-      &server->gfx.frame_buffer, minimum_frame_id);
-  LeaveCriticalSection(&server->gfx.lock);
-  return frame;
-}
-
-static BOOL viewer_gfx_request_backend_refresh(ViewerServer *server,
-                                               Viewer *viewer, UINT64 now,
-                                               const char *reason) {
-  BackendFullRefreshState refresh_state = {0};
-  UINT32 newest_frame_id = 0;
-  UINT64 generation = 0;
-
-  if (!server || !server->backend || !viewer)
-    return FALSE;
-
-  EnterCriticalSection(&server->gfx.lock);
-  newest_frame_id = server->gfx.frame_buffer.newest_frame_id;
-  LeaveCriticalSection(&server->gfx.lock);
-
-  (void)backend_request_full_refresh(server->backend);
-  backend_get_full_refresh_state(server->backend, &refresh_state);
-  generation = refresh_state.requested_generation;
-  if (generation == 0)
-    generation = refresh_state.in_flight_generation;
-  if (generation == 0)
-    generation = refresh_state.latest_generation;
-  if (generation == 0)
-    return FALSE;
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer->gfx.join_start_ts = now;
-  viewer->gfx.join_target_frame_id = newest_frame_id + 1U;
-  viewer->gfx.join_refresh_generation = generation;
-  viewer_gfx_queue_clear_locked(&viewer->gfx);
-  viewer_gfx_set_join_state_locked(
-      viewer, VIEWER_JOIN_STATE_WAIT_BACKEND_REFRESH,
-      VIEWER_JOIN_STRATEGY_BACKEND_REFRESH, reason);
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  WLog_INFO(TAG,
-            "Viewer %u late join using backend refresh generation=%" PRIu64
-            " reason=%s",
-            viewer->id, generation, reason ? reason : "unspecified");
-  return TRUE;
-}
-
 static BOOL viewer_gfx_enter_classic_fallback(ViewerServer *server,
                                               Viewer *viewer, UINT64 now,
                                               const char *reason) {
   if (!viewer)
     return FALSE;
 
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer_disable_rdpgfx_locked(viewer);
-  viewer->gfx.join_start_ts = now;
-  viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_PENDING,
-                                   VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK,
-                                   reason);
-  LeaveCriticalSection(&viewer->gfx.lock);
+  viewer_gfx_pipeline_enter_classic_fallback(viewer, now, reason, NULL);
 
   EnterCriticalSection(&viewer->send_lock);
   viewer->needs_full_refresh = TRUE;
@@ -3588,176 +1367,354 @@ static BOOL viewer_gfx_enter_classic_fallback(ViewerServer *server,
   return TRUE;
 }
 
+static BOOL viewer_gfx_handle_failure(ViewerServer *server, Viewer *viewer,
+                                      UINT64 now, const char *reason) {
+  BOOL disconnect = FALSE;
+  freerdp_peer *peer = NULL;
+
+  if (!viewer)
+    return FALSE;
+
+  EnterCriticalSection(&viewer->gfx.lock);
+  disconnect =
+      viewer_gfx_failure_requires_disconnect(&viewer->gfx, viewer->activated);
+  LeaveCriticalSection(&viewer->gfx.lock);
+
+  if (!disconnect)
+    return viewer_gfx_enter_classic_fallback(server, viewer, now, reason);
+
+  peer = viewer->peer;
+  viewer->stop_requested = TRUE;
+  WLog_ERR(TAG,
+           "Viewer %u post-activation RDPEGFX failure; disconnecting for "
+           "classic reconnect reason=%s",
+           viewer->id, reason ? reason : "unspecified");
+  if (peer && peer->Disconnect)
+    peer->Disconnect(peer);
+  return FALSE;
+}
+
 static void viewer_gfx_reject_join(Viewer *viewer, const char *reason) {
   if (!viewer)
     return;
 
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer_gfx_set_join_state_locked(viewer, VIEWER_JOIN_STATE_REJECTED,
-                                   VIEWER_JOIN_STRATEGY_REJECT, reason);
-  LeaveCriticalSection(&viewer->gfx.lock);
+  viewer_gfx_pipeline_reject_join(viewer, reason);
   viewer->stop_requested = TRUE;
   WLog_ERR(TAG, "Viewer %u join rejected reason=%s", viewer->id,
            reason ? reason : "unspecified");
 }
 
-static BOOL viewer_gfx_send_surface_preamble(ViewerServer *server,
-                                             Viewer *viewer) {
-  ViewerGfxEvent *reset_event = NULL;
-  ViewerGfxEvent **create_events = NULL;
-  ViewerGfxEvent **map_events = NULL;
-  UINT32 active_surface_count = 0;
-  UINT32 mapped_surface_count = 0;
-  UINT32 create_index = 0;
-  UINT32 map_index = 0;
-  UINT32 i = 0;
-  BOOL ok = TRUE;
-  BOOL has_reset = FALSE;
+static BOOL viewer_gfx_send_framebuffer_baseline(ViewerServer *server,
+                                                 Viewer *viewer, UINT64 now) {
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerGfxJoinResult result = {0};
+  BOOL sent = FALSE;
 
   if (!server || !viewer)
     return FALSE;
 
-  EnterCriticalSection(&server->gfx.lock);
-  if (server->gfx.has_latest_reset_graphics) {
-    reset_event =
-        viewer_gfx_event_new_reset_graphics(&server->gfx.latest_reset_graphics);
-    if (!reset_event)
-      ok = FALSE;
-    has_reset = TRUE;
+  if (!viewer_publisher_classic_baseline_snapshot(
+          &server->publisher, &server->framebuffer, &snapshot)) {
+    WLog_WARN(TAG, "Viewer %u RDPEGFX baseline snapshot unavailable",
+              viewer->id);
+    return viewer_gfx_handle_failure(
+        server, viewer, now, "RDPEGFX framebuffer baseline unavailable");
   }
 
-  if (ok) {
-    for (i = 0; i < VIEWER_GFX_MAX_ACTIVE_SURFACES; i++) {
-      if (server->gfx.surfaces[i].in_use) {
-        active_surface_count++;
-        if (server->gfx.surfaces[i].mapped)
-          mapped_surface_count++;
-      }
-    }
+  sent = viewer_gfx_pipeline_send_snapshot(server, viewer, &snapshot);
+  viewer_framebuffer_snapshot_free(&snapshot);
 
-    if (active_surface_count > 0) {
-      create_events = (ViewerGfxEvent **)calloc(active_surface_count,
-                                                sizeof(ViewerGfxEvent *));
-      if (!create_events)
-        ok = FALSE;
-    }
-
-    if (ok && (mapped_surface_count > 0)) {
-      map_events = (ViewerGfxEvent **)calloc(mapped_surface_count,
-                                             sizeof(ViewerGfxEvent *));
-      if (!map_events)
-        ok = FALSE;
-    }
+  if (!sent) {
+    WLog_WARN(TAG, "Viewer %u RDPEGFX framebuffer baseline send failed",
+              viewer->id);
+    return viewer_gfx_handle_failure(
+        server, viewer, now, "RDPEGFX framebuffer baseline send failed");
   }
 
-  if (ok) {
-    for (i = 0; i < VIEWER_GFX_MAX_ACTIVE_SURFACES; i++) {
-      const ViewerGraphicsSurfaceState *surface = &server->gfx.surfaces[i];
-      if (!surface->in_use)
-        continue;
-
-      create_events[create_index] = viewer_gfx_event_new_simple(
-          VIEWER_GFX_EVENT_CREATE_SURFACE, &surface->create_surface,
-          sizeof(surface->create_surface));
-      if (!create_events[create_index++]) {
-        ok = FALSE;
-        break;
-      }
-
-      if (!surface->mapped)
-        continue;
-
-      map_events[map_index] =
-          viewer_gfx_event_new_simple(VIEWER_GFX_EVENT_MAP_SURFACE_TO_OUTPUT,
-                                      &surface->map_surface_to_output,
-                                      sizeof(surface->map_surface_to_output));
-      if (!map_events[map_index++]) {
-        ok = FALSE;
-        break;
-      }
-    }
-  }
-  LeaveCriticalSection(&server->gfx.lock);
-
-  if (!ok) {
-    WLog_WARN(TAG, "Viewer %u surface preamble build failed", viewer->id);
-    goto cleanup;
-  }
-
-  WLog_INFO(
-      TAG,
-      "Viewer %u sending surface preamble: reset=%d activeSurfaces=%" PRIu32
-      " mappedSurfaces=%" PRIu32,
-      viewer->id, has_reset ? 1 : 0, active_surface_count,
-      mapped_surface_count);
-
-  EnterCriticalSection(&viewer->send_lock);
-  if (reset_event && !viewer_send_gfx_event(viewer, reset_event))
-    ok = FALSE;
-
-  for (i = 0; ok && (i < active_surface_count); i++)
-    ok = viewer_send_gfx_event(viewer, create_events[i]);
-
-  for (i = 0; ok && (i < mapped_surface_count); i++)
-    ok = viewer_send_gfx_event(viewer, map_events[i]);
-  LeaveCriticalSection(&viewer->send_lock);
-
-  if (ok) {
-    WLog_INFO(TAG, "Viewer %u surface preamble sent successfully", viewer->id);
-  } else {
-    WLog_ERR(TAG, "Viewer %u surface preamble send failed", viewer->id);
-  }
-
-cleanup:
-  if (reset_event)
-    viewer_gfx_event_unref(reset_event);
-  if (create_events) {
-    for (i = 0; i < active_surface_count; i++)
-      viewer_gfx_event_unref(create_events[i]);
-    free(create_events);
-  }
-  if (map_events) {
-    for (i = 0; i < mapped_surface_count; i++)
-      viewer_gfx_event_unref(map_events[i]);
-    free(map_events);
-  }
-
-  return ok;
-}
-
-static BOOL viewer_gfx_bootstrap_direct_live(ViewerServer *server,
-                                             Viewer *viewer, UINT64 now,
-                                             const char *reason) {
-  if (!server || !viewer)
-    return FALSE;
-
-  WLog_INFO(
-      TAG,
-      "Viewer %u bootstrapping directly to LIVE via surface preamble reason=%s",
-      viewer->id, reason ? reason : "unspecified");
-
-  if (!viewer_gfx_send_surface_preamble(server, viewer)) {
-    WLog_ERR(TAG,
-             "Viewer %u direct bootstrap failed: surface preamble send error",
-             viewer->id);
-    return FALSE;
-  }
-
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer->gfx.join_start_ts = now;
-  viewer_gfx_finish_late_join_locked(viewer, reason);
-  LeaveCriticalSection(&viewer->gfx.lock);
+  viewer_gfx_pipeline_on_baseline_result(viewer, now, TRUE, &result);
 
   EnterCriticalSection(&viewer->send_lock);
   viewer->needs_full_refresh = FALSE;
   viewer->full_refresh_deadline_ts = 0;
   LeaveCriticalSection(&viewer->send_lock);
 
-  if (server->backend) {
-    (void)backend_request_full_refresh(server->backend);
+  WLog_INFO(TAG, "Viewer %u RDPEGFX framebuffer baseline sent", viewer->id);
+  if (result.actions & VIEWER_GFX_JOIN_ACTION_SEND_POINTER_BASELINE)
+    (void)viewer_forward_pointer(viewer, TRUE);
+  return TRUE;
+}
+
+static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
+                                             Viewer *viewer, UINT64 now) {
+  ViewerFramebufferSnapshot snapshot = {0};
+  ViewerGfxPendingDirtyBatch dirty_batch = {0};
+  const char *reason = NULL;
+  UINT64 last_sent_generation = 0;
+  UINT64 snapshot_generation = 0;
+  UINT64 estimated_payload_bytes = 0;
+  UINT64 max_in_flight_bytes = 0;
+  UINT64 full_area = 0;
+  UINT32 original_dirty_rect_count = 0;
+  UINT32 snapshot_dirty_rect_count = 0;
+  BOOL diagnostic_full_frame_dirty = FALSE;
+  BOOL selected_uncompressed = FALSE;
+  BOOL uncompressed_overload = FALSE;
+  const char *uncompressed_overload_reason = NULL;
+  ViewerGfxDirtySendStatus send_status = VIEWER_GFX_DIRTY_SEND_FAILED;
+
+  if (!server || !viewer || !server->viewer_gfx_enabled)
+    return TRUE;
+
+  if (viewer_gfx_pipeline_poll_dirty_pacing(viewer, now, &reason) !=
+      VIEWER_GFX_DIRTY_PACING_OK) {
+    UINT64 pending_area = 0;
+    UINT64 pending_start_generation = 0;
+    UINT64 pending_latest_generation = 0;
+    UINT64 fallback_count = 0;
+    UINT64 remerge_count = 0;
+    UINT64 in_flight_bytes = 0;
+    UINT32 in_flight_frames = 0;
+    UINT32 pending_rect_count = 0;
+
+    EnterCriticalSection(&viewer->gfx.lock);
+    in_flight_frames = viewer->gfx.dirty_in_flight_frames;
+    in_flight_bytes = viewer->gfx.dirty_in_flight_bytes;
+    pending_rect_count = viewer->gfx.pending_dirty_rect_count;
+    pending_area = viewer->gfx.pending_dirty_area;
+    pending_start_generation = viewer->gfx.pending_dirty_start_generation;
+    pending_latest_generation = viewer->gfx.pending_dirty_latest_generation;
+    fallback_count = viewer->gfx.dirty_diag_full_frame_fallbacks;
+    remerge_count = viewer->gfx.dirty_diag_remerges;
+    LeaveCriticalSection(&viewer->gfx.lock);
+    WLog_DBG(TAG,
+             "Viewer %u RDPEGFX dirty pacing suspended: reason=%s "
+             "in_flight_frames=%u in_flight_bytes=%" PRIu64
+             " pending_dirty_rects=%u pending_area=%" PRIu64
+             " pending_start_generation=%" PRIu64
+             " pending_latest_generation=%" PRIu64
+             " full_frame_fallbacks=%" PRIu64 " remerges=%" PRIu64,
+             viewer->id, reason ? reason : "unknown", in_flight_frames,
+             in_flight_bytes, pending_rect_count, pending_area,
+             pending_start_generation, pending_latest_generation,
+             fallback_count, remerge_count);
+    if (reason && (strcmp(reason, "dirty ack timeout") == 0))
+      return viewer_gfx_handle_failure(server, viewer, now, reason);
+    return TRUE;
+  }
+
+  EnterCriticalSection(&viewer->gfx.lock);
+  last_sent_generation = viewer->gfx.dirty_last_sent_generation;
+  diagnostic_full_frame_dirty =
+      server->viewer_gfx_diagnostic_full_frame_dirty &&
+      viewer->gfx.initialized && viewer->gfx.use_rdpgfx;
+  if (!viewer_gfx_pipeline_pending_dirty_move_locked(&viewer->gfx,
+                                                     &dirty_batch)) {
+    LeaveCriticalSection(&viewer->gfx.lock);
+    return TRUE;
+  }
+  LeaveCriticalSection(&viewer->gfx.lock);
+
+  if (!viewer_framebuffer_snapshot(&server->framebuffer, &snapshot)) {
+    EnterCriticalSection(&viewer->gfx.lock);
+    (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+        &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+    LeaveCriticalSection(&viewer->gfx.lock);
+    viewer_classic_queues_signal(&viewer->classic_queues);
+    return TRUE;
+  }
+
+  if (!viewer_gfx_pipeline_snapshot_apply_pending_dirty(&snapshot,
+                                                        &dirty_batch)) {
+    viewer_framebuffer_snapshot_free(&snapshot);
+    EnterCriticalSection(&viewer->gfx.lock);
+    (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+        &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+    LeaveCriticalSection(&viewer->gfx.lock);
+    viewer_classic_queues_signal(&viewer->classic_queues);
+    return TRUE;
+  }
+
+  snapshot_generation = snapshot.generation;
+  original_dirty_rect_count = snapshot.dirty_rect_count;
+  snapshot_dirty_rect_count = snapshot.dirty_rect_count;
+
+  EnterCriticalSection(&viewer->gfx.lock);
+  selected_uncompressed =
+      (viewer->gfx.selected_codec == VIEWER_GFX_CODEC_UNCOMPRESSED);
+  max_in_flight_bytes = viewer->gfx.dirty_max_in_flight_bytes;
+  LeaveCriticalSection(&viewer->gfx.lock);
+  if (max_in_flight_bytes == 0)
+    max_in_flight_bytes = VIEWER_GFX_DIRTY_MAX_IN_FLIGHT_BYTES;
+
+  full_area = (UINT64)snapshot.width * (UINT64)snapshot.height;
+  if (selected_uncompressed) {
+    if (!viewer_gfx_pipeline_estimate_uncompressed_dirty_payload(
+            &snapshot, &estimated_payload_bytes)) {
+      uncompressed_overload = TRUE;
+      uncompressed_overload_reason = "payload estimate failed";
+    } else if (estimated_payload_bytes > max_in_flight_bytes) {
+      uncompressed_overload = TRUE;
+      uncompressed_overload_reason = "estimated payload exceeds byte budget";
+    } else if ((full_area > 0) &&
+               (dirty_batch.area > ((full_area * 60ULL) / 100ULL))) {
+      uncompressed_overload = TRUE;
+      uncompressed_overload_reason = "dirty area exceeds threshold";
+    }
+  }
+
+  if (uncompressed_overload) {
+    BOOL baseline_sent = FALSE;
+
+    viewer_framebuffer_snapshot_free(&snapshot);
     WLog_INFO(TAG,
-              "Viewer %u requested backend full refresh after direct bootstrap",
-              viewer->id);
+              "Viewer %u RDPEGFX uncompressed dirty overload; sending "
+              "baseline instead: reason=%s generation=%" PRIu64
+              " dirty_rects=%u estimated_payload_bytes=%" PRIu64
+              " max_in_flight_bytes=%" PRIu64 " dirty_area=%" PRIu64
+              " surface=%ux%u",
+              viewer->id,
+              uncompressed_overload_reason ? uncompressed_overload_reason
+                                           : "unknown",
+              snapshot_generation, snapshot_dirty_rect_count,
+              estimated_payload_bytes, max_in_flight_bytes, dirty_batch.area,
+              dirty_batch.width, dirty_batch.height);
+    baseline_sent = viewer_gfx_send_framebuffer_baseline(server, viewer, now);
+    if (!baseline_sent) {
+      EnterCriticalSection(&viewer->gfx.lock);
+      (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+          &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+      LeaveCriticalSection(&viewer->gfx.lock);
+    }
+    return baseline_sent;
+  }
+  if (dirty_batch.full_frame_reason &&
+      ((strcmp(dirty_batch.full_frame_reason,
+               "pending rectangle count threshold") == 0) ||
+       (strcmp(dirty_batch.full_frame_reason, "pending area threshold") ==
+        0))) {
+    WLog_INFO(TAG,
+              "Viewer %u RDPEGFX threshold full-frame dirty fallback: "
+              "generation=%" PRIu64 " reason=%s width=%u height=%u",
+              viewer->id, snapshot_generation, dirty_batch.full_frame_reason,
+              dirty_batch.width, dirty_batch.height);
+  }
+
+  if (diagnostic_full_frame_dirty) {
+    if (viewer_publisher_make_full_frame_dirty(&snapshot)) {
+      WLog_INFO(TAG,
+                "Viewer %u RDPEGFX diagnostic full-frame dirty forced: "
+                "generation=%" PRIu64 " original_dirty_rects=%u width=%u "
+                "height=%u",
+                viewer->id, snapshot_generation, original_dirty_rect_count,
+                snapshot.width, snapshot.height);
+    } else {
+      WLog_DBG(TAG,
+               "Viewer %u RDPEGFX diagnostic full-frame dirty skipped: "
+               "generation=%" PRIu64 " original_dirty_rects=%u width=%u "
+               "height=%u",
+               viewer->id, snapshot_generation, original_dirty_rect_count,
+               snapshot.width, snapshot.height);
+    }
+    snapshot_dirty_rect_count = snapshot.dirty_rect_count;
+  }
+
+  if (!viewer_gfx_pipeline_dirty_update_allowed(server, viewer, &snapshot,
+                                                &reason)) {
+    UINT64 pending_area = 0;
+    UINT64 pending_start_generation = 0;
+    UINT64 pending_latest_generation = 0;
+    UINT64 fallback_count = 0;
+    UINT64 remerge_count = 0;
+    UINT32 pending_rect_count = 0;
+
+    viewer_framebuffer_snapshot_free(&snapshot);
+    EnterCriticalSection(&viewer->gfx.lock);
+    (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+        &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+    pending_rect_count = viewer->gfx.pending_dirty_rect_count;
+    pending_area = viewer->gfx.pending_dirty_area;
+    pending_start_generation = viewer->gfx.pending_dirty_start_generation;
+    pending_latest_generation = viewer->gfx.pending_dirty_latest_generation;
+    fallback_count = viewer->gfx.dirty_diag_full_frame_fallbacks;
+    remerge_count = viewer->gfx.dirty_diag_remerges;
+    LeaveCriticalSection(&viewer->gfx.lock);
+    WLog_DBG(TAG,
+             "Viewer %u RDPEGFX dirty update not sent: reason=%s "
+             "generation=%" PRIu64 " last_sent_generation=%" PRIu64
+             " dirty_rects=%u moved_batch_generation=%" PRIu64
+             " pending_dirty_rects=%u pending_area=%" PRIu64
+             " pending_start_generation=%" PRIu64
+             " pending_latest_generation=%" PRIu64
+             " full_frame_fallbacks=%" PRIu64 " remerges=%" PRIu64,
+             viewer->id, reason ? reason : "not allowed", snapshot_generation,
+             last_sent_generation, snapshot_dirty_rect_count,
+             dirty_batch.latest_generation, pending_rect_count, pending_area,
+             pending_start_generation, pending_latest_generation,
+             fallback_count, remerge_count);
+    viewer_classic_queues_signal(&viewer->classic_queues);
+    return TRUE;
+  }
+
+  send_status =
+      viewer_gfx_pipeline_send_dirty_update_result(server, viewer, &snapshot);
+  viewer_framebuffer_snapshot_free(&snapshot);
+
+  if (send_status == VIEWER_GFX_DIRTY_SEND_FAILED)
+    return viewer_gfx_handle_failure(server, viewer, now,
+                                     "RDPEGFX dirty update send failed");
+
+  if (send_status == VIEWER_GFX_DIRTY_SEND_DEFERRED) {
+    BOOL forced_full_frame = FALSE;
+    UINT64 fallback_generation = 0;
+    UINT64 pending_area = 0;
+    UINT64 pending_start_generation = 0;
+    UINT64 pending_latest_generation = 0;
+    UINT64 fallback_count = 0;
+    UINT64 remerge_count = 0;
+    UINT32 fallback_width = 0;
+    UINT32 fallback_height = 0;
+    UINT32 pending_rect_count = 0;
+
+    EnterCriticalSection(&viewer->gfx.lock);
+    (void)viewer_gfx_pipeline_pending_dirty_remerge_locked(
+        &viewer->gfx, &dirty_batch, dirty_batch.width, dirty_batch.height);
+    forced_full_frame =
+        viewer_gfx_pipeline_note_dirty_deferred_locked(&viewer->gfx);
+    if (forced_full_frame) {
+      fallback_generation = viewer->gfx.pending_dirty_latest_generation;
+      fallback_width = viewer->gfx.pending_dirty_width;
+      fallback_height = viewer->gfx.pending_dirty_height;
+    }
+    pending_rect_count = viewer->gfx.pending_dirty_rect_count;
+    pending_area = viewer->gfx.pending_dirty_area;
+    pending_start_generation = viewer->gfx.pending_dirty_start_generation;
+    pending_latest_generation = viewer->gfx.pending_dirty_latest_generation;
+    fallback_count = viewer->gfx.dirty_diag_full_frame_fallbacks;
+    remerge_count = viewer->gfx.dirty_diag_remerges;
+    LeaveCriticalSection(&viewer->gfx.lock);
+    WLog_DBG(TAG,
+             "Viewer %u RDPEGFX dirty update deferred: reason=%s "
+             "generation=%" PRIu64 " sent_generation=%" PRIu64
+             " last_sent_generation=%" PRIu64 " dirty_rects=%u"
+             " moved_batch_generation=%" PRIu64
+             " pending_dirty_rects=%u pending_area=%" PRIu64
+             " pending_start_generation=%" PRIu64
+             " pending_latest_generation=%" PRIu64
+             " full_frame_fallbacks=%" PRIu64 " remerges=%" PRIu64,
+             viewer->id, "dirty send deferred", snapshot_generation,
+             snapshot_generation, last_sent_generation,
+             snapshot_dirty_rect_count, dirty_batch.latest_generation,
+             pending_rect_count, pending_area, pending_start_generation,
+             pending_latest_generation, fallback_count, remerge_count);
+    if (forced_full_frame) {
+      WLog_INFO(TAG,
+                "Viewer %u RDPEGFX threshold full-frame dirty fallback: "
+                "generation=%" PRIu64
+                " reason=consecutive deferred dirty sends width=%u height=%u",
+                viewer->id, fallback_generation, fallback_width,
+                fallback_height);
+    }
+    viewer_classic_queues_signal(&viewer->classic_queues);
   }
 
   return TRUE;
@@ -3765,161 +1722,18 @@ static BOOL viewer_gfx_bootstrap_direct_live(ViewerServer *server,
 
 static BOOL viewer_gfx_step_join(ViewerServer *server, Viewer *viewer,
                                  UINT64 now) {
-  ViewerJoinState state = VIEWER_JOIN_STATE_NONE;
-  ViewerJoinStrategy strategy = VIEWER_JOIN_STRATEGY_NONE;
-  UINT32 target_frame_id = 0;
-  UINT64 refresh_generation = 0;
-  ViewerGfxCompleteFrame *frame = NULL;
-  BackendFullRefreshState refresh_state = {0};
+  ViewerGfxJoinResult result = {0};
 
   if (!server || !viewer)
     return FALSE;
 
-  EnterCriticalSection(&viewer->gfx.lock);
-  if (!viewer_gfx_handshake_ready_locked(viewer)) {
-    LeaveCriticalSection(&viewer->gfx.lock);
-    return TRUE;
-  }
+  viewer_gfx_pipeline_step_join(server, viewer, now, &result);
+  if (result.actions & VIEWER_GFX_JOIN_ACTION_ENTER_CLASSIC_FALLBACK)
+    return viewer_gfx_handle_failure(server, viewer, now,
+                                     result.classic_fallback_reason);
 
-  state = viewer->gfx.join_state;
-  strategy = viewer->gfx.join_strategy;
-  target_frame_id = viewer->gfx.join_target_frame_id;
-  refresh_generation = viewer->gfx.join_refresh_generation;
-  LeaveCriticalSection(&viewer->gfx.lock);
-
-  if (state == VIEWER_JOIN_STATE_LIVE)
-    return TRUE;
-
-  if (state == VIEWER_JOIN_STATE_WAIT_REPLAY_ACK) {
-    if (viewer_late_join_timeout_fallback_due(
-            VIEWER_JOIN_STRATEGY_REPLAY_SAFE_FRAME, viewer->gfx.join_start_ts,
-            now, VIEWER_WAIT_REPLAY_ACK_TIMEOUT_MS, TRUE)) {
-      if (refresh_generation == 0)
-        return viewer_gfx_request_backend_refresh(server, viewer, now,
-                                                  "replay ack timeout");
-      return viewer_gfx_enter_classic_fallback(
-          server, viewer, now, "replay ack timeout after backend refresh");
-    }
-    return TRUE;
-  }
-
-  if ((state == VIEWER_JOIN_STATE_PENDING) ||
-      (state == VIEWER_JOIN_STATE_WAIT_NEXT_SAFE_FRAME) ||
-      (state == VIEWER_JOIN_STATE_WAIT_BACKEND_REFRESH)) {
-    (void)viewer_gfx_try_schedule_late_join_replay_locked(server, viewer, now);
-    EnterCriticalSection(&viewer->gfx.lock);
-    state = viewer->gfx.join_state;
-    strategy = viewer->gfx.join_strategy;
-    target_frame_id = viewer->gfx.join_target_frame_id;
-    refresh_generation = viewer->gfx.join_refresh_generation;
-    if ((state == VIEWER_JOIN_STATE_PENDING) &&
-        (strategy == VIEWER_JOIN_STRATEGY_NONE)) {
-      if (!viewer_gfx_handshake_ready_locked(viewer)) {
-        LeaveCriticalSection(&viewer->gfx.lock);
-        return FALSE;
-      }
-    }
-    LeaveCriticalSection(&viewer->gfx.lock);
-  }
-
-  if ((strategy == VIEWER_JOIN_STRATEGY_REPLAY_SAFE_FRAME) &&
-      (target_frame_id != 0)) {
-    frame = viewer_gfx_lookup_replay_frame(server, target_frame_id);
-    if (!frame) {
-      if (refresh_generation == 0)
-        return viewer_gfx_request_backend_refresh(
-            server, viewer, now, "selected replay frame unavailable");
-      return viewer_gfx_enter_classic_fallback(
-          server, viewer, now,
-          "selected replay frame unavailable after backend refresh");
-    }
-
-    if (!viewer_gfx_replay_frame(server, viewer, frame)) {
-      viewer_gfx_complete_frame_unref(frame);
-      viewer_gfx_reject_join(viewer, "replay baseline send failed");
-      return FALSE;
-    }
-
-    viewer_gfx_complete_frame_unref(frame);
-    return TRUE;
-  }
-
-  if (state == VIEWER_JOIN_STATE_WAIT_NEXT_SAFE_FRAME) {
-    if (viewer_late_join_timeout_fallback_due(
-            VIEWER_JOIN_STRATEGY_WAIT_NEXT_SAFE_FRAME,
-            viewer->gfx.join_start_ts, now, FULL_REFRESH_TIMEOUT_MS, FALSE)) {
-      /* No replay-safe frame arrived within the timeout window.
-       * The
-       * backend refresh mechanism (RefreshRect) is a classic-RDP
-       * path
-       * that does not work on GFX-only backends. Instead of
-       * waiting
-       * for a backend refresh that will never complete,
-       * bootstrap
-       * directly to LIVE via surface preamble. The viewer
-       * receives a
-       * blank screen initially but will start receiving
-       * frames as soon
-       * as the desktop changes. */
-      if (refresh_generation == 0)
-        return viewer_gfx_bootstrap_direct_live(
-            server, viewer, now, "no replay baseline after timeout");
-      return viewer_gfx_enter_classic_fallback(
-          server, viewer, now,
-          "wait-next-safe-frame timeout after backend refresh");
-    }
-    return TRUE;
-  }
-
-  if (state == VIEWER_JOIN_STATE_WAIT_BACKEND_REFRESH) {
-    if (backend_abandon_full_refresh_if_timed_out(
-            server->backend, refresh_generation,
-            VIEWER_GFX_BACKEND_REFRESH_TIMEOUT_MS))
-      return viewer_gfx_enter_classic_fallback(server, viewer, now,
-                                               "backend refresh timed out");
-
-    backend_get_full_refresh_state(server->backend, &refresh_state);
-    if ((refresh_state.completed_generation >= refresh_generation) &&
-        (refresh_state.completed_outcome !=
-         BACKEND_FULL_REFRESH_OUTCOME_NONE)) {
-      if (refresh_state.completed_outcome ==
-          BACKEND_FULL_REFRESH_OUTCOME_COMPLETED) {
-        WLog_INFO(TAG,
-                  "Viewer %u backend refresh generation=%" PRIu64
-                  " completed; bootstrapping via surface preamble",
-                  viewer->id, refresh_generation);
-        if (!viewer_gfx_send_surface_preamble(server, viewer)) {
-          return viewer_gfx_enter_classic_fallback(
-              server, viewer, now,
-              "surface preamble failed after backend refresh");
-        }
-        EnterCriticalSection(&viewer->gfx.lock);
-        viewer_gfx_finish_late_join_locked(
-            viewer, "backend refresh completed; live stream enabled via "
-                    "surface preamble");
-        LeaveCriticalSection(&viewer->gfx.lock);
-        EnterCriticalSection(&viewer->send_lock);
-        viewer->needs_full_refresh = FALSE;
-        viewer->full_refresh_deadline_ts = 0;
-        LeaveCriticalSection(&viewer->send_lock);
-        if (server->backend) {
-          (void)backend_request_full_refresh(server->backend);
-          WLog_INFO(TAG,
-                    "Viewer %u requested follow-up backend refresh after "
-                    "preamble bootstrap",
-                    viewer->id);
-        }
-        return TRUE;
-      }
-
-      return viewer_gfx_enter_classic_fallback(
-          server, viewer, now, "backend refresh failed or timed out");
-    }
-  }
-
-  if (strategy == VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK)
-    return viewer_gfx_enter_classic_fallback(server, viewer, now,
-                                             "caps or handshake fallback");
+  if (result.actions & VIEWER_GFX_JOIN_ACTION_SEND_BASELINE)
+    return viewer_gfx_send_framebuffer_baseline(server, viewer, now);
 
   return TRUE;
 }
@@ -3983,6 +1797,9 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
     HANDLE wait_objects[MAXIMUM_WAIT_OBJECTS] = {0};
     DWORD wait_count = 0;
     DWORD wait_status = WAIT_FAILED;
+    ViewerGfxPipelineCapsResult caps_result = {0};
+    BOOL caps_enter_classic_fallback = FALSE;
+    const char *caps_classic_fallback_reason = NULL;
 
     EnterCriticalSection(&viewer->send_lock);
     if (viewer->needs_full_refresh && (viewer->full_refresh_deadline_ts > 0) &&
@@ -4032,10 +1849,7 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
       break;
 
     EnterCriticalSection(&viewer->gfx.lock);
-    if ((viewer->gfx.join_state == VIEWER_JOIN_STATE_WAIT_NEXT_SAFE_FRAME) ||
-        (viewer->gfx.join_state == VIEWER_JOIN_STATE_WAIT_BACKEND_REFRESH) ||
-        (viewer->gfx.join_state == VIEWER_JOIN_STATE_WAIT_REPLAY_ACK) ||
-        (viewer->gfx.join_state == VIEWER_JOIN_STATE_PENDING))
+    if (viewer->gfx.join_state == VIEWER_JOIN_STATE_PENDING)
       wait_timeout_ms = 50;
     else {
       /* Use a short periodic timeout even when LIVE so that the GFX
@@ -4065,8 +1879,10 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
       /* Add classic_event to the wait set so the viewer thread wakes
        *
        * immediately when a bitmap update is enqueued (Option B). */
-      if (viewer->classic_event && (wait_count < MAXIMUM_WAIT_OBJECTS)) {
-        wait_objects[wait_count] = viewer->classic_event;
+      if (viewer_classic_queues_event(&viewer->classic_queues) &&
+          (wait_count < MAXIMUM_WAIT_OBJECTS)) {
+        wait_objects[wait_count] =
+            viewer_classic_queues_event(&viewer->classic_queues);
         wait_count++;
       }
 
@@ -4078,8 +1894,7 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
         break;
 
       /* Reset the classic event signal — we'll drain the queue below */
-      if (viewer->classic_event)
-        ResetEvent(viewer->classic_event);
+      viewer_classic_queues_reset_event(&viewer->classic_queues);
     } else if (peer && peer->CheckFileDescriptor) {
       if (!peer->CheckFileDescriptor(peer))
         break;
@@ -4116,25 +1931,16 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
                   (unsigned)drdynvc_state);
       }
 
-      if ((drdynvc_state == DRDYNVC_STATE_READY) && viewer->gfx.rdpgfx &&
-          !viewer->gfx.channel_opened &&
-          !viewer->gfx.rdpgfx_temporarily_disabled) {
-        WLog_INFO(TAG, "Viewer %u attempting RDPEGFX Open", viewer->id);
-        if (!viewer->gfx.rdpgfx->Open(viewer->gfx.rdpgfx)) {
-          viewer_disable_rdpgfx_locked(viewer);
+      if (drdynvc_state == DRDYNVC_STATE_READY) {
+        if (!viewer_gfx_pipeline_open_if_ready_locked(viewer)) {
           LeaveCriticalSection(&viewer->gfx.lock);
-          WLog_WARN(TAG, "Viewer %u RDPEGFX Open failed", viewer->id);
-          (void)viewer_gfx_enter_classic_fallback(
-              g_viewer_server, viewer, now, "RDPEGFX channel open failed");
+          (void)viewer_gfx_handle_failure(g_viewer_server, viewer, now,
+                                          "RDPEGFX channel open failed");
           continue;
         }
-        viewer->gfx.channel_opened = TRUE;
-        WLog_INFO(TAG, "Viewer %u RDPEGFX Open succeeded", viewer->id);
       }
 
-      gfx_event = viewer->gfx.rdpgfx
-                      ? rdpgfx_server_get_event_handle(viewer->gfx.rdpgfx)
-                      : NULL;
+      gfx_event = viewer_gfx_pipeline_get_event_handle_locked(viewer);
     } else {
       gfx_event = NULL;
     }
@@ -4142,22 +1948,32 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
 
     if (gfx_event && (WaitForSingleObject(gfx_event, 0) == WAIT_OBJECT_0)) {
       EnterCriticalSection(&viewer->gfx.lock);
-      if (viewer->gfx.rdpgfx && (rdpgfx_server_handle_messages(
-                                     viewer->gfx.rdpgfx) != CHANNEL_RC_OK)) {
-        viewer_disable_rdpgfx_locked(viewer);
+      if (!viewer_gfx_pipeline_handle_messages_locked(viewer, &caps_result)) {
         LeaveCriticalSection(&viewer->gfx.lock);
         WLog_WARN(TAG,
-                  "Viewer %u RDPEGFX message handling failed; falling back to "
-                  "classic path",
+                  "Viewer %u RDPEGFX message handling failed; applying "
+                  "failure policy",
                   viewer->id);
-        (void)viewer_gfx_enter_classic_fallback(
-            g_viewer_server, viewer, now, "RDPEGFX message handling failed");
+        (void)viewer_gfx_handle_failure(g_viewer_server, viewer, now,
+                                        "RDPEGFX message handling failed");
         continue;
       }
+      viewer_gfx_apply_caps_result_locked(g_viewer_server, viewer, &caps_result,
+                                          now, &caps_enter_classic_fallback,
+                                          &caps_classic_fallback_reason);
       LeaveCriticalSection(&viewer->gfx.lock);
+      if (caps_enter_classic_fallback) {
+        (void)viewer_gfx_handle_failure(g_viewer_server, viewer, now,
+                                        caps_classic_fallback_reason);
+        continue;
+      }
     }
 
     if (g_viewer_server && !viewer_gfx_step_join(g_viewer_server, viewer, now))
+      break;
+
+    if (g_viewer_server &&
+        !viewer_gfx_try_send_dirty_update(g_viewer_server, viewer, now))
       break;
 
     if (!viewer_pump_gfx(viewer))
@@ -4167,13 +1983,11 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
     if (!viewer_pump_classic(viewer))
       break;
 
-    /* viewer_forward_pointer disabled: cursor position forwarding to viewers
-
-     * * without input lock is not reliable and causes complexity. Viewer
-     * cursor
-     * position comes from the RDP server via on_pointer_position
-     * callbacks. */
-    /* (void)viewer_forward_pointer(viewer, FALSE); */
+    // Ongoing pointer forwarding applies to activated classic and RDPEGFX
+    // viewers; viewer_forward_pointer uses pointer generation checks and the
+    // pointer transport boundary to avoid resending unchanged shape/position
+    // state.
+    (void)viewer_forward_pointer(viewer, FALSE);
 
     if (peer->IsWriteBlocked && peer->IsWriteBlocked(peer) &&
         peer->DrainOutputBuffer) {
@@ -4210,7 +2024,6 @@ static DWORD WINAPI viewer_handle_peer(LPVOID arg) {
 
 static BOOL peer_post_connect(freerdp_peer *peer) {
   Viewer *viewer = find_viewer_by_peer(peer);
-  RdpgfxServerContext *rdpgfx = NULL;
   BOOL gfx_enabled = FALSE;
 
   if (!viewer)
@@ -4223,66 +2036,21 @@ static BOOL peer_post_connect(freerdp_peer *peer) {
     gfx_enabled = freerdp_settings_get_bool(peer->context->settings,
                                             FreeRDP_SupportGraphicsPipeline);
 
+  if (g_viewer_server && !g_viewer_server->viewer_gfx_enabled)
+    gfx_enabled = FALSE;
+
   WLog_INFO(TAG, "Viewer %u peer_post_connect: GraphicsPipeline=%d", viewer->id,
             gfx_enabled);
-
-  /* Force-disable GFX if the backend doesn't use it. The viewer-side
-   *
-   * setting may not propagate correctly through FreeRDP's server
-   *
-   * initialization. */
-  if (g_viewer_server && g_viewer_server->backend &&
-      g_viewer_server->backend->context &&
-      g_viewer_server->backend->context->settings) {
-    BOOL backend_gfx =
-        freerdp_settings_get_bool(g_viewer_server->backend->context->settings,
-                                  FreeRDP_SupportGraphicsPipeline);
-    if (!backend_gfx)
-      gfx_enabled = FALSE;
-  }
 
   EnterCriticalSection(&viewer->gfx.lock);
   viewer_graphics_context_reset(
       &viewer->gfx, g_viewer_server ? g_viewer_server->backend : NULL);
 
-  /* Create VCM here after peer->Initialize has populated context->rdp */
-  viewer->gfx.vcm = WTSOpenServerA((LPSTR)peer->context);
-  if (!viewer->gfx.vcm || (viewer->gfx.vcm == INVALID_HANDLE_VALUE)) {
-    LeaveCriticalSection(&viewer->gfx.lock);
-    WLog_ERR(TAG, "Viewer %u WTSOpenServerA failed in post_connect",
-             viewer->id);
-    return FALSE;
-  }
-
-  if (!gfx_enabled) {
-    WLog_INFO(TAG,
-              "Viewer %u RDPEGFX disabled; using classic SurfaceBits path only",
-              viewer->id);
-    viewer->gfx.rdpgfx = NULL;
-    viewer->gfx.post_connect_complete = TRUE;
-    viewer->gfx.negotiation_outcome = VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK;
-    LeaveCriticalSection(&viewer->gfx.lock);
-    return TRUE;
-  }
-
-  rdpgfx = rdpgfx_server_context_new(viewer->gfx.vcm);
-  if (!rdpgfx) {
+  if (!viewer_gfx_pipeline_post_connect_locked(g_viewer_server, viewer, peer,
+                                               gfx_enabled)) {
     LeaveCriticalSection(&viewer->gfx.lock);
     return FALSE;
   }
-
-  rdpgfx->custom = viewer;
-  rdpgfx->rdpcontext = peer->context;
-  rdpgfx->CapsAdvertise = viewer_rdpgfx_caps_advertise;
-  rdpgfx->FrameAcknowledge = viewer_rdpgfx_frame_acknowledge;
-  if (!rdpgfx->Initialize(rdpgfx, TRUE)) {
-    rdpgfx_server_context_free(rdpgfx);
-    LeaveCriticalSection(&viewer->gfx.lock);
-    return FALSE;
-  }
-
-  viewer->gfx.rdpgfx = rdpgfx;
-  viewer->gfx.post_connect_complete = TRUE;
   LeaveCriticalSection(&viewer->gfx.lock);
   return TRUE;
 }
@@ -4291,15 +2059,16 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
                             const SEC_WINNT_AUTH_IDENTITY *identity,
                             BOOL automatic) {
   ViewerServer *server = g_viewer_server;
-  char *viewer_user = NULL;
-  char *viewer_domain = NULL;
-  char *viewer_password = NULL;
-  const char *comparison_user = NULL;
-  const char *comparison_domain = NULL;
+  ViewerAuthCredentials identity_credentials = {0};
+  ViewerAuthCredentials settings_credentials = {0};
+  ViewerAuthCredentials selected_credentials = {0};
+  ViewerAuthSelection selection = {0};
+  Viewer *viewer = NULL;
   const char *credential_source = "none";
+  const char *viewer_user = "";
+  const char *viewer_domain = "";
+  const char *viewer_password = "";
   BOOL accepted = FALSE;
-
-  (void)automatic;
 
   if (!peer || !server) {
     WLog_WARN(TAG, "Viewer-side logon rejected: missing peer or server");
@@ -4310,8 +2079,13 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
             viewer_auth_mode_name(server->security.auth_mode),
             server->security.nla_enabled ? "true" : "false");
 
-  if (server->security.auth_mode == VIEWER_AUTH_MODE_NONE)
+  viewer = find_viewer_by_peer(peer);
+
+  if (server->security.auth_mode == VIEWER_AUTH_MODE_NONE) {
+    if (viewer)
+      viewer->auth_state = VIEWER_AUTH_STATE_ACCEPTED;
     return TRUE;
+  }
 
   if ((server->security.auth_mode == VIEWER_AUTH_MODE_BACKEND_CREDENTIALS) &&
       !server->backend) {
@@ -4323,22 +2097,66 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
     return FALSE;
   }
 
-  if (viewer_settings_credentials_to_utf8(peer, &viewer_user, &viewer_domain,
-                                          &viewer_password)) {
-    credential_source = "settings";
-  } else if (viewer_identity_credentials_to_utf8(
-                 identity, &viewer_user, &viewer_domain, &viewer_password)) {
-    credential_source = "identity";
-  } else {
-    viewer_user = _strdup("");
-    viewer_domain = _strdup("");
-    viewer_password = _strdup("");
-    credential_source = "none";
+  if (viewer_auth_should_defer_backend_credentials(server->security.nla_enabled,
+                                                   automatic)) {
+    if (!viewer) {
+      WLog_WARN(TAG,
+                "Viewer-side logon rejected: unable to defer auth without "
+                "viewer slot auth_mode=%s nla_enabled=false",
+                viewer_auth_mode_name(server->security.auth_mode));
+      return FALSE;
+    }
+
+    viewer->auth_state = VIEWER_AUTH_STATE_DEFERRED;
+    viewer->auth_deferred_required = TRUE;
+    viewer->auth_deferred_checked = FALSE;
+    viewer->auth_deferred_accepted = FALSE;
+    WLog_INFO(TAG,
+              "Viewer-side logon provisionally accepted pending deferred "
+              "settings credentials auth_mode=%s nla_enabled=false "
+              "credential_source=settings",
+              viewer_auth_mode_name(server->security.auth_mode));
+    return TRUE;
   }
 
-  if (!viewer_user || !viewer_domain || !viewer_password) {
+  (void)viewer_identity_credentials_to_utf8(identity, &identity_credentials);
+  (void)viewer_settings_credentials_to_utf8(peer, &settings_credentials);
+
+  selection = viewer_auth_select_credentials(&identity_credentials,
+                                             &settings_credentials,
+                                             server->security.nla_enabled);
+  credential_source = selection.source ? selection.source : "none";
+  if (!selection.credentials) {
+    WLog_WARN(
+        TAG,
+        "Viewer-side logon rejected: no usable credentials auth_mode=%s "
+        "nla_enabled=%s credential_source=%s identity_username_present=%s "
+        "identity_domain_present=%s identity_password_present=%s "
+        "settings_username_present=%s settings_domain_present=%s "
+        "settings_password_present=%s",
+        viewer_auth_mode_name(server->security.auth_mode),
+        server->security.nla_enabled ? "true" : "false", credential_source,
+        viewer_string_has_value(identity_credentials.username) ? "true"
+                                                               : "false",
+        viewer_string_has_value(identity_credentials.domain) ? "true" : "false",
+        viewer_string_has_value(identity_credentials.password) ? "true"
+                                                               : "false",
+        viewer_string_has_value(settings_credentials.username) ? "true"
+                                                               : "false",
+        viewer_string_has_value(settings_credentials.domain) ? "true" : "false",
+        viewer_string_has_value(settings_credentials.password) ? "true"
+                                                               : "false");
+    goto out;
+  }
+
+  selected_credentials.username = _strdup(selection.credentials->username);
+  selected_credentials.domain = _strdup(
+      selection.credentials->domain ? selection.credentials->domain : "");
+  selected_credentials.password = _strdup(selection.credentials->password);
+  if (!selected_credentials.username || !selected_credentials.domain ||
+      !selected_credentials.password) {
     WLog_WARN(TAG,
-              "Viewer-side logon rejected: failed to read credentials "
+              "Viewer-side logon rejected: failed to copy credentials "
               "auth_mode=%s nla_enabled=%s credential_source=%s",
               viewer_auth_mode_name(server->security.auth_mode),
               server->security.nla_enabled ? "true" : "false",
@@ -4346,49 +2164,68 @@ static BOOL on_viewer_logon(freerdp_peer *peer,
     goto out;
   }
 
-  comparison_user = server->backend->username;
-  comparison_domain = server->backend->domain;
+  if (!viewer_auth_normalize_domain_user(&selected_credentials)) {
+    WLog_WARN(TAG,
+              "Viewer-side logon rejected: failed to normalize credentials "
+              "auth_mode=%s nla_enabled=%s credential_source=%s",
+              viewer_auth_mode_name(server->security.auth_mode),
+              server->security.nla_enabled ? "true" : "false",
+              credential_source);
+    goto out;
+  }
+
+  viewer_user =
+      selected_credentials.username ? selected_credentials.username : "";
+  viewer_domain =
+      selected_credentials.domain ? selected_credentials.domain : "";
+  viewer_password =
+      selected_credentials.password ? selected_credentials.password : "";
+
   accepted = viewer_backend_credentials_match(server->backend, viewer_user,
                                               viewer_domain, viewer_password);
   if (accepted) {
+    if (viewer)
+      viewer->auth_state = VIEWER_AUTH_STATE_ACCEPTED;
     WLog_INFO(TAG,
               "Viewer-side logon accepted auth_mode=%s nla_enabled=%s "
-              "credential_source=%s "
-              "username_present=%s domain_present=%s password_present=%s "
-              "viewer='%s%s%s' comparison_user='%s' comparison_domain='%s'",
+              "credential_source=%s username_present=%s domain_present=%s "
+              "password_present=%s",
               viewer_auth_mode_name(server->security.auth_mode),
               server->security.nla_enabled ? "true" : "false",
               credential_source, viewer_user[0] ? "true" : "false",
               viewer_domain[0] ? "true" : "false",
-              viewer_password[0] ? "true" : "false", viewer_domain,
-              viewer_domain[0] ? "\\" : "", viewer_user, comparison_user,
-              viewer_comparison_domain_label(comparison_domain));
+              viewer_password[0] ? "true" : "false");
   } else {
+    if (viewer)
+      viewer->auth_state = VIEWER_AUTH_STATE_REJECTED;
     WLog_WARN(TAG,
               "Viewer-side logon rejected: credentials mismatch auth_mode=%s "
               "nla_enabled=%s credential_source=%s username_present=%s "
-              "domain_present=%s "
-              "password_present=%s comparison_user='%s' comparison_domain='%s'",
+              "domain_present=%s password_present=%s",
               viewer_auth_mode_name(server->security.auth_mode),
               server->security.nla_enabled ? "true" : "false",
               credential_source, viewer_user[0] ? "true" : "false",
               viewer_domain[0] ? "true" : "false",
-              viewer_password[0] ? "true" : "false", comparison_user,
-              viewer_comparison_domain_label(comparison_domain));
+              viewer_password[0] ? "true" : "false");
   }
 
 out:
-  free(viewer_user);
-  free(viewer_domain);
-  free(viewer_password);
+  if (!accepted && viewer && (viewer->auth_state != VIEWER_AUTH_STATE_ACCEPTED))
+    viewer->auth_state = VIEWER_AUTH_STATE_REJECTED;
+  viewer_auth_credentials_clear(&identity_credentials);
+  viewer_auth_credentials_clear(&settings_credentials);
+  viewer_auth_credentials_clear(&selected_credentials);
   return accepted;
 }
 
 static BOOL peer_activate(freerdp_peer *peer) {
   Viewer *viewer = find_viewer_by_peer(peer);
   UINT64 now = platform_get_timestamp_ms();
+  ViewerGfxJoinResult join_result = {0};
   ViewerGfxNegotiationOutcome negotiation_outcome =
       VIEWER_GFX_NEGOTIATION_PENDING;
+  BOOL classic_activation = FALSE;
+  BOOL suppress_activation_pointer = FALSE;
 
   if (!viewer)
     return FALSE;
@@ -4400,39 +2237,43 @@ static BOOL peer_activate(freerdp_peer *peer) {
       platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
   LeaveCriticalSection(&viewer->send_lock);
 
-  EnterCriticalSection(&viewer->gfx.lock);
-  viewer->gfx.ready = TRUE;
-  negotiation_outcome = viewer->gfx.negotiation_outcome;
-  if (viewer_gfx_negotiation_is_rdpgfx_ready(&viewer->gfx))
-    viewer_gfx_begin_join_locked(viewer, now,
-                                 "peer activated for RDPEGFX late join");
-  else if (viewer_gfx_activation_waits_for_rdpgfx_caps(&viewer->gfx))
-    viewer_gfx_begin_join_locked(
-        viewer, now, "peer activated waiting for RDPEGFX caps confirmation");
-  else {
-    viewer->gfx.join_start_ts = now;
-    viewer_gfx_finish_late_join_locked(viewer,
-                                       "peer activated on classic path");
-    /* Classic path doesn't need a full refresh gate. SurfaceBits
-     * arrive
-     * continuously from the backend — just start receiving
-     * them
-     * immediately. */
+  if (!viewer_gfx_pipeline_activate(g_viewer_server, viewer))
+    return FALSE;
+
+  viewer_gfx_pipeline_on_peer_activated(viewer, now, &join_result);
+  if (join_result.actions & VIEWER_GFX_JOIN_ACTION_ENQUEUE_CLASSIC_BASELINE) {
+    EnterCriticalSection(&viewer->send_lock);
     viewer->needs_full_refresh = FALSE;
     viewer->full_refresh_deadline_ts = 0;
+    LeaveCriticalSection(&viewer->send_lock);
+    classic_activation = TRUE;
   }
+  EnterCriticalSection(&viewer->gfx.lock);
+  negotiation_outcome = viewer->gfx.negotiation_outcome;
+  suppress_activation_pointer =
+      g_viewer_server && g_viewer_server->viewer_gfx_enabled &&
+      (viewer->gfx.join_state == VIEWER_JOIN_STATE_PENDING) &&
+      (viewer->gfx.join_strategy != VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK);
   LeaveCriticalSection(&viewer->gfx.lock);
+  if (classic_activation && g_viewer_server &&
+      viewer_enqueue_classic_baseline_from_framebuffer(g_viewer_server,
+                                                       viewer)) {
+    WLog_INFO(TAG, "Viewer %u queued framebuffer baseline for classic join",
+              viewer->id);
+  }
   viewer->last_pointer_position_generation = 0;
   viewer->last_pointer_shape_generation = 0;
 
   WLog_INFO(TAG, "Viewer %u connecting mid-session", viewer->id);
   if (negotiation_outcome == VIEWER_GFX_NEGOTIATION_RDPEGFX_READY)
     WLog_INFO(TAG,
-              "Viewer %u RDPEGFX activated; evaluating frame-ring late join",
+              "Viewer %u RDPEGFX activated; evaluating framebuffer baseline "
+              "late join",
               viewer->id);
 
   if (g_viewer_server && g_viewer_server->backend) {
-    if (negotiation_outcome == VIEWER_GFX_NEGOTIATION_RDPEGFX_READY) {
+    if ((negotiation_outcome == VIEWER_GFX_NEGOTIATION_RDPEGFX_READY) &&
+        g_viewer_server->viewer_gfx_enabled) {
       WLog_INFO(
           TAG,
           "Viewer %u RDPEGFX activated; awaiting handshake-gated late join",
@@ -4446,7 +2287,8 @@ static BOOL peer_activate(freerdp_peer *peer) {
     }
   }
 
-  (void)viewer_forward_pointer(viewer, TRUE);
+  if (!suppress_activation_pointer)
+    (void)viewer_forward_pointer(viewer, TRUE);
   return TRUE;
 }
 
@@ -4468,6 +2310,7 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
       viewer->activated = FALSE;
       viewer->counted_in_viewer_count = FALSE;
       viewer->cleanup_in_progress = FALSE;
+      viewer_auth_state_reset(viewer);
       viewer->publish_ref_count = 0;
       viewer->needs_full_refresh = FALSE;
       viewer->stop_requested = FALSE;
@@ -4478,16 +2321,30 @@ static BOOL peer_context_new(freerdp_peer *peer, rdpContext *context) {
         viewer->context = NULL;
         viewer->counted_in_viewer_count = FALSE;
         viewer->cleanup_in_progress = FALSE;
+        viewer_auth_state_reset(viewer);
         viewer->publish_ref_count = 0;
         viewer = NULL;
         break;
       }
-      if (!viewer_send_state_init(viewer)) {
+      if (!viewer_gfx_pipeline_init(viewer)) {
         viewer_graphics_context_uninit(&viewer->gfx);
         viewer->peer = NULL;
         viewer->context = NULL;
         viewer->counted_in_viewer_count = FALSE;
         viewer->cleanup_in_progress = FALSE;
+        viewer_auth_state_reset(viewer);
+        viewer->publish_ref_count = 0;
+        viewer = NULL;
+        break;
+      }
+      if (!viewer_send_state_init(viewer)) {
+        viewer_gfx_pipeline_uninit(viewer);
+        viewer_graphics_context_uninit(&viewer->gfx);
+        viewer->peer = NULL;
+        viewer->context = NULL;
+        viewer->counted_in_viewer_count = FALSE;
+        viewer->cleanup_in_progress = FALSE;
+        viewer_auth_state_reset(viewer);
         viewer->publish_ref_count = 0;
         viewer = NULL;
         break;
@@ -4583,11 +2440,172 @@ static void peer_context_free(freerdp_peer *peer, rdpContext *context) {
  *
  * SupportMonitorLayoutPdu)
  */
+static const char *viewer_connection_state_name(CONNECTION_STATE state) {
+  switch (state) {
+  case CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_REQUEST:
+    return "CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_REQUEST";
+  case CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_RESPONSE:
+    return "CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_RESPONSE";
+  case CONNECTION_STATE_LICENSING:
+    return "CONNECTION_STATE_LICENSING";
+  case CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_REQUEST:
+    return "CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_REQUEST";
+  case CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_RESPONSE:
+    return "CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_RESPONSE";
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_DEMAND_ACTIVE:
+    return "CONNECTION_STATE_CAPABILITIES_EXCHANGE_DEMAND_ACTIVE";
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_MONITOR_LAYOUT:
+    return "CONNECTION_STATE_CAPABILITIES_EXCHANGE_MONITOR_LAYOUT";
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_CONFIRM_ACTIVE:
+    return "CONNECTION_STATE_CAPABILITIES_EXCHANGE_CONFIRM_ACTIVE";
+  case CONNECTION_STATE_FINALIZATION_SYNC:
+    return "CONNECTION_STATE_FINALIZATION_SYNC";
+  case CONNECTION_STATE_FINALIZATION_COOPERATE:
+    return "CONNECTION_STATE_FINALIZATION_COOPERATE";
+  case CONNECTION_STATE_FINALIZATION_REQUEST_CONTROL:
+    return "CONNECTION_STATE_FINALIZATION_REQUEST_CONTROL";
+  case CONNECTION_STATE_FINALIZATION_PERSISTENT_KEY_LIST:
+    return "CONNECTION_STATE_FINALIZATION_PERSISTENT_KEY_LIST";
+  case CONNECTION_STATE_FINALIZATION_FONT_LIST:
+    return "CONNECTION_STATE_FINALIZATION_FONT_LIST";
+  case CONNECTION_STATE_FINALIZATION_CLIENT_SYNC:
+    return "CONNECTION_STATE_FINALIZATION_CLIENT_SYNC";
+  case CONNECTION_STATE_FINALIZATION_CLIENT_COOPERATE:
+    return "CONNECTION_STATE_FINALIZATION_CLIENT_COOPERATE";
+  case CONNECTION_STATE_FINALIZATION_CLIENT_GRANTED_CONTROL:
+    return "CONNECTION_STATE_FINALIZATION_CLIENT_GRANTED_CONTROL";
+  case CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP:
+    return "CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP";
+  case CONNECTION_STATE_ACTIVE:
+    return "CONNECTION_STATE_ACTIVE";
+  default:
+    return "CONNECTION_STATE_BEFORE_CLIENT_INFO";
+  }
+}
+
+static BOOL viewer_state_is_after_client_info(CONNECTION_STATE state) {
+  switch (state) {
+  case CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_REQUEST:
+  case CONNECTION_STATE_CONNECT_TIME_AUTO_DETECT_RESPONSE:
+  case CONNECTION_STATE_LICENSING:
+  case CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_REQUEST:
+  case CONNECTION_STATE_MULTITRANSPORT_BOOTSTRAPPING_RESPONSE:
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_DEMAND_ACTIVE:
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_MONITOR_LAYOUT:
+  case CONNECTION_STATE_CAPABILITIES_EXCHANGE_CONFIRM_ACTIVE:
+  case CONNECTION_STATE_FINALIZATION_SYNC:
+  case CONNECTION_STATE_FINALIZATION_COOPERATE:
+  case CONNECTION_STATE_FINALIZATION_REQUEST_CONTROL:
+  case CONNECTION_STATE_FINALIZATION_PERSISTENT_KEY_LIST:
+  case CONNECTION_STATE_FINALIZATION_FONT_LIST:
+  case CONNECTION_STATE_FINALIZATION_CLIENT_SYNC:
+  case CONNECTION_STATE_FINALIZATION_CLIENT_COOPERATE:
+  case CONNECTION_STATE_FINALIZATION_CLIENT_GRANTED_CONTROL:
+  case CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP:
+  case CONNECTION_STATE_ACTIVE:
+    return TRUE;
+  default:
+    return FALSE;
+  }
+}
+
+static BOOL viewer_run_deferred_auth_if_ready(freerdp_peer *peer,
+                                              CONNECTION_STATE state) {
+  ViewerServer *server = g_viewer_server;
+  Viewer *viewer = NULL;
+  ViewerAuthCredentials settings_credentials = {0};
+  const char *viewer_user = "";
+  const char *viewer_domain = "";
+  const char *viewer_password = "";
+  BOOL settings_usable = FALSE;
+  BOOL accepted = FALSE;
+
+  if (!server || !peer)
+    return TRUE;
+
+  viewer = find_viewer_by_peer(peer);
+  if (!viewer)
+    return TRUE;
+
+  if (!viewer->auth_deferred_required || viewer->auth_deferred_checked)
+    return TRUE;
+
+  if (!viewer_state_is_after_client_info(state))
+    return TRUE;
+
+  viewer->auth_deferred_checked = TRUE;
+
+  if (!server->backend) {
+    viewer->auth_state = VIEWER_AUTH_STATE_REJECTED;
+    viewer->stop_requested = TRUE;
+    WLog_WARN(TAG,
+              "Deferred viewer auth rejected: missing backend credentials "
+              "auth_mode=%s nla_enabled=false credential_source=settings "
+              "state=%s",
+              viewer_auth_mode_name(server->security.auth_mode),
+              viewer_connection_state_name(state));
+    return FALSE;
+  }
+
+  settings_usable =
+      viewer_settings_credentials_to_utf8(peer, &settings_credentials);
+  if (settings_usable &&
+      !viewer_auth_normalize_domain_user(&settings_credentials))
+    settings_usable = FALSE;
+
+  viewer_user =
+      settings_credentials.username ? settings_credentials.username : "";
+  viewer_domain =
+      settings_credentials.domain ? settings_credentials.domain : "";
+  viewer_password =
+      settings_credentials.password ? settings_credentials.password : "";
+
+  if (settings_usable) {
+    accepted = viewer_backend_credentials_match(server->backend, viewer_user,
+                                                viewer_domain, viewer_password);
+  }
+
+  if (accepted) {
+    viewer->auth_state = VIEWER_AUTH_STATE_ACCEPTED;
+    viewer->auth_deferred_required = FALSE;
+    viewer->auth_deferred_accepted = TRUE;
+    WLog_INFO(TAG,
+              "Deferred viewer auth accepted auth_mode=%s nla_enabled=false "
+              "credential_source=settings username_present=%s "
+              "domain_present=%s password_present=%s state=%s",
+              viewer_auth_mode_name(server->security.auth_mode),
+              viewer_user[0] ? "true" : "false",
+              viewer_domain[0] ? "true" : "false",
+              viewer_password[0] ? "true" : "false",
+              viewer_connection_state_name(state));
+    viewer_auth_credentials_clear(&settings_credentials);
+    return TRUE;
+  }
+
+  viewer->auth_state = VIEWER_AUTH_STATE_REJECTED;
+  viewer->auth_deferred_accepted = FALSE;
+  viewer->stop_requested = TRUE;
+  WLog_WARN(TAG,
+            "Deferred viewer auth rejected auth_mode=%s nla_enabled=false "
+            "credential_source=settings username_present=%s domain_present=%s "
+            "password_present=%s state=%s",
+            viewer_auth_mode_name(server->security.auth_mode),
+            viewer_user[0] ? "true" : "false",
+            viewer_domain[0] ? "true" : "false",
+            viewer_password[0] ? "true" : "false",
+            viewer_connection_state_name(state));
+  viewer_auth_credentials_clear(&settings_credentials);
+  return FALSE;
+}
+
 static BOOL peer_reached_state(freerdp_peer *peer, CONNECTION_STATE state) {
   ViewerServer *server = NULL;
   const MonitorLayout *layout = NULL;
   rdpSettings *settings = NULL;
   UINT32 i = 0;
+
+  if (!viewer_run_deferred_auth_if_ready(peer, state))
+    return FALSE;
 
   if (state != CONNECTION_STATE_SECURE_SETTINGS_EXCHANGE)
     return TRUE;
@@ -4707,7 +2725,8 @@ static BOOL peer_accepted(freerdp_listener *listener, freerdp_peer *peer) {
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
     freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE);
-    freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline, FALSE);
+    freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline,
+                              server->viewer_gfx_enabled ? TRUE : FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
     freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
@@ -4885,6 +2904,9 @@ ViewerServer *viewer_server_init_ex(const char *bind_address, UINT16 port,
   server->cert_path = cert_path ? _strdup(cert_path) : NULL;
   server->key_path = key_path ? _strdup(key_path) : NULL;
   server->security = security ? *security : viewer_security_default();
+  server->viewer_gfx_enabled = FALSE;
+  server->viewer_gfx_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
+  server->viewer_gfx_diagnostic_full_frame_dirty = FALSE;
   if (backend)
     server->monitor_layout = backend->monitor_layout;
   server->slow_viewer_disconnect_enabled = TRUE;
@@ -4898,6 +2920,27 @@ ViewerServer *viewer_server_init_ex(const char *bind_address, UINT16 port,
     return NULL;
   }
   if (!viewer_gfx_publisher_state_init(&server->gfx)) {
+    DeleteCriticalSection(&server->lock);
+    free(server->cert_path);
+    free(server->key_path);
+    free(server->bind_address);
+    freerdp_listener_free(server->listener);
+    free(server);
+    return NULL;
+  }
+  if (!viewer_framebuffer_init(&server->framebuffer)) {
+    viewer_gfx_publisher_state_uninit(&server->gfx);
+    DeleteCriticalSection(&server->lock);
+    free(server->cert_path);
+    free(server->key_path);
+    free(server->bind_address);
+    freerdp_listener_free(server->listener);
+    free(server);
+    return NULL;
+  }
+  if (!viewer_publisher_init(&server->publisher)) {
+    viewer_framebuffer_uninit(&server->framebuffer);
+    viewer_gfx_publisher_state_uninit(&server->gfx);
     DeleteCriticalSection(&server->lock);
     free(server->cert_path);
     free(server->key_path);
@@ -4943,6 +2986,39 @@ void viewer_server_set_slow_disconnect(ViewerServer *server, BOOL enabled,
 
   server->slow_viewer_disconnect_enabled = enabled;
   server->slow_viewer_disconnect_ms = disconnect_after_ms;
+}
+
+void viewer_server_set_classic_policy(
+    ViewerServer *server,
+    const ViewerPublisherClassicPolicyConfig *classic_policy) {
+  if (!server)
+    return;
+
+  viewer_publisher_set_classic_policy(&server->publisher, classic_policy);
+}
+
+void viewer_server_set_gfx_enabled(ViewerServer *server, BOOL enabled) {
+  if (!server)
+    return;
+
+  server->viewer_gfx_enabled = enabled ? TRUE : FALSE;
+}
+
+void viewer_server_set_gfx_codec(ViewerServer *server, ViewerGfxCodec codec) {
+  if (!server)
+    return;
+
+  server->viewer_gfx_codec = (codec == VIEWER_GFX_CODEC_RFX)
+                                 ? VIEWER_GFX_CODEC_RFX
+                                 : VIEWER_GFX_CODEC_UNCOMPRESSED;
+}
+
+void viewer_server_set_gfx_diagnostic_full_frame_dirty(ViewerServer *server,
+                                                       BOOL enabled) {
+  if (!server)
+    return;
+
+  server->viewer_gfx_diagnostic_full_frame_dirty = enabled ? TRUE : FALSE;
 }
 
 void viewer_server_stop(ViewerServer *server) {
@@ -4992,6 +3068,8 @@ void viewer_server_free(ViewerServer *server) {
   if (server->listener)
     freerdp_listener_free(server->listener);
   free(server->bind_address);
+  viewer_publisher_uninit(&server->publisher);
+  viewer_framebuffer_uninit(&server->framebuffer);
   viewer_gfx_publisher_state_uninit(&server->gfx);
   DeleteCriticalSection(&server->lock);
   free(server);
@@ -5009,6 +3087,93 @@ viewer_server_get_count(ViewerServer *server) {
   return count;
 }
 
+BOOL viewer_server_update_framebuffer_from_gdi(BackendClient *backend,
+                                               const BYTE *pixels, UINT32 width,
+                                               UINT32 height, UINT32 stride,
+                                               UINT32 pixel_format,
+                                               const RECTANGLE_16 *dirty_rects,
+                                               UINT32 dirty_rect_count) {
+  ViewerServer *server = g_viewer_server;
+  RECTANGLE_16 *valid_dirty_rects = NULL;
+  const RECTANGLE_16 *update_dirty_rects = dirty_rects;
+  UINT32 update_dirty_rect_count = dirty_rect_count;
+  BOOL needs_resize = FALSE;
+  BOOL updated = FALSE;
+  UINT64 generation = 0;
+  UINT32 i = 0;
+
+  if (!server || !backend || !pixels || (server->backend != backend))
+    return FALSE;
+
+  if ((width == 0) || (height == 0) || (stride == 0))
+    return FALSE;
+
+  /* Preserve invalid-argument behavior for malformed backend callbacks. */
+  if ((dirty_rect_count > 0) && !dirty_rects)
+    return FALSE;
+
+  if (!server->framebuffer.initialized || !server->publisher.initialized)
+    return FALSE;
+
+  EnterCriticalSection(&server->framebuffer.lock);
+  needs_resize = (server->framebuffer.width != width) ||
+                 (server->framebuffer.height != height) ||
+                 (server->framebuffer.stride != stride) ||
+                 (server->framebuffer.pixel_format != pixel_format) ||
+                 !server->framebuffer.pixels;
+  LeaveCriticalSection(&server->framebuffer.lock);
+
+  if (needs_resize && !viewer_framebuffer_resize(&server->framebuffer, width,
+                                                 height, stride, pixel_format))
+    return FALSE;
+
+  /* Backend dirty rectangles are advisory damage from decoded GDI output.
+   *
+   * Validate them against the current desktop before handing them to the
+   *
+   * canonical framebuffer. Invalid/out-of-bounds rectangles are dropped; if
+   * all
+   * provided rectangles are invalid, fall back to a full-frame dirty
+   * update to
+   * preserve correctness and existing delivery semantics. */
+  if (dirty_rect_count > 0) {
+    valid_dirty_rects =
+        (RECTANGLE_16 *)calloc(dirty_rect_count, sizeof(*valid_dirty_rects));
+    if (!valid_dirty_rects)
+      return FALSE;
+
+    update_dirty_rect_count = 0;
+    for (i = 0; i < dirty_rect_count; i++) {
+      if (viewer_framebuffer_dirty_rect_valid(width, height, &dirty_rects[i]))
+        valid_dirty_rects[update_dirty_rect_count++] = dirty_rects[i];
+    }
+
+    update_dirty_rects =
+        (update_dirty_rect_count > 0) ? valid_dirty_rects : NULL;
+  }
+
+  updated = viewer_framebuffer_update_pixels(&server->framebuffer, pixels,
+                                             stride, update_dirty_rects,
+                                             update_dirty_rect_count);
+  if (!updated) {
+    free(valid_dirty_rects);
+    return FALSE;
+  }
+
+  EnterCriticalSection(&server->framebuffer.lock);
+  generation = server->framebuffer.generation;
+  LeaveCriticalSection(&server->framebuffer.lock);
+  viewer_publisher_note_framebuffer_update(
+      &server->publisher, generation, update_dirty_rect_count,
+      update_dirty_rect_count > VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS);
+  viewer_server_accumulate_gfx_dirty_viewers(
+      server, update_dirty_rects, update_dirty_rect_count,
+      update_dirty_rect_count > VIEWER_FRAMEBUFFER_MAX_DIRTY_RECTS, generation,
+      width, height);
+  free(valid_dirty_rects);
+  return TRUE;
+}
+
 void viewer_server_notify_backend_layout_change(BackendClient *backend,
                                                 UINT32 width, UINT32 height,
                                                 UINT32 generation) {
@@ -5023,6 +3188,7 @@ void viewer_server_notify_backend_layout_change(BackendClient *backend,
     return;
 
   EnterCriticalSection(&server->lock);
+  server->monitor_layout = backend->monitor_layout;
   for (int i = 0; i < MAX_VIEWERS; i++) {
     Viewer *viewer = &server->viewers[i];
     if (!viewer_try_add_layout_ref_locked(viewer))
@@ -5039,8 +3205,7 @@ void viewer_server_notify_backend_layout_change(BackendClient *backend,
     int i = target_slots[target_index];
 
     EnterCriticalSection(&viewer->gfx.lock);
-    viewer->gfx.negotiated_width = width;
-    viewer->gfx.negotiated_height = height;
+    viewer_gfx_pipeline_invalidate_surface_locked(&viewer->gfx);
     LeaveCriticalSection(&viewer->gfx.lock);
 
     EnterCriticalSection(&viewer->send_lock);
@@ -5155,7 +3320,7 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
     BOOL classic_fallback = FALSE;
     BOOL ready_to_send = FALSE;
     BOOL enqueued = FALSE;
-    BOOL throttled = FALSE;
+    ViewerPublisherSurfaceBitsPublishDecision decision = {0};
     ViewerSurfaceBitsEvent *event = NULL;
 
     EnterCriticalSection(&viewer->gfx.lock);
@@ -5172,46 +3337,35 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
     ready_to_send = viewer->peer && viewer->connected && viewer->activated;
     LeaveCriticalSection(&viewer->send_lock);
 
-    if (!ready_to_send) {
+    decision = viewer_publisher_surface_bits_publish_decision(
+        ready_to_send, viewer->needs_full_refresh,
+        viewer->consecutive_lag_intervals >= VIEWER_THROTTLE_LAG_INTERVALS);
+    if (decision.action == VIEWER_PUBLISHER_SURFACE_BITS_PUBLISH_NOT_READY) {
       viewer_release_publish_ref(server, viewer);
       continue;
     }
 
-    if (viewer->consecutive_lag_intervals >= VIEWER_THROTTLE_LAG_INTERVALS) {
-      /* Per-viewer throttle: skip updates for slow viewers.
-       * However, SurfaceBits ARE the refresh data — even when throttled,
-       * we must still deliver them to allow the viewer to resync.
-       * Clear the throttle gate and enqueue. */
+    if (decision.count_throttled) {
       EnterCriticalSection(&viewer->send_lock);
       viewer->surface_bits_updates_skipped_throttle++;
-      /* Don't set needs_full_refresh for SurfaceBits — they ARE the
-       * refresh data. Setting it would cause the pump to drop them. */
       LeaveCriticalSection(&viewer->send_lock);
-      throttled = TRUE;
       throttled_count++;
       if (first_throttled_viewer_id == 0)
         first_throttled_viewer_id = viewer->id;
-      /* Fall through to enqueue — SurfaceBits must be delivered even
-       * for throttled viewers, because they carry the actual pixel data
-       * needed to resync. */
     }
 
-    /* Clear needs_full_refresh if set — SurfaceBits ARE the refresh data.
-     * Unlike BitmapUpdate where a full refresh is a separate mechanism,
-     * SurfaceBits tiles are the only way the viewer receives pixel data,
-     * so they must always be delivered. */
-    if (viewer->needs_full_refresh) {
+    if (decision.clear_full_refresh) {
       EnterCriticalSection(&viewer->send_lock);
       viewer->needs_full_refresh = FALSE;
       viewer->full_refresh_deadline_ts = 0;
       LeaveCriticalSection(&viewer->send_lock);
+    }
+    if (decision.count_full_refresh_gate) {
       gated_full_refresh_count++;
       if (first_gated_viewer_id == 0)
         first_gated_viewer_id = viewer->id;
     }
 
-    /* Always enqueue SurfaceBits — they carry pixel data that the viewer
-     * needs regardless of throttle or refresh state. */
     event = viewer_surface_bits_event_new(cmd);
     if (!event) {
       enqueue_failed_count++;
@@ -5219,7 +3373,7 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
       continue;
     }
     EnterCriticalSection(&viewer->send_lock);
-    enqueued = viewer_surface_bits_enqueue_event_locked(viewer, event);
+    enqueued = viewer_enqueue_surface_bits_event_locked(viewer, event);
     LeaveCriticalSection(&viewer->send_lock);
     if (enqueued)
       enqueued_count++;
@@ -5231,7 +3385,7 @@ BOOL viewer_server_publish_surface_bits(BackendClient *backend,
     if (enqueued)
       sent_any = TRUE;
 
-    if (throttled)
+    if (decision.request_full_refresh)
       (void)backend_request_full_refresh(server->backend);
 
     viewer_release_publish_ref(server, viewer);
@@ -5305,7 +3459,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
     BOOL classic_fallback = FALSE;
     BOOL ready_to_send = FALSE;
     BOOL enqueued = FALSE;
-    BOOL throttled = FALSE;
+    ViewerPublisherBitmapPublishDecision decision = {0};
     ViewerClassicEvent *event = NULL;
 
     EnterCriticalSection(&viewer->gfx.lock);
@@ -5323,86 +3477,39 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
     ready_to_send = viewer->peer && viewer->connected && viewer->activated;
     LeaveCriticalSection(&viewer->send_lock);
 
-    if (!ready_to_send) {
+    decision = viewer_publisher_bitmap_publish_decision(
+        ready_to_send, viewer->needs_full_refresh, refresh_in_flight,
+        viewer->consecutive_lag_intervals >= VIEWER_THROTTLE_LAG_INTERVALS);
+    if (decision.action == VIEWER_PUBLISHER_BITMAP_PUBLISH_NOT_READY) {
       viewer_release_publish_ref(server, viewer);
       continue;
     }
 
-    if (viewer->needs_full_refresh && !refresh_in_flight) {
-      /* The viewer needs a full refresh but no refresh is in flight.
-       * This happens when:
-       * 1. The viewer just joined and the backend refresh has already
-       *    completed (backend_mark_full_refresh_complete was called)
-       * 2. The viewer was throttled and the refresh completed
-       * In the classic path there are no frame markers to clear
-       * needs_full_refresh, so we clear it here and enqueue the
-       * current bitmap update. The viewer will receive this and
-       * subsequent updates normally. */
+    if (decision.clear_full_refresh) {
       EnterCriticalSection(&viewer->send_lock);
       viewer->needs_full_refresh = FALSE;
       viewer->full_refresh_deadline_ts = 0;
       LeaveCriticalSection(&viewer->send_lock);
+    }
+    if (decision.count_full_refresh_gate) {
       gated_full_refresh_count++;
       if (first_gated_viewer_id == 0)
         first_gated_viewer_id = viewer->id;
+    }
 
-      /* Deep copy outside lock, then enqueue under lock */
-      event = viewer_classic_event_new(bitmap);
-      if (!event) {
-        enqueue_failed_count++;
-        viewer_release_publish_ref(server, viewer);
-        continue;
-      }
-      EnterCriticalSection(&viewer->send_lock);
-      enqueued = viewer_classic_enqueue_event_locked(viewer, event);
-      LeaveCriticalSection(&viewer->send_lock);
-      if (enqueued)
-        enqueued_count++;
-      else {
-        enqueue_failed_count++;
-        viewer_classic_event_free(event);
-      }
-    } else if (viewer->needs_full_refresh && refresh_in_flight) {
-      /* A full refresh is in flight — this bitmap IS the refresh data.
-       * Clear the gate and enqueue so the viewer receives it. */
-      EnterCriticalSection(&viewer->send_lock);
-      viewer->needs_full_refresh = FALSE;
-      viewer->full_refresh_deadline_ts = 0;
-      LeaveCriticalSection(&viewer->send_lock);
-
-      event = viewer_classic_event_new(bitmap);
-      if (!event) {
-        enqueue_failed_count++;
-        viewer_release_publish_ref(server, viewer);
-        continue;
-      }
-      EnterCriticalSection(&viewer->send_lock);
-      enqueued = viewer_classic_enqueue_event_locked(viewer, event);
-      LeaveCriticalSection(&viewer->send_lock);
-      if (enqueued)
-        enqueued_count++;
-      else {
-        enqueue_failed_count++;
-        viewer_classic_event_free(event);
-      }
-    } else if (viewer->consecutive_lag_intervals >=
-               VIEWER_THROTTLE_LAG_INTERVALS) {
-      /* Per-viewer throttle: skip updates for slow viewers.
-       * They will resync via full refresh when they recover. */
+    if (decision.count_throttled) {
       EnterCriticalSection(&viewer->send_lock);
       viewer->bitmap_updates_skipped_throttle++;
       viewer->needs_full_refresh = TRUE;
       viewer->full_refresh_deadline_ts =
           platform_get_timestamp_ms() + FULL_REFRESH_TIMEOUT_MS;
       LeaveCriticalSection(&viewer->send_lock);
-      throttled = TRUE;
       throttled_count++;
       if (first_throttled_viewer_id == 0)
         first_throttled_viewer_id = viewer->id;
-    } else {
-      /* Option B: Enqueue the bitmap update for async delivery
-       * by the viewer thread. Deep copy outside lock, then
-       * enqueue under lock to minimize send_lock hold time. */
+    }
+
+    if (decision.enqueue) {
       event = viewer_classic_event_new(bitmap);
       if (!event) {
         enqueue_failed_count++;
@@ -5410,7 +3517,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
         continue;
       }
       EnterCriticalSection(&viewer->send_lock);
-      enqueued = viewer_classic_enqueue_event_locked(viewer, event);
+      enqueued = viewer_enqueue_classic_event_locked(viewer, event);
       LeaveCriticalSection(&viewer->send_lock);
       if (enqueued)
         enqueued_count++;
@@ -5423,7 +3530,7 @@ BOOL viewer_server_publish_bitmap_update(BackendClient *backend,
     if (enqueued)
       sent_any = TRUE;
 
-    if (throttled)
+    if (decision.request_full_refresh)
       (void)backend_request_full_refresh(server->backend);
 
     viewer_release_publish_ref(server, viewer);
@@ -5539,7 +3646,7 @@ BOOL viewer_server_publish_frame_marker(BackendClient *backend,
 
       EnterCriticalSection(&viewer->gfx.lock);
       if (viewer->gfx.join_strategy == VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK)
-        viewer_gfx_finish_late_join_locked(
+        viewer_gfx_pipeline_finish_join_locked(
             viewer, "classic fallback full refresh completed");
       LeaveCriticalSection(&viewer->gfx.lock);
     }
@@ -5581,289 +3688,4 @@ BOOL viewer_server_publish_frame_marker(BackendClient *backend,
     viewer_release_publish_ref(server, targets[i]);
 
   return sent_any;
-}
-
-BOOL viewer_server_publish_gfx_reset_graphics(
-    BackendClient *backend, const RDPGFX_RESET_GRAPHICS_PDU *reset_graphics) {
-  ViewerServer *server = g_viewer_server;
-  ViewerGfxEvent *event = NULL;
-
-  if (!server || (server->backend != backend) || !reset_graphics)
-    return FALSE;
-
-  event = viewer_gfx_event_new_reset_graphics(reset_graphics);
-  if (!event)
-    return FALSE;
-
-  WLog_INFO(TAG,
-            "ResetGraphics width=%" PRIu32 " height=%" PRIu32
-            " monitors=%" PRIu32 " clearing frame ring and capture state",
-            reset_graphics->width, reset_graphics->height,
-            reset_graphics->monitorCount);
-
-  EnterCriticalSection(&server->gfx.lock);
-  viewer_gfx_publisher_state_reset_locked(&server->gfx);
-  if (!viewer_gfx_reset_graphics_pdu_copy(&server->gfx.latest_reset_graphics,
-                                          reset_graphics)) {
-    WLog_ERR(TAG, "ResetGraphics copy failed; frame ring cleared and replay "
-                  "state invalidated");
-    LeaveCriticalSection(&server->gfx.lock);
-    viewer_gfx_event_unref(event);
-    return FALSE;
-  }
-  server->gfx.has_latest_reset_graphics = TRUE;
-  LeaveCriticalSection(&server->gfx.lock);
-
-  return viewer_server_publish_gfx_event(backend, event);
-}
-
-BOOL viewer_server_publish_gfx_create_surface(
-    BackendClient *backend, const RDPGFX_CREATE_SURFACE_PDU *create_surface) {
-  ViewerServer *server = g_viewer_server;
-  ViewerGraphicsSurfaceState *surface = NULL;
-  ViewerGfxEvent *event = NULL;
-
-  if (!server || (server->backend != backend) || !create_surface)
-    return FALSE;
-
-  event = viewer_gfx_event_new_simple(VIEWER_GFX_EVENT_CREATE_SURFACE,
-                                      create_surface, sizeof(*create_surface));
-  if (!event)
-    return FALSE;
-
-  WLog_INFO(TAG,
-            "CreateSurface surfaceId=%" PRIu16 " size=%" PRIu16 "x%" PRIu16
-            " format=0x%04" PRIX16,
-            create_surface->surfaceId, create_surface->width,
-            create_surface->height, create_surface->pixelFormat);
-
-  EnterCriticalSection(&server->gfx.lock);
-  surface =
-      viewer_gfx_upsert_surface_locked(&server->gfx, create_surface->surfaceId);
-  if (surface) {
-    surface->create_surface = *create_surface;
-    surface->mapped = FALSE;
-    memset(&surface->map_surface_to_output, 0,
-           sizeof(surface->map_surface_to_output));
-  }
-  LeaveCriticalSection(&server->gfx.lock);
-
-  return viewer_server_publish_gfx_event(backend, event);
-}
-
-BOOL viewer_server_publish_gfx_delete_surface(
-    BackendClient *backend, const RDPGFX_DELETE_SURFACE_PDU *delete_surface) {
-  ViewerServer *server = g_viewer_server;
-  ViewerGfxEvent *event = NULL;
-
-  if (!server || (server->backend != backend) || !delete_surface)
-    return FALSE;
-
-  event = viewer_gfx_event_new_simple(VIEWER_GFX_EVENT_DELETE_SURFACE,
-                                      delete_surface, sizeof(*delete_surface));
-  if (!event)
-    return FALSE;
-
-  WLog_INFO(TAG, "DeleteSurface surfaceId=%" PRIu16, delete_surface->surfaceId);
-
-  EnterCriticalSection(&server->gfx.lock);
-  viewer_gfx_remove_surface_locked(&server->gfx, delete_surface->surfaceId);
-  LeaveCriticalSection(&server->gfx.lock);
-
-  return viewer_server_publish_gfx_event(backend, event);
-}
-
-BOOL viewer_server_publish_gfx_map_surface_to_output(
-    BackendClient *backend,
-    const RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU *map_surface_to_output) {
-  ViewerServer *server = g_viewer_server;
-  ViewerGraphicsSurfaceState *surface = NULL;
-  ViewerGfxEvent *event = NULL;
-
-  if (!server || (server->backend != backend) || !map_surface_to_output)
-    return FALSE;
-
-  event = viewer_gfx_event_new_simple(VIEWER_GFX_EVENT_MAP_SURFACE_TO_OUTPUT,
-                                      map_surface_to_output,
-                                      sizeof(*map_surface_to_output));
-  if (!event)
-    return FALSE;
-
-  WLog_INFO(TAG,
-            "MapSurfaceToOutput surfaceId=%" PRIu16 " origin=(%" PRIu32
-            ",%" PRIu32 ")",
-            map_surface_to_output->surfaceId,
-            map_surface_to_output->outputOriginX,
-            map_surface_to_output->outputOriginY);
-
-  EnterCriticalSection(&server->gfx.lock);
-  surface = viewer_gfx_upsert_surface_locked(&server->gfx,
-                                             map_surface_to_output->surfaceId);
-  if (surface) {
-    surface->map_surface_to_output = *map_surface_to_output;
-    surface->mapped = TRUE;
-  }
-  LeaveCriticalSection(&server->gfx.lock);
-
-  return viewer_server_publish_gfx_event(backend, event);
-}
-
-BOOL viewer_server_publish_gfx_start_frame(
-    BackendClient *backend, const RDPGFX_START_FRAME_PDU *start_frame) {
-  ViewerServer *server = g_viewer_server;
-  ViewerGfxEvent *event = NULL;
-
-  if (!server || (server->backend != backend) || !start_frame)
-    return FALSE;
-
-  event = viewer_gfx_event_new_simple(VIEWER_GFX_EVENT_START_FRAME, start_frame,
-                                      sizeof(*start_frame));
-  if (!event)
-    return FALSE;
-
-  WLog_INFO(TAG, "StartFrame received frameId=%" PRIu32 " timestamp=%" PRIu64,
-            start_frame->frameId, platform_get_timestamp_ms());
-
-  EnterCriticalSection(&server->gfx.lock);
-  server->gfx.in_frame = TRUE;
-  server->gfx.current_frame_id = start_frame->frameId;
-  if (!viewer_gfx_frame_buffer_begin_frame_locked(&server->gfx.frame_buffer,
-                                                  start_frame, event)) {
-    WLog_ERR(TAG,
-             "Frame %" PRIu32 " capture failed; live forwarding continues but "
-             "replay buffer unavailable",
-             start_frame->frameId);
-  }
-  LeaveCriticalSection(&server->gfx.lock);
-
-  return viewer_server_publish_gfx_event(backend, event);
-}
-
-BOOL viewer_server_publish_gfx_surface_command(
-    BackendClient *backend, const RDPGFX_SURFACE_COMMAND *cmd) {
-  ViewerServer *server = g_viewer_server;
-  ViewerGfxEvent *event = NULL;
-  UINT32 frame_id = 0;
-
-  if (!server || (server->backend != backend) || !cmd)
-    return FALSE;
-
-  event = viewer_gfx_event_new_surface_command(cmd);
-  if (!event)
-    return FALSE;
-
-  EnterCriticalSection(&server->gfx.lock);
-  frame_id = server->gfx.current_frame_id;
-  WLog_INFO(TAG,
-            "SurfaceCommand frameId=%" PRIu32 " surfaceId=%" PRIu16
-            " codecId=%" PRIu16 " length=%" PRIu32,
-            frame_id, cmd->surfaceId, cmd->codecId, cmd->length);
-  if (server->gfx.in_frame && server->gfx.frame_buffer.capture_frame) {
-    (void)viewer_gfx_frame_buffer_append_surface_command_locked(
-        &server->gfx.frame_buffer, cmd, event);
-  } else {
-    WLog_WARN(TAG,
-              "SurfaceCommand surfaceId=%" PRIu16 " length=%" PRIu32
-              " arrived outside active frame; not captured in frame ring",
-              cmd->surfaceId, cmd->length);
-  }
-  LeaveCriticalSection(&server->gfx.lock);
-
-  return viewer_server_publish_gfx_event(backend, event);
-}
-
-BOOL viewer_server_publish_gfx_end_frame(
-    BackendClient *backend, const RDPGFX_END_FRAME_PDU *end_frame) {
-  ViewerServer *server = g_viewer_server;
-  ViewerGfxEvent *event = NULL;
-  ViewerGfxCompleteFrame *latest = NULL;
-
-  if (!server || (server->backend != backend) || !end_frame)
-    return FALSE;
-
-  event = viewer_gfx_event_new_simple(VIEWER_GFX_EVENT_END_FRAME, end_frame,
-                                      sizeof(*end_frame));
-  if (!event)
-    return FALSE;
-
-  EnterCriticalSection(&server->gfx.lock);
-  WLog_INFO(TAG, "EndFrame received frameId=%" PRIu32, end_frame->frameId);
-  if (viewer_gfx_frame_buffer_end_frame_locked(&server->gfx.frame_buffer,
-                                               end_frame, event)) {
-    latest = viewer_gfx_frame_buffer_latest_locked(&server->gfx.frame_buffer);
-    if (latest) {
-      WLog_INFO(TAG,
-                "Frame %" PRIu32 " complete: %" PRIu32 " events, %" PRIu32
-                " commands, %" PRIu64 " bytes total",
-                latest->frame_id, latest->event_count,
-                latest->surface_command_count, latest->total_payload_bytes);
-    }
-  }
-  if (server->gfx.in_frame &&
-      (server->gfx.current_frame_id == end_frame->frameId)) {
-    server->gfx.in_frame = FALSE;
-    server->gfx.current_frame_id = 0;
-  }
-  LeaveCriticalSection(&server->gfx.lock);
-
-  if (latest) {
-    viewer_gfx_complete_frame_unref(latest);
-    EnterCriticalSection(&server->lock);
-    for (int i = 0; i < MAX_VIEWERS; i++) {
-      Viewer *viewer = &server->viewers[i];
-
-      if (!viewer->peer || !viewer->connected || !viewer->activated ||
-          viewer->stop_requested)
-        continue;
-
-      EnterCriticalSection(&viewer->gfx.lock);
-      if ((viewer->gfx.join_state == VIEWER_JOIN_STATE_WAIT_NEXT_SAFE_FRAME) ||
-          (viewer->gfx.join_state == VIEWER_JOIN_STATE_WAIT_BACKEND_REFRESH)) {
-        WLog_INFO(TAG,
-                  "Viewer %u observed completed frame %" PRIu32
-                  " while waiting for replay-safe baseline",
-                  viewer->id, end_frame->frameId);
-      }
-      LeaveCriticalSection(&viewer->gfx.lock);
-    }
-    LeaveCriticalSection(&server->lock);
-  }
-
-  /* GFX-based backend refresh completion: since the backend uses RDPEGFX
-   * exclusively and never sends classic frame markers, the backend full
-   * refresh mechanism (which depends on frame markers to complete) would
-   * be permanently stuck. When a GFX EndFrame arrives and a refresh is
-   * in flight, mark it complete through the GFX path so that viewers
-   * waiting in WAIT_BACKEND_REFRESH can proceed. */
-  if (server->backend && backend_full_refresh_in_flight(server->backend)) {
-    WLog_INFO(TAG, "Frame %" PRIu32 " completing backend refresh via GFX path",
-              end_frame->frameId);
-    backend_mark_full_refresh_complete(server->backend);
-  }
-
-  return viewer_server_publish_gfx_event(backend, event);
-}
-
-BOOL viewer_server_publish_gfx_delete_encoding_context(
-    BackendClient *backend,
-    const RDPGFX_DELETE_ENCODING_CONTEXT_PDU *delete_encoding_context) {
-  ViewerServer *server = g_viewer_server;
-  ViewerGfxEvent *event = NULL;
-
-  if (!server || (server->backend != backend) || !delete_encoding_context)
-    return FALSE;
-
-  event = viewer_gfx_event_new_simple(VIEWER_GFX_EVENT_DELETE_ENCODING_CONTEXT,
-                                      delete_encoding_context,
-                                      sizeof(*delete_encoding_context));
-  if (!event)
-    return FALSE;
-
-  WLog_INFO(TAG,
-            "DeleteEncodingContext surfaceId=%" PRIu16
-            " codecContextId=%" PRIu32,
-            delete_encoding_context->surfaceId,
-            delete_encoding_context->codecContextId);
-
-  return viewer_server_publish_gfx_event(backend, event);
 }

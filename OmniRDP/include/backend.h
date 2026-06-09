@@ -9,8 +9,8 @@
 #ifndef BACKEND_H
 #define BACKEND_H
 
+#include "monitor_layout.h"
 #include "pointer_shape.h"
-#include "viewer_server.h"
 #include <freerdp/client.h>
 #include <freerdp/client/rdpgfx.h>
 #include <freerdp/freerdp.h>
@@ -64,6 +64,7 @@ typedef struct BackendClient {
   RdpgfxClientContext *rdpgfx;
   BOOL rdpgfx_channel_open;
   BOOL rdpgfx_caps_confirmed;
+  BOOL backend_gfx_decode_only_enabled;
   PointerShapeCache *pointer_shape_cache;
   PointerShapeEntry *active_pointer_shape;
   CRITICAL_SECTION pointer_lock;
@@ -129,6 +130,13 @@ typedef struct BackendSecurityConfig {
   BOOL ignore_certificate;
 } BackendSecurityConfig;
 
+typedef struct BackendRdpFileOptions {
+  const char *workspace_id;
+  BOOL use_redirection_server_name;
+  const char *loadbalanceinfo;
+  const char *alternate_full_address;
+} BackendRdpFileOptions;
+
 typedef enum BackendFullRefreshOutcome {
   BACKEND_FULL_REFRESH_OUTCOME_NONE = 0,
   BACKEND_FULL_REFRESH_OUTCOME_COMPLETED = 1,
@@ -169,6 +177,10 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
                        const char *username, const char *password,
                        const char *domain,
                        const BackendSecurityConfig *security);
+BOOL backend_set_gfx_decode_only(BackendClient *client, BOOL enabled);
+
+BOOL backend_apply_rdp_file_options(BackendClient *client,
+                                    const BackendRdpFileOptions *options);
 
 /**
  * @brief Connect to Windows Server
@@ -230,6 +242,12 @@ void backend_get_pointer_snapshot(BackendClient *client, UINT16 *x, UINT16 *y,
                                   BOOL *visible, UINT32 *type,
                                   PointerShapeEntry **active_shape,
                                   UINT64 *position_gen, UINT64 *shape_gen);
+
+BOOL backend_get_pointer_snapshot_copy(BackendClient *client, UINT16 *x,
+                                       UINT16 *y, BOOL *visible, UINT32 *type,
+                                       PointerShapeEntry *active_shape_copy,
+                                       BOOL *has_active_shape,
+                                       UINT64 *position_gen, UINT64 *shape_gen);
 
 void backend_store_pointer_position(BackendClient *client, UINT16 x, UINT16 y);
 

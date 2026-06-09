@@ -136,6 +136,41 @@ static void test_cache_selection_by_index(void) {
   pointer_shape_cache_free(cache);
 }
 
+static void test_entry_copy_is_deep_and_resettable(void) {
+  BYTE xorMask[] = {1, 2, 3};
+  BYTE andMask[] = {4, 5};
+  PointerShapeEntry source = {
+      .width = 10,
+      .height = 12,
+      .hotSpotX = 1,
+      .hotSpotY = 2,
+      .xorBpp = 32,
+      .xorMaskData = xorMask,
+      .andMaskData = andMask,
+      .xorMaskLength = sizeof(xorMask),
+      .andMaskLength = sizeof(andMask),
+      .cacheIndex = 3,
+  };
+  PointerShapeEntry copy = {0};
+
+  assert(pointer_shape_entry_copy(&copy, &source));
+  assert(copy.width == source.width);
+  assert(copy.xorMaskData != source.xorMaskData);
+  assert(copy.andMaskData != source.andMaskData);
+  assert(memcmp(copy.xorMaskData, xorMask, sizeof(xorMask)) == 0);
+  assert(memcmp(copy.andMaskData, andMask, sizeof(andMask)) == 0);
+
+  xorMask[0] = 99;
+  andMask[0] = 88;
+  assert(copy.xorMaskData[0] == 1);
+  assert(copy.andMaskData[0] == 4);
+
+  pointer_shape_entry_reset(&copy);
+  assert(copy.xorMaskData == NULL);
+  assert(copy.andMaskData == NULL);
+  assert(copy.xorMaskLength == 0);
+}
+
 static void test_oversized_mask_rejected(void) {
   POINTER_COLOR_UPDATE update = {
       .cacheIndex = 5,
@@ -169,6 +204,7 @@ int main(void) {
   test_deep_copy_success_for_color_shape();
   test_deep_copy_success_for_new_shape();
   test_cache_selection_by_index();
+  test_entry_copy_is_deep_and_resettable();
   test_oversized_mask_rejected();
   test_cleanup_is_idempotent();
   return 0;

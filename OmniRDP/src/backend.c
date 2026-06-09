@@ -36,6 +36,35 @@
 
 static BackendClient *g_backend_client = NULL;
 
+static BOOL backend_string_is_empty(const char *value) {
+  return !value || value[0] == '\0';
+}
+
+static BOOL backend_replace_owned_string(char **target, const char *value) {
+  char *copy = NULL;
+  size_t length = 0;
+
+  if (!target)
+    return FALSE;
+  if (!value)
+    value = "";
+
+  length = strnlen_s(value, 4096);
+  if (length >= 4096)
+    return FALSE;
+
+  copy = (char *)calloc(length + 1, sizeof(char));
+  if (!copy)
+    return FALSE;
+  if (length > 0 && memcpy_s(copy, length + 1, value, length) != 0) {
+    free(copy);
+    return FALSE;
+  }
+
+  free(*target);
+  *target = copy;
+  return TRUE;
+}
 static UINT backend_rdpgfx_on_open(RdpgfxClientContext *context,
                                    BOOL *do_caps_advertise,
                                    BOOL *do_frame_acks);
@@ -85,6 +114,10 @@ static void backend_normalize_domain_username(const char **domain,
                                               const char **username);
 static BOOL backend_forward_bitmap_update(BackendClient *client,
                                           const BITMAP_UPDATE *bitmap);
+static void backend_ingest_gdi_framebuffer(BackendClient *client,
+                                           rdpContext *context,
+                                           const RECTANGLE_16 *dirty_rects,
+                                           UINT32 dirty_rect_count);
 static BOOL on_begin_paint(rdpContext *context);
 static BOOL on_end_paint(rdpContext *context);
 static BOOL on_bitmap_update(rdpContext *context, const BITMAP_UPDATE *bitmap);
@@ -280,8 +313,9 @@ static void backend_attach_rdpgfx_context(BackendClient *client,
     return;
 
   client->rdpgfx = rdpgfx;
-  /* Save GDI's original GFX callbacks. GDI handles decoding and
-   * framebuffer updates. Our callbacks forward to viewers. */
+  // Save GDI's original GFX callbacks. GDI handles decoding and framebuffer
+  // updates; our callbacks keep backend RDPEGFX decode-only and never publish
+  // backend GFX PDUs to viewers.
   client->gdi_StartFrame = rdpgfx->StartFrame;
   client->gdi_EndFrame = rdpgfx->EndFrame;
   client->gdi_SurfaceCommand = rdpgfx->SurfaceCommand;
@@ -622,8 +656,7 @@ backend_rdpgfx_create_surface(RdpgfxClientContext *context,
   if (!client || !create_surface)
     return ERROR_INVALID_PARAMETER;
 
-  if (viewer_server_publish_gfx_create_surface(client, create_surface))
-    client->forwarded_gfx_create_surface_count++;
+  (void)create_surface;
 
   return CHANNEL_RC_OK;
 }
@@ -636,8 +669,7 @@ backend_rdpgfx_delete_surface(RdpgfxClientContext *context,
   if (!client || !delete_surface)
     return ERROR_INVALID_PARAMETER;
 
-  if (viewer_server_publish_gfx_delete_surface(client, delete_surface))
-    client->forwarded_gfx_delete_surface_count++;
+  (void)delete_surface;
 
   return CHANNEL_RC_OK;
 }
@@ -650,9 +682,7 @@ static UINT backend_rdpgfx_map_surface_to_output(
   if (!client || !map_surface_to_output)
     return ERROR_INVALID_PARAMETER;
 
-  if (viewer_server_publish_gfx_map_surface_to_output(client,
-                                                      map_surface_to_output))
-    client->forwarded_gfx_map_surface_to_output_count++;
+  (void)map_surface_to_output;
 
   return CHANNEL_RC_OK;
 }
@@ -668,9 +698,6 @@ backend_rdpgfx_start_frame(RdpgfxClientContext *context,
   if (client->gdi_StartFrame)
     ((pcRdpgfxStartFrame)client->gdi_StartFrame)(context, start_frame);
 
-  if (viewer_server_publish_gfx_start_frame(client, start_frame))
-    client->forwarded_gfx_start_frame_count++;
-
   return CHANNEL_RC_OK;
 }
 
@@ -684,8 +711,16 @@ static UINT backend_rdpgfx_end_frame(RdpgfxClientContext *context,
   if (client->gdi_EndFrame)
     ((pcRdpgfxEndFrame)client->gdi_EndFrame)(context, end_frame);
 
-  if (viewer_server_publish_gfx_end_frame(client, end_frame))
-    client->forwarded_gfx_end_frame_count++;
+  // Backend RDPEGFX EndFrame is a decode/canonical-state boundary only. Do not
+  // publish backend GFX PDUs to viewers from this callback; still complete a
+  // pending backend refresh so refresh waiters are released when the backend
+  // provides GFX frames instead of classic frame markers.
+  if (backend_full_refresh_in_flight(client)) {
+    WLog_INFO(TAG,
+              "Frame %" PRIu32 " completing backend refresh via GFX decode",
+              end_frame->frameId);
+    backend_mark_full_refresh_complete(client);
+  }
 
   return CHANNEL_RC_OK;
 }
@@ -693,15 +728,27 @@ static UINT backend_rdpgfx_end_frame(RdpgfxClientContext *context,
 static UINT backend_rdpgfx_surface_command(RdpgfxClientContext *context,
                                            const RDPGFX_SURFACE_COMMAND *cmd) {
   BackendClient *client = context ? (BackendClient *)context->custom : NULL;
+  UINT gdi_rc = CHANNEL_RC_OK;
+  BOOL gdi_chained = FALSE;
+  RECTANGLE_16 dirty_rect = {0};
 
   if (!client || !cmd)
     return ERROR_INVALID_PARAMETER;
 
-  if (client->gdi_SurfaceCommand)
-    ((pcRdpgfxSurfaceCommand)client->gdi_SurfaceCommand)(context, cmd);
+  if (client->gdi_SurfaceCommand) {
+    gdi_rc = ((pcRdpgfxSurfaceCommand)client->gdi_SurfaceCommand)(context, cmd);
+    gdi_chained = TRUE;
+  }
 
-  if (viewer_server_publish_gfx_surface_command(client, cmd))
-    client->forwarded_gfx_surface_command_count++;
+  if (gdi_chained && (gdi_rc == CHANNEL_RC_OK) && (cmd->left <= 0xFFFFU) &&
+      (cmd->top <= 0xFFFFU) && (cmd->right <= 0xFFFFU) &&
+      (cmd->bottom <= 0xFFFFU)) {
+    dirty_rect.left = (UINT16)cmd->left;
+    dirty_rect.top = (UINT16)cmd->top;
+    dirty_rect.right = (UINT16)cmd->right;
+    dirty_rect.bottom = (UINT16)cmd->bottom;
+    backend_ingest_gdi_framebuffer(client, client->context, &dirty_rect, 1);
+  }
 
   return CHANNEL_RC_OK;
 }
@@ -730,9 +777,6 @@ backend_rdpgfx_reset_graphics(RdpgfxClientContext *context,
                                                generation);
   }
 
-  if (viewer_server_publish_gfx_reset_graphics(client, reset_graphics))
-    client->forwarded_gfx_reset_graphics_count++;
-
   return CHANNEL_RC_OK;
 }
 
@@ -744,9 +788,7 @@ static UINT backend_rdpgfx_delete_encoding_context(
   if (!client || !delete_encoding_context)
     return ERROR_INVALID_PARAMETER;
 
-  if (viewer_server_publish_gfx_delete_encoding_context(
-          client, delete_encoding_context))
-    client->forwarded_gfx_delete_encoding_context_count++;
+  (void)delete_encoding_context;
 
   return CHANNEL_RC_OK;
 }
@@ -968,6 +1010,39 @@ static BOOL on_end_paint(rdpContext *context) {
   return rc;
 }
 
+static BOOL backend_rect_from_bounds(UINT32 left, UINT32 top, UINT32 right,
+                                     UINT32 bottom, RECTANGLE_16 *rect) {
+  if (!rect)
+    return FALSE;
+
+  if ((left > 0xFFFFU) || (top > 0xFFFFU) || (right > 0xFFFFU) ||
+      (bottom > 0xFFFFU))
+    return FALSE;
+
+  rect->left = (UINT16)left;
+  rect->top = (UINT16)top;
+  rect->right = (UINT16)right;
+  rect->bottom = (UINT16)bottom;
+  return TRUE;
+}
+
+static void backend_ingest_gdi_framebuffer(BackendClient *client,
+                                           rdpContext *context,
+                                           const RECTANGLE_16 *dirty_rects,
+                                           UINT32 dirty_rect_count) {
+  rdpGdi *gdi = context ? context->gdi : NULL;
+
+  if (!client || !gdi || !gdi->primary_buffer)
+    return;
+
+  if ((gdi->width == 0) || (gdi->height == 0) || (gdi->stride == 0))
+    return;
+
+  (void)viewer_server_update_framebuffer_from_gdi(
+      client, gdi->primary_buffer, gdi->width, gdi->height, gdi->stride,
+      gdi->dstFormat, dirty_rects, dirty_rect_count);
+}
+
 static BOOL on_bitmap_update(rdpContext *context, const BITMAP_UPDATE *bitmap) {
   BackendClient *client = g_backend_client;
   BOOL rc = FALSE;
@@ -990,9 +1065,30 @@ static BOOL on_bitmap_update(rdpContext *context, const BITMAP_UPDATE *bitmap) {
     UINT64 total_bytes = 0;
     UINT32 i = 0;
     BOOL forwarded = FALSE;
+    RECTANGLE_16 *dirty_rects = NULL;
+    UINT32 dirty_rect_count = 0;
 
     for (i = 0; i < bitmap->number; i++)
       total_bytes += bitmap->rectangles[i].bitmapLength;
+
+    if (bitmap->number > 0) {
+      dirty_rects =
+          (RECTANGLE_16 *)calloc(bitmap->number, sizeof(*dirty_rects));
+      if (dirty_rects) {
+        for (i = 0; i < bitmap->number; i++) {
+          const BITMAP_DATA *rect = &bitmap->rectangles[i];
+          if (backend_rect_from_bounds(rect->destLeft, rect->destTop,
+                                       rect->destRight, rect->destBottom,
+                                       &dirty_rects[dirty_rect_count]))
+            dirty_rect_count++;
+        }
+      }
+    }
+
+    if ((bitmap->number == 0) || dirty_rects)
+      backend_ingest_gdi_framebuffer(client, context, dirty_rects,
+                                     dirty_rect_count);
+    free(dirty_rects);
 
     client->bitmap_update_count++;
 
@@ -1116,6 +1212,7 @@ static BOOL on_surface_bits(rdpContext *context,
                             const SURFACE_BITS_COMMAND *cmd) {
   BackendClient *client = g_backend_client;
   BOOL rc = FALSE;
+  RECTANGLE_16 dirty_rect = {0};
 
   if (!client || !client->orig_surface_bits)
     return FALSE;
@@ -1146,6 +1243,9 @@ static BOOL on_surface_bits(rdpContext *context,
             cmd->cmdType);
 
   backend_refresh_desktop_layout(client, context);
+  if (backend_rect_from_bounds(cmd->destLeft, cmd->destTop, cmd->destRight,
+                               cmd->destBottom, &dirty_rect))
+    backend_ingest_gdi_framebuffer(client, context, &dirty_rect, 1);
   (void)backend_forward_surface_bits(client, cmd);
   return TRUE;
 }
@@ -1748,6 +1848,77 @@ BOOL backend_configure(BackendClient *client, const char *hostname, UINT16 port,
   return TRUE;
 }
 
+BOOL backend_apply_rdp_file_options(BackendClient *client,
+                                    const BackendRdpFileOptions *options) {
+  rdpSettings *settings = NULL;
+  const char *effective_host = NULL;
+
+  if (!client || !client->context)
+    return FALSE;
+  if (!options)
+    return TRUE;
+
+  settings = client->context->settings;
+  if (!settings)
+    return FALSE;
+
+  (void)options->workspace_id;
+
+  effective_host = client->hostname;
+  if (!backend_string_is_empty(options->alternate_full_address)) {
+    effective_host = options->alternate_full_address;
+    if (!freerdp_settings_set_string(settings, FreeRDP_ServerHostname,
+                                     effective_host))
+      return FALSE;
+    if (!backend_replace_owned_string(&client->hostname, effective_host))
+      return FALSE;
+  }
+
+  if (!backend_string_is_empty(options->loadbalanceinfo)) {
+    const size_t loadbalanceinfo_length =
+        strnlen_s(options->loadbalanceinfo, 4096);
+    if (loadbalanceinfo_length >= 4096)
+      return FALSE;
+    if (!freerdp_settings_set_pointer_len(settings, FreeRDP_LoadBalanceInfo,
+                                          options->loadbalanceinfo,
+                                          loadbalanceinfo_length))
+      return FALSE;
+  }
+
+  if (options->use_redirection_server_name &&
+      !backend_string_is_empty(effective_host)) {
+    if (!freerdp_settings_set_string(settings, FreeRDP_UserSpecifiedServerName,
+                                     effective_host))
+      return FALSE;
+  }
+
+  return TRUE;
+}
+
+BOOL backend_set_gfx_decode_only(BackendClient *client, BOOL enabled) {
+  rdpSettings *settings = NULL;
+
+  if (!client || !client->context || !client->context->settings)
+    return FALSE;
+
+  settings = client->context->settings;
+  client->backend_gfx_decode_only_enabled = enabled ? TRUE : FALSE;
+
+  freerdp_settings_set_bool(settings, FreeRDP_SupportGraphicsPipeline,
+                            client->backend_gfx_decode_only_enabled);
+  freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
+  freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
+  freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
+
+  if (client->backend_gfx_decode_only_enabled &&
+      !backend_prepare_rdpgfx_channels(client))
+    return FALSE;
+
+  WLog_INFO(TAG, "Backend RDPEGFX decode-only gate enabled=%s",
+            client->backend_gfx_decode_only_enabled ? "true" : "false");
+  return TRUE;
+}
+
 typedef struct {
   rdpContext *context;
   UINT32 timeout_ms;
@@ -2109,6 +2280,62 @@ void backend_get_pointer_snapshot(BackendClient *client, UINT16 *x, UINT16 *y,
   if (shape_gen)
     *shape_gen = client->pointer_shape_generation;
   LeaveCriticalSection(&client->pointer_lock);
+}
+
+BOOL backend_get_pointer_snapshot_copy(BackendClient *client, UINT16 *x,
+                                       UINT16 *y, BOOL *visible, UINT32 *type,
+                                       PointerShapeEntry *active_shape_copy,
+                                       BOOL *has_active_shape,
+                                       UINT64 *position_gen,
+                                       UINT64 *shape_gen) {
+  BOOL copied = TRUE;
+
+  if (active_shape_copy)
+    pointer_shape_entry_reset(active_shape_copy);
+  if (has_active_shape)
+    *has_active_shape = FALSE;
+
+  if (!client) {
+    if (x)
+      *x = 0;
+    if (y)
+      *y = 0;
+    if (visible)
+      *visible = FALSE;
+    if (type)
+      *type = SYSPTR_NULL;
+    if (position_gen)
+      *position_gen = 0;
+    if (shape_gen)
+      *shape_gen = 0;
+    return TRUE;
+  }
+
+  EnterCriticalSection(&client->pointer_lock);
+  if (x)
+    *x = client->pointer_x;
+  if (y)
+    *y = client->pointer_y;
+  if (visible)
+    *visible = client->pointer_visible;
+  if (type)
+    *type = client->pointer_type;
+  if (position_gen)
+    *position_gen = client->pointer_position_generation;
+  if (shape_gen)
+    *shape_gen = client->pointer_shape_generation;
+  if (client->active_pointer_shape) {
+    if (active_shape_copy) {
+      copied = pointer_shape_entry_copy(active_shape_copy,
+                                        client->active_pointer_shape);
+      if (copied && has_active_shape)
+        *has_active_shape = TRUE;
+    } else if (has_active_shape)
+      *has_active_shape = TRUE;
+  }
+  LeaveCriticalSection(&client->pointer_lock);
+
+  return copied;
 }
 
 void backend_get_pointer_state(BackendClient *client, UINT16 *x, UINT16 *y,

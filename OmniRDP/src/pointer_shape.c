@@ -3,13 +3,37 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void pointer_shape_entry_reset(PointerShapeEntry *entry) {
+static BOOL pointer_shape_copy_mask(BYTE **destination, const BYTE *source,
+                                    UINT32 length);
+
+void pointer_shape_entry_reset(PointerShapeEntry *entry) {
   if (!entry)
     return;
 
   free(entry->xorMaskData);
   free(entry->andMaskData);
   memset(entry, 0, sizeof(*entry));
+}
+
+BOOL pointer_shape_entry_copy(PointerShapeEntry *destination,
+                              const PointerShapeEntry *source) {
+  if (!destination || !source)
+    return FALSE;
+
+  memset(destination, 0, sizeof(*destination));
+  *destination = *source;
+  destination->xorMaskData = NULL;
+  destination->andMaskData = NULL;
+
+  if (!pointer_shape_copy_mask(&destination->xorMaskData, source->xorMaskData,
+                               source->xorMaskLength) ||
+      !pointer_shape_copy_mask(&destination->andMaskData, source->andMaskData,
+                               source->andMaskLength)) {
+    pointer_shape_entry_reset(destination);
+    return FALSE;
+  }
+
+  return TRUE;
 }
 
 static BOOL pointer_shape_copy_mask(BYTE **destination, const BYTE *source,

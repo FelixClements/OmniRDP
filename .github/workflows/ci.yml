@@ -150,21 +150,15 @@ jobs:
       - name: Build OmniRDP ASan
         run: cmake --build OmniRDP/build-asan --config Debug -j
 
-      - name: Run tests under ASan
+      - name: Run app executables under ASan
         if: github.event_name == 'push'
         shell: pwsh
         run: |
-          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vsPath = & $vsWhere -latest -property installationPath
-          $asanDll = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse -Filter "clang_rt.asan_dynamic-x86_64.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($asanDll) { $env:PATH = "$($asanDll.DirectoryName);$env:PATH" }
-          $env:ASAN_OPTIONS = "halt_on_error=1:detect_stack_use_after_return=1:check_initialization_order=1"
-          $testDir = "OmniRDP/build-asan/tests"
-          $testBinDir = "$testDir/Debug"
-          foreach ($testName in @("test_viewer_state", "test_pointer_shape")) {
-            $exe = Join-Path $testBinDir "$testName.exe"
-            if (Test-Path $exe) { & $exe }
-          }
+          ./scripts/Invoke-ASanAppSmoke.ps1 `
+            -BuildDir "OmniRDP/build-asan" `
+            -FreeRdpBuildDir "freerdp-3.26.0/build-debug" `
+            -Configuration Debug `
+            -ArtifactDir "artifacts/asan/app-smoke"
 
       - name: Configure FreeRDP Release
         run: |
@@ -256,6 +250,4 @@ jobs:
           path: setup/Output/OmniRDP-Setup.exe
           retention-days: 7
           if-no-files-found: error
-
-
 

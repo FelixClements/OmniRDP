@@ -18,6 +18,9 @@
 extern "C" {
 #endif
 
+#define SVC_VIEWER_GFX_CODEC_UNCOMPRESSED 0
+#define SVC_VIEWER_GFX_CODEC_RFX 1
+
 /* ── Service-level settings (from [service] section) ────────── */
 
 typedef struct {
@@ -44,7 +47,12 @@ typedef struct {
   char backend_username[256];  /* REQUIRED */
   char backend_password[1024]; /* REQUIRED (may be dpapi:... or plaintext) */
   char backend_domain[256];    /* default: "" */
-  unsigned int backend_connect_timeout_ms; /* default: 30000 */
+  unsigned int backend_connect_timeout_ms;      /* default: 30000 */
+  int backend_gfx_decode_only_enabled;          /* default: 0 */
+  char backend_rdp_workspace_id[256];           /* default: "" */
+  int backend_rdp_use_redirection_server_name;  /* default: 0 */
+  char backend_rdp_loadbalanceinfo[1024];       /* default: "" */
+  char backend_rdp_alternate_full_address[256]; /* default: "" */
 
   /* Reconnect policy */
   int reconnect_enabled;                   /* default: 1 */
@@ -66,9 +74,15 @@ typedef struct {
   unsigned int viewer_late_join_refresh_deadline_ms; /* default: 5000 */
   unsigned int viewer_late_join_replay_max_frames;   /* default: 4 */
   unsigned int viewer_throttle_max_updates_per_sec; /* default: 0 (unlimited) */
-  int viewer_security_nla_enabled;                  /* default: 1 */
-  int viewer_security_tls_enabled;                  /* default: 1 */
-  int viewer_security_rdp_enabled;                  /* default: 1 */
+  int viewer_gfx_enabled;                           /* default: 0 */
+  int viewer_gfx_codec; /* default: SVC_VIEWER_GFX_CODEC_UNCOMPRESSED */
+  int viewer_gfx_diagnostic_full_frame_dirty;               /* default: 0 */
+  int viewer_classic_latest_state_enabled;                  /* default: 0 */
+  unsigned int viewer_classic_latest_state_max_queue_depth; /* default: 0 */
+  unsigned int viewer_classic_latest_state_max_queue_bytes; /* default: 0 */
+  int viewer_security_nla_enabled;                          /* default: 1 */
+  int viewer_security_tls_enabled;                          /* default: 1 */
+  int viewer_security_rdp_enabled;                          /* default: 1 */
   char viewer_auth_mode[32]; /* default: "backend_credentials" */
 
   /* Display */

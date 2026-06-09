@@ -37,6 +37,8 @@
 /* Maximum password length read from pipe */
 #define MAX_PASSWORD_LEN 1024
 
+#define INSTANCE_RUNNER_FIXED_MAX_VIEWERS 10U
+
 static volatile int g_running = 1;
 static ViewerServer *g_server = NULL;
 
@@ -62,6 +64,15 @@ static const char *svc_log_level_to_wlog(SvcLogLevel level) {
   default:
     return "INFO";
   }
+}
+
+static ViewerGfxCodec instance_viewer_gfx_codec(int codec) {
+  return (codec == SVC_VIEWER_GFX_CODEC_RFX) ? VIEWER_GFX_CODEC_RFX
+                                             : VIEWER_GFX_CODEC_UNCOMPRESSED;
+}
+
+static const char *instance_viewer_gfx_codec_name(int codec) {
+  return (codec == SVC_VIEWER_GFX_CODEC_RFX) ? "rfx" : "uncompressed";
 }
 
 static const char *svc_log_level_to_text(SvcLogLevel level) {
@@ -125,20 +136,22 @@ static void log_effective_instance_config(const SvcConfig *config,
         inst->reconnect_initial_delay_ms, inst->reconnect_max_delay_ms,
         inst->reconnect_backoff_multiplier);
   LOG_I("instance_runner",
-        "Config display/codecs: monitors=%u size=%ux%u depth=%u nscodec=%s "
+        "Config display/codecs: monitors=%u size=%ux%u depth=%u "
+        "backend_gfx_decode=%s nscodec=%s "
         "remote_fx=%s gfx=%s h264=%s avc444=%s avc444v2=%s frame_ack=%u",
         inst->display_monitor_count, inst->display_monitor_width,
         inst->display_monitor_height, inst->display_color_depth,
+        bool_str(inst->backend_gfx_decode_only_enabled),
         bool_str(inst->codec_nscodec), bool_str(inst->codec_remote_fx),
         bool_str(inst->codec_graphics_pipeline), bool_str(inst->codec_h264),
         bool_str(inst->codec_avc444), bool_str(inst->codec_avc444v2),
         inst->codec_frame_acknowledge);
 
-  if (inst->viewer_max_viewers != MAX_VIEWERS ||
+  if (inst->viewer_max_viewers != INSTANCE_RUNNER_FIXED_MAX_VIEWERS ||
       instance_key_configured(config, inst, "viewer.max_viewers"))
     LOG_W("instance_runner",
           "viewer.max_viewers is reserved; runtime fixed maximum is %u",
-          MAX_VIEWERS);
+          INSTANCE_RUNNER_FIXED_MAX_VIEWERS);
   if (inst->viewer_slow_lag_interval_ms != 5000 ||
       instance_key_configured(config, inst, "viewer.slow_lag_interval_ms"))
     LOG_W("instance_runner",
@@ -568,6 +581,27 @@ int instance_runner_main(int argc, char *argv[]) {
     return 1;
   }
 
+  BackendRdpFileOptions rdp_file_options = {
+      inst->backend_rdp_workspace_id,
+      inst->backend_rdp_use_redirection_server_name ? TRUE : FALSE,
+      inst->backend_rdp_loadbalanceinfo,
+      inst->backend_rdp_alternate_full_address};
+  if (!backend_apply_rdp_file_options(client, &rdp_file_options)) {
+    LOG_E("instance_runner", "Failed to configure backend RDP file options");
+    SecureZeroMemory(password, sizeof(password));
+    backend_free(client);
+    svc_config_free(config);
+    return 1;
+  }
+  if (!backend_set_gfx_decode_only(
+          client, inst->backend_gfx_decode_only_enabled ? TRUE : FALSE)) {
+    LOG_E("instance_runner", "Failed to configure backend GFX decode gate");
+    SecureZeroMemory(password, sizeof(password));
+    backend_free(client);
+    svc_config_free(config);
+    return 1;
+  }
+
   backend_set_connect_timeout(client, (UINT32)inst->backend_connect_timeout_ms);
 
   /* Zero out password after use */
@@ -615,21 +649,30 @@ int instance_runner_main(int argc, char *argv[]) {
     return 1;
   }
 
-  if ((viewer_auth_mode == VIEWER_AUTH_MODE_BACKEND_CREDENTIALS) &&
-      !inst->viewer_security_nla_enabled) {
-    LOG_E("instance_runner",
-          "Invalid viewer auth configuration: viewer.auth.mode=%s requires "
-          "viewer.security.nla_enabled=true for instance '%s'.",
-          inst->viewer_auth_mode, args.instance_name);
-    backend_disconnect(client);
-    backend_free(client);
-    svc_config_free(config);
-    return 1;
+  if (viewer_auth_mode == VIEWER_AUTH_MODE_BACKEND_CREDENTIALS) {
+    if (!inst->viewer_security_nla_enabled) {
+      LOG_W("instance_runner",
+            "Viewer auth configuration for instance '%s' uses "
+            "viewer.auth.mode=%s with viewer.security.nla_enabled=false. "
+            "This allows backend-local accounts to reach OmniRDP's "
+            "credential check because NLA validates against the OmniRDP "
+            "listener host/domain before application logon callbacks run.",
+            args.instance_name, inst->viewer_auth_mode);
+    }
+
+    if (!inst->viewer_security_tls_enabled) {
+      LOG_W("instance_runner",
+            "Viewer auth configuration for instance '%s' uses "
+            "viewer.auth.mode=%s without viewer.security.tls_enabled=true. "
+            "Enable TLS to protect viewer credentials in transit.",
+            args.instance_name, inst->viewer_auth_mode);
+    }
   }
 
   ViewerSecurityConfig viewer_security = {
       inst->viewer_security_nla_enabled, inst->viewer_security_tls_enabled,
       inst->viewer_security_rdp_enabled, viewer_auth_mode};
+  ViewerPublisherClassicPolicyConfig classic_policy = {0};
   ViewerServer *server = viewer_server_init_ex(
       inst->viewer_bind_address, inst->viewer_port, client,
       inst->viewer_cert_path, inst->viewer_key_path, &viewer_security);
@@ -648,6 +691,42 @@ int instance_runner_main(int argc, char *argv[]) {
         "Applied viewer slow disconnect: enabled=%s after_ms=%u",
         bool_str(inst->viewer_slow_disconnect_enabled),
         inst->viewer_slow_disconnect_after_ms);
+
+  classic_policy.enabled =
+      inst->viewer_classic_latest_state_enabled ? TRUE : FALSE;
+  classic_policy.policy = VIEWER_PUBLISHER_CLASSIC_POLICY_LATEST_STATE;
+  classic_policy.max_queue_depth =
+      (UINT32)inst->viewer_classic_latest_state_max_queue_depth;
+  classic_policy.max_queue_bytes =
+      (UINT64)inst->viewer_classic_latest_state_max_queue_bytes;
+  viewer_server_set_classic_policy(server, &classic_policy);
+  LOG_I("instance_runner",
+        "Applied classic latest-state policy: enabled=%s max_depth=%u "
+        "max_bytes=%u",
+        bool_str(inst->viewer_classic_latest_state_enabled),
+        inst->viewer_classic_latest_state_max_queue_depth,
+        inst->viewer_classic_latest_state_max_queue_bytes);
+
+  viewer_server_set_gfx_enabled(server,
+                                inst->viewer_gfx_enabled ? TRUE : FALSE);
+  LOG_I("instance_runner", "Applied viewer GFX gate: enabled=%s",
+        bool_str(inst->viewer_gfx_enabled));
+  viewer_server_set_gfx_codec(
+      server, instance_viewer_gfx_codec(inst->viewer_gfx_codec));
+  LOG_I("instance_runner", "Applied viewer GFX codec preference: %s",
+        instance_viewer_gfx_codec_name(inst->viewer_gfx_codec));
+  viewer_server_set_gfx_diagnostic_full_frame_dirty(
+      server, inst->viewer_gfx_diagnostic_full_frame_dirty ? TRUE : FALSE);
+  LOG_I("instance_runner",
+        "Applied viewer GFX diagnostic-only full-frame dirty: enabled=%s",
+        bool_str(inst->viewer_gfx_diagnostic_full_frame_dirty));
+  LOG_I("instance_runner",
+        "Viewer GFX dirty fallback defaults: enabled=%s codec=%s "
+        "diagnostic_full_frame_dirty=%s max_pending_rects=%u "
+        "area_fallback_percent=%u consecutive_defer_fallback_count=%u",
+        bool_str(inst->viewer_gfx_enabled),
+        instance_viewer_gfx_codec_name(inst->viewer_gfx_codec),
+        bool_str(inst->viewer_gfx_diagnostic_full_frame_dirty), 128U, 60U, 3U);
 
   /* Register FreeRDP WTS API */
   {

@@ -4,6 +4,103 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+static UINT32 viewer_gfx_caps_allowed_flags(void) {
+  UINT32 flags = 0;
+
+#ifdef RDPGFX_CAPS_FLAG_THINCLIENT
+  flags |= RDPGFX_CAPS_FLAG_THINCLIENT;
+#endif
+#ifdef RDPGFX_CAPS_FLAG_SMALL_CACHE
+  flags |= RDPGFX_CAPS_FLAG_SMALL_CACHE;
+#endif
+#ifdef RDPGFX_CAPS_FLAG_AVC_DISABLED
+  flags |= RDPGFX_CAPS_FLAG_AVC_DISABLED;
+#endif
+#ifdef RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE
+  flags |= RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE;
+#endif
+
+  return flags;
+}
+
+static BOOL viewer_gfx_caps_version_is_whitelisted(UINT32 version) {
+  switch (version) {
+#ifdef RDPGFX_CAPVERSION_8
+  case RDPGFX_CAPVERSION_8:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_81
+  case RDPGFX_CAPVERSION_81:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_10
+  case RDPGFX_CAPVERSION_10:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_101
+  case RDPGFX_CAPVERSION_101:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_102
+  case RDPGFX_CAPVERSION_102:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_103
+  case RDPGFX_CAPVERSION_103:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_104
+  case RDPGFX_CAPVERSION_104:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_105
+  case RDPGFX_CAPVERSION_105:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_106
+  case RDPGFX_CAPVERSION_106:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_106_ERR
+  case RDPGFX_CAPVERSION_106_ERR:
+    return TRUE;
+#endif
+#ifdef RDPGFX_CAPVERSION_107
+  case RDPGFX_CAPVERSION_107:
+    return TRUE;
+#endif
+  default:
+    return FALSE;
+  }
+}
+
+BOOL viewer_gfx_caps_is_whitelisted(const RDPGFX_CAPSET *caps) {
+  if (!caps)
+    return FALSE;
+
+  if (!viewer_gfx_caps_version_is_whitelisted(caps->version))
+    return FALSE;
+
+  return (caps->flags & ~viewer_gfx_caps_allowed_flags()) == 0;
+}
+
+static BOOL viewer_gfx_caps_is_preferred(const RDPGFX_CAPSET *candidate,
+                                         const RDPGFX_CAPSET *current) {
+  if (!current)
+    return TRUE;
+
+  if (candidate->version != current->version)
+    return candidate->version < current->version;
+
+#ifdef RDPGFX_CAPS_FLAG_AVC_DISABLED
+  if ((candidate->flags & RDPGFX_CAPS_FLAG_AVC_DISABLED) !=
+      (current->flags & RDPGFX_CAPS_FLAG_AVC_DISABLED))
+    return (candidate->flags & RDPGFX_CAPS_FLAG_AVC_DISABLED) != 0;
+#endif
+
+  return candidate->flags < current->flags;
+}
+
 BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
                                        BOOL canonical_caps_valid,
                                        const RDPGFX_CAPSET *advertised_caps,
@@ -16,11 +113,13 @@ BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
     return FALSE;
 
   if (canonical_caps_valid) {
-    if (!canonical_caps)
+    if (!viewer_gfx_caps_is_whitelisted(canonical_caps))
       return FALSE;
 
     for (i = 0; i < advertised_caps_count; i++) {
       const RDPGFX_CAPSET *caps = &advertised_caps[i];
+      if (!viewer_gfx_caps_is_whitelisted(caps))
+        continue;
       if ((caps->version == canonical_caps->version) &&
           (caps->flags == canonical_caps->flags)) {
         *selected_caps = *caps;
@@ -33,7 +132,9 @@ BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
 
   for (i = 0; i < advertised_caps_count; i++) {
     const RDPGFX_CAPSET *caps = &advertised_caps[i];
-    if (!best || (caps->version > best->version))
+    if (!viewer_gfx_caps_is_whitelisted(caps))
+      continue;
+    if (viewer_gfx_caps_is_preferred(caps, best))
       best = caps;
   }
 
@@ -42,79 +143,6 @@ BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
 
   *selected_caps = *best;
   return TRUE;
-}
-
-ViewerGfxCodecReplayPolicy
-viewer_gfx_codec_replay_policy(UINT16 codec_id,
-                               const RDPGFX_CAPSET *confirmed_caps) {
-  switch (codec_id) {
-  case RDPGFX_CODECID_UNCOMPRESSED:
-  case RDPGFX_CODECID_CLEARCODEC:
-  case RDPGFX_CODECID_PLANAR:
-  case RDPGFX_CODECID_ALPHA:
-  /* CAPROGRESSIVE is a stateless codec: each progressive frame is
-   * self-contained (the base layer always produces a valid picture
-   * regardless of decoder history). Unlike AVC which needs IDR
-   * frames for decoder state bootstrap, CAPROGRESSIVE frames can
-   * be replayed to late joiners as a usable visual baseline. */
-  case RDPGFX_CODECID_CAPROGRESSIVE:
-  case RDPGFX_CODECID_CAPROGRESSIVE_V2:
-    return VIEWER_GFX_CODEC_REPLAY_SAFE;
-
-  case RDPGFX_CODECID_AVC420:
-  case RDPGFX_CODECID_AVC444:
-  case RDPGFX_CODECID_AVC444v2:
-    if (confirmed_caps &&
-        (confirmed_caps->flags & RDPGFX_CAPS_FLAG_AVC_DISABLED))
-      return VIEWER_GFX_CODEC_REPLAY_REJECTED_BY_CAPS;
-    return VIEWER_GFX_CODEC_REPLAY_UNSAFE;
-
-  case RDPGFX_CODECID_CAVIDEO:
-  default:
-    return VIEWER_GFX_CODEC_REPLAY_UNSAFE;
-  }
-}
-
-ViewerJoinStrategy
-viewer_late_join_select_strategy(const ViewerLateJoinPolicyInputs *inputs) {
-  if (!inputs)
-    return VIEWER_JOIN_STRATEGY_NONE;
-
-  if (!inputs->rdpgfx_enabled || !inputs->channel_opened ||
-      !inputs->caps_compatible)
-    return VIEWER_JOIN_STRATEGY_CLASSIC_FALLBACK;
-
-  if (inputs->backend_frame_in_progress)
-    return VIEWER_JOIN_STRATEGY_WAIT_NEXT_SAFE_FRAME;
-
-  if (inputs->complete_frame_available && inputs->replay_safe_codecs_only)
-    return VIEWER_JOIN_STRATEGY_REPLAY_SAFE_FRAME;
-
-  return VIEWER_JOIN_STRATEGY_WAIT_NEXT_SAFE_FRAME;
-}
-
-BOOL viewer_late_join_ack_releases_live(UINT32 required_ack_frame_id,
-                                        UINT32 last_ack_frame_id) {
-  if (required_ack_frame_id == 0)
-    return FALSE;
-
-  return last_ack_frame_id >= required_ack_frame_id;
-}
-
-BOOL viewer_late_join_timeout_fallback_due(ViewerJoinStrategy strategy,
-                                           UINT64 late_join_start_ts,
-                                           UINT64 now, UINT32 timeout_ms,
-                                           BOOL waiting_for_ack) {
-  if ((strategy != VIEWER_JOIN_STRATEGY_WAIT_NEXT_SAFE_FRAME) &&
-      ((strategy != VIEWER_JOIN_STRATEGY_REPLAY_SAFE_FRAME) ||
-       !waiting_for_ack))
-    return FALSE;
-
-  if ((late_join_start_ts == 0) || (timeout_ms == 0) ||
-      (now < late_join_start_ts))
-    return FALSE;
-
-  return (now - late_join_start_ts) >= timeout_ms;
 }
 
 BOOL viewer_gfx_activation_waits_for_rdpgfx_caps(
@@ -175,6 +203,17 @@ BOOL viewer_gfx_pending_activation_timeout_due(const ViewerGraphicsContext *gfx,
     return FALSE;
 
   return (now - gfx->join_start_ts) >= timeout_ms;
+}
+
+BOOL viewer_gfx_failure_requires_disconnect(const ViewerGraphicsContext *gfx,
+                                            BOOL viewer_activated) {
+  if (!viewer_activated || !gfx)
+    return FALSE;
+
+  return (gfx->negotiation_outcome == VIEWER_GFX_NEGOTIATION_RDPEGFX_READY) &&
+         (gfx->join_state == VIEWER_JOIN_STATE_LIVE) &&
+         (gfx->join_strategy == VIEWER_JOIN_STRATEGY_NONE) && gfx->use_rdpgfx &&
+         !gfx->rdpgfx_temporarily_disabled;
 }
 
 BOOL viewer_input_try_acquire(ViewerInputOwnershipState *state,

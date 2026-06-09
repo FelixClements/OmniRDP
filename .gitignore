@@ -1,12 +1,16 @@
 # Prerequisites
 *.d
 archive/
+artifacts/
 OmniRDP/build/
+OmniRDP/build-asan/
 /*.md
 AGENTS.md
+!**/AGENTS.md
 .vscode/*
 freerdp-3.26.0/
-
+.omo/*
+tasks/
 # Object files
 *.o
 *.ko

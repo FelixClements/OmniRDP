@@ -50,6 +50,20 @@ backend.username = localadmin
 backend.password = password
 backend.domain =
 backend.connect_timeout_ms = 30000
+; Experimental backend RDPEGFX decode-only path. Default off and independent of viewer GFX.
+backend.gfx.decode_only_enabled = false
+
+; Optional RDS Connection Broker/session collection routing.
+; RDP-file equivalents:
+;   full address:s:rds-broker.domain.com
+;   workspace id:s:rds-broker.domain.com
+;   use redirection server name:i:1
+;   loadbalanceinfo:s:tsv://MS Terminal Services Plugin.1.Marketing_Pool
+;   alternate full address:s:rds-broker.domain.com
+backend.rdp_file.workspace_id =
+backend.rdp_file.use_redirection_server_name = false
+backend.rdp_file.loadbalanceinfo =
+backend.rdp_file.alternate_full_address =
 
 ; Backend security (OmniRDP -> backend VM)
 backend.security.nla_enabled = true
@@ -66,22 +80,27 @@ reconnect.max_delay_ms = 60000
 reconnect.backoff_multiplier = 2.0
 
 ; Viewer listener/security (RDP clients connect to OmniRDP here)
-viewer.bind_address = 192.168.1.207
+viewer.bind_address = 127.0.0.1
 viewer.port = 3390
 viewer.max_viewers = 10
 viewer.cert_path = C:\server.crt
 viewer.key_path = C:\server.key
 ; Viewer-side security/auth is independent from backend.security.*.
-; The default credential check uses backend credentials, so viewer-side NLA
-; must stay enabled unless viewer.auth.mode is changed to none.
+; NLA validates credentials against the OmniRDP listener host/domain before
+; OmniRDP's application logon callback runs. Backend-local accounts on another
+; VM may be rejected by NLA before OmniRDP can compare backend credentials.
 viewer.security.nla_enabled = true
 viewer.security.tls_enabled = true
 viewer.security.rdp_enabled = true
 ; none = accept viewer sessions without checking MSTSC credentials.
 ; backend_credentials = require MSTSC credentials to match backend.username/password
-; and requires viewer.security.nla_enabled = true. In MSTSC, use the configured
-; backend.username and backend.password.
-; For local backend accounts, MSTSC domain may be empty, ., localhost, or this computer name.
+; in OmniRDP. In MSTSC, use the configured backend.username and backend.password.
+; For backend-local accounts on another VM, set:
+;   viewer.security.nla_enabled = false
+;   viewer.security.tls_enabled = true
+;   viewer.auth.mode = backend_credentials
+; For local backend accounts, MSTSC domain may be empty, ., localhost, the
+; backend computer name, or the value expected by the backend VM.
 viewer.auth.mode = backend_credentials
 viewer.slow_disconnect_enabled = true
 viewer.slow_lag_interval_ms = 5000
@@ -90,6 +109,19 @@ viewer.late_join_timeout_ms = 15000
 viewer.late_join_refresh_deadline_ms = 5000
 viewer.late_join_replay_max_frames = 4
 viewer.throttle_max_updates_per_sec = 0
+; Experimental viewer RDPEGFX path. Default off. Uses canonical framebuffer
+; snapshots, not backend GFX. Currently only uncompressed is supported.
+viewer.gfx.enabled = false
+viewer.gfx.codec = uncompressed
+; Diagnostic only. Default off. When true, every viewer RDPEGFX incremental
+; dirty update is sent as one full-frame dirty rect.
+viewer.gfx.diagnostic.full_frame_dirty = false
+; Default off. When enabled, slow classic viewers whose queued BitmapUpdate
+; backlog exceeds either nonzero limit may have stale FIFO entries replaced
+; with one latest framebuffer baseline.
+viewer.classic_latest_state_enabled = false
+viewer.classic_latest_state_max_queue_depth = 0
+viewer.classic_latest_state_max_queue_bytes = 0
 
 ; Display
 display.monitor_count = 1
@@ -98,8 +130,8 @@ display.monitor_height = 1080
 display.color_depth = 32
 
 ; Codecs
-codec.nscodec = false
-codec.remote_fx = false
+codec.nscodec = true
+codec.remote_fx = true
 codec.graphics_pipeline = false
 codec.h264 = false
 codec.avc444 = false
@@ -109,7 +141,7 @@ codec.frame_acknowledge = 4
 ; Legacy compatibility security keys. Prefer backend.security.* for backend VM connection settings.
 ; Retained for older configs and may populate backend security if backend.security.* is absent.
 security.tls_enabled = true
-security.nla_enabled = false
+security.nla_enabled = true
 security.tls_min_version = 1.2
 security.server_authentication = true
 security.ignore_certificate = false

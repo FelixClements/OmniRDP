@@ -6,12 +6,27 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # ── AddressSanitizer (MSVC) ───────────────────────────────────────
 option(USE_ADDRESS_SANITIZER "Enable MSVC AddressSanitizer for memory checking" OFF)
+option(USE_ADDRESS_SANITIZER_USE_AFTER_RETURN "Enable MSVC ASan stack use-after-return instrumentation" OFF)
 if(USE_ADDRESS_SANITIZER)
     message(STATUS "AddressSanitizer enabled for all targets")
-    # Apply globally so test targets inherit ASan instrumentation.
+    # Apply globally so app and test targets inherit ASan instrumentation.
     # /Zo enables enhanced debug info for better ASan stack traces.
     add_compile_options(/fsanitize=address /Zo)
-    add_link_options(/fsanitize=address)
+    if(USE_ADDRESS_SANITIZER_USE_AFTER_RETURN)
+        add_compile_options(/fsanitize-address-use-after-return)
+    endif()
+
+    if(MSVC)
+        string(REPLACE "/RTC1" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+        string(REPLACE "/RTC1" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+        string(REPLACE "/ZI" "/Zi" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+        string(REPLACE "/ZI" "/Zi" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+
+        foreach(linker_flag_var CMAKE_EXE_LINKER_FLAGS_DEBUG CMAKE_SHARED_LINKER_FLAGS_DEBUG CMAKE_MODULE_LINKER_FLAGS_DEBUG)
+            string(REPLACE "/INCREMENTAL" "" ${linker_flag_var} "${${linker_flag_var}}")
+            string(APPEND ${linker_flag_var} " /INCREMENTAL:NO")
+        endforeach()
+    endif()
 endif()
 
 # ── Find FreeRDP 3.26.0 ───────────────────────────────────────
@@ -36,6 +51,16 @@ set(SOURCES
     src/main.c
     src/backend.c
     src/viewer_internal.c
+    src/viewer_auth.c
+    src/viewer_framebuffer.c
+    src/viewer_publisher.c
+    src/viewer_classic_queue.c
+    src/viewer_classic_transport.c
+    src/viewer_gfx_pipeline.c
+    src/viewer_gfx_codec_uncompressed.c
+    src/viewer_gfx_codec_rfx.c
+    src/viewer_pointer.c
+    src/viewer_pointer_transport.c
     src/viewer_server.c
     src/platform_compat.c
     src/pointer_shape.c
@@ -49,9 +74,22 @@ set(SOURCES
 # Header files
 set(HEADERS
     include/backend.h
+    include/monitor_layout.h
     include/viewer_server.h
+    include/viewer_framebuffer.h
+    include/viewer_publisher_config.h
+    include/viewer_publisher.h
+    src/viewer_classic_queue.h
+    src/viewer_classic_transport.h
+    src/viewer_gfx_pipeline.h
+    include/viewer_gfx_codec_uncompressed.h
+    include/viewer_gfx_codec_rfx.h
+    src/viewer_pointer.h
+    src/viewer_pointer_transport.h
     include/platform_compat.h
     src/pointer_shape.h
+    src/viewer_server_internal.h
+    src/viewer_auth.h
     src/viewer_internal.h
     src/ini_parser.h
     src/svc_config.h
@@ -219,3 +257,4 @@ enable_testing()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt)
     add_subdirectory(tests)
 endif()
+

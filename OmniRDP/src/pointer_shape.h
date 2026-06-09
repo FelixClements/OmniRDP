@@ -29,6 +29,9 @@ typedef struct PointerShapeCache {
   UINT32 count;
 } PointerShapeCache;
 
+void pointer_shape_entry_reset(PointerShapeEntry *entry);
+BOOL pointer_shape_entry_copy(PointerShapeEntry *destination,
+                              const PointerShapeEntry *source);
 PointerShapeCache *pointer_shape_cache_new(void);
 void pointer_shape_cache_free(PointerShapeCache *cache);
 PointerShapeEntry *
