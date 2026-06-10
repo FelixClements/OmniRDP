@@ -249,7 +249,7 @@ static void add_tray_icon(TrayAppCtx *ctx) {
   nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
   nid.uCallbackMessage = WM_TRAYICON;
   nid.hIcon = ctx->hIcons[ctx->currentState];
-  _snprintf(nid.szTip, sizeof(nid.szTip), "OmniRDP Service");
+  snprintf(nid.szTip, sizeof(nid.szTip), "OmniRDP Service");
   nid.szTip[sizeof(nid.szTip) - 1] = '\0';
 
   if (!Shell_NotifyIconA(NIM_ADD, &nid)) {
@@ -554,8 +554,8 @@ void tray_icon_update(TrayAppCtx *ctx) {
   nid.uFlags = NIF_ICON | NIF_TIP;
   nid.hIcon = ctx->hIcons[newState];
 
-  _snprintf(nid.szTip, sizeof(nid.szTip), "OmniRDP: %u/%u running",
-            runningCount, totalCount);
+  snprintf(nid.szTip, sizeof(nid.szTip), "OmniRDP: %u/%u running", runningCount,
+           totalCount);
   nid.szTip[sizeof(nid.szTip) - 1] = '\0';
 
   if (!Shell_NotifyIconA(NIM_MODIFY, &nid)) {
@@ -605,7 +605,7 @@ void tray_icon_show_menu(TrayAppCtx *ctx, HWND hwnd) {
 
       /* Service name header (disabled) */
       char svcHeader[280];
-      _snprintf(svcHeader, sizeof(svcHeader), "%s", svc->serviceName);
+      snprintf(svcHeader, sizeof(svcHeader), "%s", svc->serviceName);
       svcHeader[sizeof(svcHeader) - 1] = '\0';
       AppendMenuA(hSvcMenu, MF_STRING | MF_GRAYED | MF_DISABLED, 0, svcHeader);
 
@@ -624,8 +624,7 @@ void tray_icon_show_menu(TrayAppCtx *ctx, HWND hwnd) {
 
         /* Instance label (disabled) */
         char instLabel[192];
-        _snprintf(instLabel, sizeof(instLabel), "%s [%s]", inst->name,
-                  stateStr);
+        snprintf(instLabel, sizeof(instLabel), "%s [%s]", inst->name, stateStr);
         instLabel[sizeof(instLabel) - 1] = '\0';
         AppendMenuA(hInstMenu, MF_STRING | MF_GRAYED | MF_DISABLED, 0,
                     instLabel);
@@ -647,8 +646,8 @@ void tray_icon_show_menu(TrayAppCtx *ctx, HWND hwnd) {
 
         /* Add instance submenu to the service menu */
         char instMenuText[192];
-        _snprintf(instMenuText, sizeof(instMenuText), "%s [%s]", inst->name,
-                  stateStr);
+        snprintf(instMenuText, sizeof(instMenuText), "%s [%s]", inst->name,
+                 stateStr);
         instMenuText[sizeof(instMenuText) - 1] = '\0';
 
         AppendMenuA(hSvcMenu, MF_POPUP | MF_STRING, (UINT_PTR)hInstMenu,

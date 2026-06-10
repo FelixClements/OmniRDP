@@ -55,8 +55,8 @@ static void build_heartbeat_pipe_name(const char *instanceName, char *buf,
                                       size_t bufSize) {
   if (!buf || bufSize == 0)
     return;
-  if (_snprintf(buf, bufSize, "\\\\.\\pipe\\OmniRDP_Instance_%s",
-                instanceName) < 0)
+  if (snprintf(buf, bufSize, "\\\\.\\pipe\\OmniRDP_Instance_%s", instanceName) <
+      0)
     buf[0] = '\0';
   else
     buf[bufSize - 1] = '\0';
@@ -614,11 +614,11 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
    * "<configPath>"
    */
   char cmdline[32768];
-  int cmdlen = _snprintf(cmdline, sizeof(cmdline),
-                         "\"%s\" --instance \"%s\" --secrets-handle %Iu "
-                         "--stop-event %Iu --config \"%s\"",
-                         mgr->exePath, instanceName, (SIZE_T)hPipeRead,
-                         (SIZE_T)hStopEvent, mgr->configPath);
+  int cmdlen = snprintf(cmdline, sizeof(cmdline),
+                        "\"%s\" --instance \"%s\" --secrets-handle %Iu "
+                        "--stop-event %Iu --config \"%s\"",
+                        mgr->exePath, instanceName, (SIZE_T)hPipeRead,
+                        (SIZE_T)hStopEvent, mgr->configPath);
   if (cmdlen < 0 || (size_t)cmdlen >= sizeof(cmdline)) {
     LOG_E("svc_inst_mgr", "Start: command line too long for '%s'",
           instanceName);

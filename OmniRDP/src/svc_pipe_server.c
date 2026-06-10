@@ -483,11 +483,11 @@ static DWORD WINAPI client_handler(LPVOID arg) {
       break;
 
     default:
-      _snprintf(response, sizeof(response),
-                "{\"type\":\"response\",\"success\":0,"
-                "\"error_message\":\"Unknown command %d\","
-                "\"json_payload\":\"\"}",
-                cmd);
+      snprintf(response, sizeof(response),
+               "{\"type\":\"response\",\"success\":0,"
+               "\"error_message\":\"Unknown command %d\","
+               "\"json_payload\":\"\"}",
+               cmd);
       break;
     }
 
@@ -613,10 +613,10 @@ static DWORD WINAPI listener_thread(LPVOID arg) {
 static void cmd_list_instances(PipeServer *server, char *response,
                                size_t respSize) {
   if (!server->mgr) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Instance manager unavailable\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Instance manager unavailable\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
@@ -636,7 +636,7 @@ static void cmd_list_instances(PipeServer *server, char *response,
     if (inst_mgr_get_info(server->mgr, i, &info) != 0)
       continue;
 
-    int written = _snprintf(
+    int written = snprintf(
         array + pos, sizeof(array) - pos,
         "%s{\"name\":\"%s\",\"state\":%d,\"viewer_count\":%lu,"
         "\"backend_hostname\":\"%s\",\"backend_port\":%u,"
@@ -655,11 +655,11 @@ static void cmd_list_instances(PipeServer *server, char *response,
   char escaped[PIPE_STRUCT_JSON_MAX];
   json_escape_string(array, escaped, sizeof(escaped));
 
-  _snprintf(response, respSize,
-            "{\"type\":\"response\",\"success\":1,"
-            "\"error_message\":\"\","
-            "\"json_payload\":\"{\\\"instances\\\":[%s]}\"}",
-            escaped);
+  snprintf(response, respSize,
+           "{\"type\":\"response\",\"success\":1,"
+           "\"error_message\":\"\","
+           "\"json_payload\":\"{\\\"instances\\\":[%s]}\"}",
+           escaped);
 }
 
 /**
@@ -672,19 +672,19 @@ static void cmd_list_instances(PipeServer *server, char *response,
 static void cmd_start_instance(PipeServer *server, const char *payload,
                                char *response, size_t respSize) {
   if (!server->mgr) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Instance manager unavailable\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Instance manager unavailable\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
   char name[128];
   if (extract_instance_name(payload, name, sizeof(name)) != 0) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Missing or invalid instance_name\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Missing or invalid instance_name\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
@@ -693,15 +693,15 @@ static void cmd_start_instance(PipeServer *server, const char *payload,
 
   int ret = inst_mgr_start(server->mgr, name);
   if (ret == 0) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":1,"
-              "\"error_message\":\"\",\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":1,"
+             "\"error_message\":\"\",\"json_payload\":\"\"}");
   } else {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Failed to start '%s'\","
-              "\"json_payload\":\"\"}",
-              escaped_name);
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Failed to start '%s'\","
+             "\"json_payload\":\"\"}",
+             escaped_name);
   }
 }
 
@@ -715,19 +715,19 @@ static void cmd_start_instance(PipeServer *server, const char *payload,
 static void cmd_stop_instance(PipeServer *server, const char *payload,
                               char *response, size_t respSize) {
   if (!server->mgr) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Instance manager unavailable\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Instance manager unavailable\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
   char name[128];
   if (extract_instance_name(payload, name, sizeof(name)) != 0) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Missing or invalid instance_name\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Missing or invalid instance_name\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
@@ -736,15 +736,15 @@ static void cmd_stop_instance(PipeServer *server, const char *payload,
 
   int ret = inst_mgr_stop(server->mgr, name);
   if (ret == 0) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":1,"
-              "\"error_message\":\"\",\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":1,"
+             "\"error_message\":\"\",\"json_payload\":\"\"}");
   } else {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Failed to stop '%s'\","
-              "\"json_payload\":\"\"}",
-              escaped_name);
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Failed to stop '%s'\","
+             "\"json_payload\":\"\"}",
+             escaped_name);
   }
 }
 
@@ -758,19 +758,19 @@ static void cmd_stop_instance(PipeServer *server, const char *payload,
 static void cmd_restart_instance(PipeServer *server, const char *payload,
                                  char *response, size_t respSize) {
   if (!server->mgr) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Instance manager unavailable\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Instance manager unavailable\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
   char name[128];
   if (extract_instance_name(payload, name, sizeof(name)) != 0) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Missing or invalid instance_name\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Missing or invalid instance_name\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
@@ -779,15 +779,15 @@ static void cmd_restart_instance(PipeServer *server, const char *payload,
 
   int ret = inst_mgr_restart(server->mgr, name);
   if (ret == 0) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":1,"
-              "\"error_message\":\"\",\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":1,"
+             "\"error_message\":\"\",\"json_payload\":\"\"}");
   } else {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Failed to restart '%s'\","
-              "\"json_payload\":\"\"}",
-              escaped_name);
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Failed to restart '%s'\","
+             "\"json_payload\":\"\"}",
+             escaped_name);
   }
 }
 
@@ -801,10 +801,10 @@ static void cmd_restart_instance(PipeServer *server, const char *payload,
 static void cmd_reload_config(PipeServer *server, char *response,
                               size_t respSize) {
   if (!server->mgr) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Instance manager unavailable\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Instance manager unavailable\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
@@ -814,14 +814,14 @@ static void cmd_reload_config(PipeServer *server, char *response,
 
   int ret = inst_mgr_reload_config(server->mgr, configPath);
   if (ret == 0) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":1,"
-              "\"error_message\":\"\",\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":1,"
+             "\"error_message\":\"\",\"json_payload\":\"\"}");
   } else {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Config reload failed\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Config reload failed\","
+             "\"json_payload\":\"\"}");
   }
 }
 
@@ -845,12 +845,11 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
   }
 
   /* Append service name subdirectory to match svc_service.c log path */
-  _snprintf(logDirBuf, sizeof(logDirBuf), "%s\\%s", logDir,
-            server->serviceName);
+  snprintf(logDirBuf, sizeof(logDirBuf), "%s\\%s", logDir, server->serviceName);
   logDirBuf[sizeof(logDirBuf) - 1] = '\0';
 
   char logPath[MAX_PATH];
-  _snprintf(logPath, sizeof(logPath), "%s\\%s", logDirBuf, LOG_FILE_NAME);
+  snprintf(logPath, sizeof(logPath), "%s\\%s", logDirBuf, LOG_FILE_NAME);
   logPath[sizeof(logPath) - 1] = '\0';
 
   /* ── Open the log file ───────────────────────────────────── */
@@ -859,10 +858,10 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
    * can be read while the service is actively writing to it. */
   FILE *f = _fsopen(logPath, "r", _SH_DENYNO);
   if (!f) {
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Cannot open log file\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Cannot open log file\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
@@ -871,20 +870,20 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
    * newlines until we have MAX_LOG_LINES or reach the start. */
   if (fseek(f, 0, SEEK_END) != 0) {
     fclose(f);
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Cannot seek log file\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Cannot seek log file\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
   long fileSize = ftell(f);
   if (fileSize <= 0) {
     fclose(f);
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":1,"
-              "\"error_message\":\"\","
-              "\"json_payload\":\"{\\\"logs\\\":[]}\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":1,"
+             "\"error_message\":\"\","
+             "\"json_payload\":\"{\\\"logs\\\":[]}\"}");
     return;
   }
 
@@ -930,10 +929,10 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
 
   if (fseek(f, tailStart, SEEK_SET) != 0) {
     fclose(f);
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Cannot seek in log file\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Cannot seek in log file\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
@@ -942,10 +941,10 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
   char *tailBuf = (char *)malloc(tailBytes + 1);
   if (!tailBuf) {
     fclose(f);
-    _snprintf(response, respSize,
-              "{\"type\":\"response\",\"success\":0,"
-              "\"error_message\":\"Out of memory\","
-              "\"json_payload\":\"\"}");
+    snprintf(response, respSize,
+             "{\"type\":\"response\",\"success\":0,"
+             "\"error_message\":\"Out of memory\","
+             "\"json_payload\":\"\"}");
     return;
   }
 
@@ -1027,11 +1026,11 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
   char escaped[PIPE_STRUCT_JSON_MAX];
   json_escape_string(linesBuf, escaped, sizeof(escaped));
 
-  _snprintf(response, respSize,
-            "{\"type\":\"response\",\"success\":1,"
-            "\"error_message\":\"\","
-            "\"json_payload\":\"{\\\"logs\\\":[%s]}\"}",
-            escaped);
+  snprintf(response, respSize,
+           "{\"type\":\"response\",\"success\":1,"
+           "\"error_message\":\"\","
+           "\"json_payload\":\"{\\\"logs\\\":[%s]}\"}",
+           escaped);
 }
 
 /* ════════════════════════════════════════════════════════════════ */
@@ -1132,8 +1131,8 @@ int pipe_server_init(PipeServer *server, const char *pipeName,
             _TRUNCATE);
 
   /* ── Build the full pipe path ──────────────────────────────── */
-  int ret = _snprintf(server->pipeName, sizeof(server->pipeName),
-                      "\\\\.\\pipe\\%s", pipeName);
+  int ret = snprintf(server->pipeName, sizeof(server->pipeName),
+                     "\\\\.\\pipe\\%s", pipeName);
   if (ret < 0 || (size_t)ret >= sizeof(server->pipeName)) {
     LOG_E("pipe_server", "Pipe name is too long");
     memset(server, 0, sizeof(*server));
@@ -1270,8 +1269,8 @@ void pipe_server_push_stats(PipeServer *server) {
   char json[PIPE_STRUCT_JSON_MAX];
   size_t pos = 0;
 
-  int n = _snprintf(json + pos, sizeof(json) - pos,
-                    "{\"type\":\"push\",\"push_type\":\"stats\",\"stats\":{");
+  int n = snprintf(json + pos, sizeof(json) - pos,
+                   "{\"type\":\"push\",\"push_type\":\"stats\",\"stats\":{");
   if (n > 0)
     pos += (size_t)n;
 
@@ -1282,10 +1281,10 @@ void pipe_server_push_stats(PipeServer *server) {
     if (inst_mgr_get_info(server->mgr, i, &info) != 0)
       continue;
 
-    n = _snprintf(json + pos, sizeof(json) - pos,
-                  "%s\"%s\":{\"state\":%d,\"viewer_count\":%lu}",
-                  first ? "" : ",", info.name, (int)info.state,
-                  info.viewer_count);
+    n = snprintf(json + pos, sizeof(json) - pos,
+                 "%s\"%s\":{\"state\":%d,\"viewer_count\":%lu}",
+                 first ? "" : ",", info.name, (int)info.state,
+                 info.viewer_count);
     if (n > 0 && (size_t)n < sizeof(json) - pos)
       pos += (size_t)n;
     first = FALSE;
@@ -1294,7 +1293,7 @@ void pipe_server_push_stats(PipeServer *server) {
       break;
   }
 
-  n = _snprintf(json + pos, sizeof(json) - pos, "}}");
+  n = snprintf(json + pos, sizeof(json) - pos, "}}");
   if (n > 0)
     pos += (size_t)n;
 
@@ -1310,15 +1309,15 @@ void pipe_server_push_event(PipeServer *server, const char *eventType,
   int n;
 
   if (instanceName && instanceName[0] != '\0') {
-    n = _snprintf(json, sizeof(json),
-                  "{\"type\":\"push\",\"push_type\":\"event\","
-                  "\"event\":\"%s\",\"instance_name\":\"%s\"}",
-                  eventType, instanceName);
+    n = snprintf(json, sizeof(json),
+                 "{\"type\":\"push\",\"push_type\":\"event\","
+                 "\"event\":\"%s\",\"instance_name\":\"%s\"}",
+                 eventType, instanceName);
   } else {
-    n = _snprintf(json, sizeof(json),
-                  "{\"type\":\"push\",\"push_type\":\"event\","
-                  "\"event\":\"%s\"}",
-                  eventType);
+    n = snprintf(json, sizeof(json),
+                 "{\"type\":\"push\",\"push_type\":\"event\","
+                 "\"event\":\"%s\"}",
+                 eventType);
   }
 
   if (n < 0 || (size_t)n >= sizeof(json))

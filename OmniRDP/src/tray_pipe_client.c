@@ -260,10 +260,10 @@ int pipe_client_send_request(PipeClient *client, const PipeRequest *request,
       return -1;
     }
 
-    _snprintf(jsonReq, needed,
-              "{\"cmd\":%d,\"instance_name\":\"%s\",\"payload\":%s}",
-              (int)request->command, request->instance_name,
-              request->json_payload[0] != '\0' ? request->json_payload : "{}");
+    snprintf(jsonReq, needed,
+             "{\"cmd\":%d,\"instance_name\":\"%s\",\"payload\":%s}",
+             (int)request->command, request->instance_name,
+             request->json_payload[0] != '\0' ? request->json_payload : "{}");
     jsonReq[needed - 1] = '\0';
   }
 

@@ -310,7 +310,7 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
 
   /* Build the section name: "instance:<name>" */
   char section[256];
-  int ret = _snprintf(section, sizeof(section), "instance:%s", instance_name);
+  int ret = snprintf(section, sizeof(section), "instance:%s", instance_name);
   if (ret < 0 || (size_t)ret >= sizeof(section))
     return -1;
 
@@ -322,7 +322,7 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
 
   /* ── Build temp file path ─────────────────────────────────── */
   char tmp_path[MAX_PATH];
-  ret = _snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", config_path);
+  ret = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", config_path);
   if (ret < 0 || (size_t)ret >= sizeof(tmp_path)) {
     fclose(orig);
     return -1;
@@ -378,7 +378,7 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
             *se-- = '\0';
         }
 
-        if (_snprintf(current_section, sizeof(current_section), "%s", sp) < 0) {
+        if (snprintf(current_section, sizeof(current_section), "%s", sp) < 0) {
           fclose(orig);
           fclose(tmp);
           remove(tmp_path);
@@ -430,7 +430,7 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
 
               /* Copy the value and trim trailing ws/newlines */
               char value[8192];
-              if (_snprintf(value, sizeof(value), "%s", val_start) < 0) {
+              if (snprintf(value, sizeof(value), "%s", val_start) < 0) {
                 fclose(orig);
                 fclose(tmp);
                 remove(tmp_path);

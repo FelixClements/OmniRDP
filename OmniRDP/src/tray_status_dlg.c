@@ -107,27 +107,27 @@ static void populate_listview(HWND hListView, const TrayAppCtx *ctx) {
       lParam =
           (LPARAM)((si << LPARAM_SERVICE_SHIFT) | (ii & LPARAM_INSTANCE_MASK));
 
-      _snprintf(serviceName, sizeof(serviceName), "%s", svc->serviceName);
+      snprintf(serviceName, sizeof(serviceName), "%s", svc->serviceName);
       serviceName[sizeof(serviceName) - 1] = '\0';
 
-      _snprintf(instanceName, sizeof(instanceName), "%s", inst->name);
+      snprintf(instanceName, sizeof(instanceName), "%s", inst->name);
       instanceName[sizeof(instanceName) - 1] = '\0';
 
-      _snprintf(stateText, sizeof(stateText), "%s",
-                state_to_string(inst->state));
+      snprintf(stateText, sizeof(stateText), "%s",
+               state_to_string(inst->state));
       stateText[sizeof(stateText) - 1] = '\0';
 
       /* Viewer column */
       if (inst->state == INSTANCE_STOPPED)
         snprintf(viewers, sizeof(viewers), "-");
       else {
-        _snprintf(viewers, sizeof(viewers), "%lu/10", inst->viewer_count);
+        snprintf(viewers, sizeof(viewers), "%lu/10", inst->viewer_count);
         viewers[sizeof(viewers) - 1] = '\0';
       }
 
       /* Backend column */
-      _snprintf(backend, sizeof(backend), "%s:%u", inst->backend_hostname,
-                inst->backend_port);
+      snprintf(backend, sizeof(backend), "%s:%u", inst->backend_hostname,
+               inst->backend_port);
       backend[sizeof(backend) - 1] = '\0';
 
       itemIndex = ListView_GetItemCount(hListView);

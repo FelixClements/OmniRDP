@@ -27,7 +27,7 @@ jobs:
       - name: Reject banned APIs
         run: |
           set -euo pipefail
-          pattern='\b(strcpy|strncpy|strlen|memcpy|fopen|atoi|getenv|fgetc|InitializeCriticalSection)\s*\('
+          pattern='\b(strcpy|strncpy|strlen|memcpy|fopen|atoi|getenv|fgetc|_snprintf|_vsnprintf|InitializeCriticalSection)\s*\('
           if rg --line-number --glob 'OmniRDP/**/*.{c,h}' "$pattern"; then
             echo "::error::Direct calls to banned C APIs were found. Use the checked/bounded alternatives documented in AGENTS.md."
             exit 1

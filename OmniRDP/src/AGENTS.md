@@ -48,8 +48,8 @@ Production C for the multiplexer, Windows service, tray app, named-pipe protocol
 
 ## CODE-SCANNING STYLE
 
-- Avoid raw `strcpy`, `strncpy`, `strlen`, `memcpy`, `fopen`, `atoi`, `getenv`, and naive `fgetc` loops.
-- Use `fopen_s`, checked `snprintf`, `strnlen_s`, `memcpy_s`, `strtol`/`strtoul` with range checks, or whole-struct assignment.
+- Avoid raw `strcpy`, `strncpy`, `strlen`, `memcpy`, `fopen`, `_snprintf`, `_vsnprintf`, `atoi`, `getenv`, and naive `fgetc` loops.
+- Use `fopen_s`, C99 `snprintf`/`vsnprintf` with truncation checks, `strnlen_s`, `memcpy_s`, `strtol`/`strtoul` with range checks, or whole-struct assignment.
 - Check initialization results for critical sections and Windows handles; clean up handles on every error path.
 
 ## TEST EXPECTATIONS
