@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <freerdp/channels/rdpgfx.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 static void test_ownership_timeout_transitions(void) {
@@ -208,14 +209,23 @@ static UINT32 test_gfx_avc_disabled_flag(void) {
 }
 
 static int test_gfx_cap_description_formats_version_flags(void) {
-  char buffer[80] = {0};
+  enum { CAP_DESCRIPTION_CAPACITY = 80 };
+  char *buffer = (char *)calloc(CAP_DESCRIPTION_CAPACITY, sizeof(*buffer));
   RDPGFX_CAPSET cap = test_gfx_cap(0x12345678U, 0x9ABCDEF0U);
+  int result = 1;
 
-  if (!viewer_gfx_capset_describe(&cap, buffer, sizeof(buffer)))
+  if (!buffer)
     return 1;
+
+  if (!viewer_gfx_capset_describe(&cap, buffer, CAP_DESCRIPTION_CAPACITY))
+    goto cleanup;
   if (strcmp(buffer, "version=0x12345678 flags=0x9ABCDEF0") != 0)
-    return 1;
-  return 0;
+    goto cleanup;
+  result = 0;
+
+cleanup:
+  free(buffer);
+  return result;
 }
 
 static void test_gfx_supported_clean_cap_selected(void) {

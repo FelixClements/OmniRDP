@@ -94,15 +94,21 @@ int main(int argc, char *argv[]) {
   BOOL runConsole = FALSE;
   BOOL hasServiceName = FALSE;
   BOOL hasConfigPath = FALSE;
-  char serviceName[256];
-  char configPath[MAX_PATH];
+  enum { SERVICE_NAME_CAPACITY = 256 };
+  char *serviceName =
+      (char *)calloc(SERVICE_NAME_CAPACITY, sizeof(*serviceName));
+  char *configPath = (char *)calloc(MAX_PATH, sizeof(*configPath));
+  int exitCode = 1;
+  if (!serviceName || !configPath) {
+    fputs("Out of memory while initializing service arguments.\n", stderr);
+    goto cleanup;
+  }
 
-  if (copy_arg_string(serviceName, sizeof(serviceName), DEFAULT_SERVICE_NAME) !=
-          0 ||
-      copy_arg_string(configPath, sizeof(configPath), DEFAULT_CONFIG_PATH) !=
-          0) {
-    fprintf(stderr, "Default service configuration is too long.\n");
-    return 1;
+  if (copy_arg_string(serviceName, SERVICE_NAME_CAPACITY,
+                      DEFAULT_SERVICE_NAME) != 0 ||
+      copy_arg_string(configPath, MAX_PATH, DEFAULT_CONFIG_PATH) != 0) {
+    fputs("Default service configuration is too long.\n", stderr);
+    goto cleanup;
   }
 
   /* Parse command-line arguments */
@@ -114,15 +120,15 @@ int main(int argc, char *argv[]) {
     } else if (strcmp(argv[i], "--run") == 0) {
       runConsole = TRUE;
     } else if (strcmp(argv[i], "--service-name") == 0 && i + 1 < argc) {
-      if (copy_arg_string(serviceName, sizeof(serviceName), argv[++i]) != 0) {
-        fprintf(stderr, "Service name too long.\n");
-        return 1;
+      if (copy_arg_string(serviceName, SERVICE_NAME_CAPACITY, argv[++i]) != 0) {
+        fputs("Service name too long.\n", stderr);
+        goto cleanup;
       }
       hasServiceName = TRUE;
     } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
-      if (copy_arg_string(configPath, sizeof(configPath), argv[++i]) != 0) {
-        fprintf(stderr, "Config path too long.\n");
-        return 1;
+      if (copy_arg_string(configPath, MAX_PATH, argv[++i]) != 0) {
+        fputs("Config path too long.\n", stderr);
+        goto cleanup;
       }
       hasConfigPath = TRUE;
     } else if (strcmp(argv[i], "--service") == 0) {
@@ -134,11 +140,12 @@ int main(int argc, char *argv[]) {
        */
     } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       print_usage(argv[0]);
-      return 0;
+      exitCode = 0;
+      goto cleanup;
     } else {
-      fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+      fprintf_s(stderr, "Unknown argument: %s\n", argv[i]);
       print_usage(argv[0]);
-      return 1;
+      goto cleanup;
     }
   }
 
@@ -152,9 +159,10 @@ int main(int argc, char *argv[]) {
     if (ret == 0) {
       printf("Service '%s' installed successfully.\n", serviceName);
     } else {
-      fprintf(stderr, "Failed to install service '%s'.\n", serviceName);
+      fprintf_s(stderr, "Failed to install service '%s'.\n", serviceName);
     }
-    return ret < 0 ? 1 : ret;
+    exitCode = ret < 0 ? 1 : ret;
+    goto cleanup;
   }
 
   /* ── Uninstall mode ─────────────────────────────────────────── */
@@ -164,9 +172,10 @@ int main(int argc, char *argv[]) {
     if (ret == 0) {
       printf("Service '%s' uninstalled successfully.\n", serviceName);
     } else {
-      fprintf(stderr, "Failed to uninstall service '%s'.\n", serviceName);
+      fprintf_s(stderr, "Failed to uninstall service '%s'.\n", serviceName);
     }
-    return ret < 0 ? 1 : ret;
+    exitCode = ret < 0 ? 1 : ret;
+    goto cleanup;
   }
 
   /* ── Console mode (debugging) ──────────────────────────────── */
@@ -175,15 +184,16 @@ int main(int argc, char *argv[]) {
     printf("  Config: %s\n", configPath);
     int ret = svc_service_run_console(serviceName, configPath);
     printf("Service exited with code %d.\n", ret);
-    return ret;
+    exitCode = ret;
+    goto cleanup;
   }
 
   /* ── Service mode (SCM) ────────────────────────────────────── */
   /* Store globals for ServiceMain callback */
   if (copy_arg_string(g_serviceName, sizeof(g_serviceName), serviceName) != 0 ||
       copy_arg_string(g_configPath, sizeof(g_configPath), configPath) != 0) {
-    fprintf(stderr, "Service name or config path too long.\n");
-    return 1;
+    fputs("Service name or config path too long.\n", stderr);
+    goto cleanup;
   }
 
   /* Update the service table with the actual service name.
@@ -194,14 +204,19 @@ int main(int argc, char *argv[]) {
 
   if (!StartServiceCtrlDispatcher(serviceTable)) {
     DWORD err = GetLastError();
-    fprintf(stderr, "StartServiceCtrlDispatcher failed (error %lu).\n", err);
-    fprintf(
-        stderr,
-        "Hint: Are you running from a command prompt instead of the SCM?\n");
-    fprintf(stderr, "      Use --run for console mode, or --install to "
-                    "register the service.\n");
-    return 1;
+    fprintf_s(stderr, "StartServiceCtrlDispatcher failed (error %lu).\n", err);
+    fputs("Hint: Are you running from a command prompt instead of the SCM?\n",
+          stderr);
+    fputs("      Use --run for console mode, or --install to register the "
+          "service.\n",
+          stderr);
+    goto cleanup;
   }
 
-  return 0;
+  exitCode = 0;
+
+cleanup:
+  free(serviceName);
+  free(configPath);
+  return exitCode;
 }

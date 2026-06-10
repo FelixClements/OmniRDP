@@ -222,22 +222,22 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
           "Would you like to open the config file to add one?",
           "OmniRDP", MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND);
       if (result == IDYES) {
-        char configPath[MAX_PATH];
-        omni_format(configPath, sizeof(configPath),
-                    "C:\\ProgramData\\OmniRDP\\config.ini");
+        char *configPath = (char *)calloc(MAX_PATH, sizeof(*configPath));
+        if (configPath) {
+          omni_format(configPath, MAX_PATH,
+                      "C:\\ProgramData\\OmniRDP\\config.ini");
 
-        /* Check if config file exists */
-        DWORD attr = GetFileAttributesA(configPath);
-        if (attr == INVALID_FILE_ATTRIBUTES) {
-          /* Config file doesn't exist — create directory and template */
-          SHCreateDirectoryExA(NULL, "C:\\ProgramData\\OmniRDP", NULL);
+          /* Check if config file exists */
+          DWORD attr = GetFileAttributesA(configPath);
+          if (attr == INVALID_FILE_ATTRIBUTES) {
+            /* Config file doesn't exist — create directory and template */
+            SHCreateDirectoryExA(NULL, "C:\\ProgramData\\OmniRDP", NULL);
 
-          FILE *fp = NULL;
-          if (fopen_s(&fp, configPath, "w") != 0)
-            fp = NULL;
-          if (fp) {
-            fprintf(fp,
-                    "; OmniRDP Configuration\n"
+            FILE *fp = NULL;
+            if (fopen_s(&fp, configPath, "w") != 0)
+              fp = NULL;
+            if (fp) {
+              fputs("; OmniRDP Configuration\n"
                     "; Edit this file with your backend RDP server details.\n"
                     "\n"
                     "[service]\n"
@@ -298,21 +298,24 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                     "codec.remote_fx = true\n"
                     "codec.graphics_pipeline = false\n"
                     "security.tls_enabled = true\n"
-                    "security.nla_enabled = true\n");
-            fclose(fp);
+                    "security.nla_enabled = true\n",
+                    fp);
+              fclose(fp);
+            }
           }
-        }
 
-        /* Now open the config file */
-        SHELLEXECUTEINFOA sei = {0};
-        sei.cbSize = sizeof(sei);
-        sei.lpVerb = "open";
-        sei.lpFile = configPath;
-        sei.nShow = SW_SHOWNORMAL;
-        if (!ShellExecuteExA(&sei)) {
-          sei.lpFile = "notepad.exe";
-          sei.lpParameters = configPath;
-          ShellExecuteExA(&sei);
+          /* Now open the config file */
+          SHELLEXECUTEINFOA sei = {0};
+          sei.cbSize = sizeof(sei);
+          sei.lpVerb = "open";
+          sei.lpFile = configPath;
+          sei.nShow = SW_SHOWNORMAL;
+          if (!ShellExecuteExA(&sei)) {
+            sei.lpFile = "notepad.exe";
+            sei.lpParameters = configPath;
+            ShellExecuteExA(&sei);
+          }
+          free(configPath);
         }
       }
     }

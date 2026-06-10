@@ -452,39 +452,42 @@ static DWORD WINAPI client_handler(LPVOID arg) {
 
     /* Parse the command */
     int cmd = extract_command(payload);
-    char response[PIPE_STRUCT_JSON_MAX];
-    response[0] = '\0';
+    char *response = (char *)calloc(PIPE_STRUCT_JSON_MAX, sizeof(*response));
+    if (!response) {
+      HeapFree(GetProcessHeap(), 0, payload);
+      break;
+    }
 
     LOG_I("pipe_server", "Client handler: received command %d, payload='%s'",
           cmd, payload);
 
     switch (cmd) {
     case PIPE_CMD_LIST_INSTANCES:
-      cmd_list_instances(server, response, sizeof(response));
+      cmd_list_instances(server, response, PIPE_STRUCT_JSON_MAX);
       break;
 
     case PIPE_CMD_START_INSTANCE:
-      cmd_start_instance(server, payload, response, sizeof(response));
+      cmd_start_instance(server, payload, response, PIPE_STRUCT_JSON_MAX);
       break;
 
     case PIPE_CMD_STOP_INSTANCE:
-      cmd_stop_instance(server, payload, response, sizeof(response));
+      cmd_stop_instance(server, payload, response, PIPE_STRUCT_JSON_MAX);
       break;
 
     case PIPE_CMD_RESTART_INSTANCE:
-      cmd_restart_instance(server, payload, response, sizeof(response));
+      cmd_restart_instance(server, payload, response, PIPE_STRUCT_JSON_MAX);
       break;
 
     case PIPE_CMD_RELOAD_CONFIG:
-      cmd_reload_config(server, response, sizeof(response));
+      cmd_reload_config(server, response, PIPE_STRUCT_JSON_MAX);
       break;
 
     case PIPE_CMD_GET_LOGS:
-      cmd_get_logs(server, payload, response, sizeof(response));
+      cmd_get_logs(server, payload, response, PIPE_STRUCT_JSON_MAX);
       break;
 
     default:
-      omni_format(response, sizeof(response),
+      omni_format(response, PIPE_STRUCT_JSON_MAX,
                   "{\"type\":\"response\",\"success\":0,"
                   "\"error_message\":\"Unknown command %d\","
                   "\"json_payload\":\"\"}",
@@ -495,9 +498,9 @@ static DWORD WINAPI client_handler(LPVOID arg) {
     HeapFree(GetProcessHeap(), 0, payload);
 
     /* Send the response — synchronously (dedicated thread) */
-    size_t responseLenSize = strnlen_s(response, sizeof(response));
-    if (responseLenSize >= sizeof(response))
-      responseLenSize = sizeof(response) - 1;
+    size_t responseLenSize = strnlen_s(response, PIPE_STRUCT_JSON_MAX);
+    if (responseLenSize >= PIPE_STRUCT_JSON_MAX)
+      responseLenSize = PIPE_STRUCT_JSON_MAX - 1;
     DWORD responseLen = (DWORD)responseLenSize;
     if (responseLen > 0) {
       LOG_D("pipe_server", "Client handler: sending response (%lu bytes): %s",
@@ -509,9 +512,11 @@ static DWORD WINAPI client_handler(LPVOID arg) {
       if (!sendResult) {
         LOG_D("pipe_server", "pipe_frame_send error %lu on pipe %p",
               GetLastError(), (void *)hPipe);
+        free(response);
         break;
       }
     }
+    free(response);
   }
 
   LOG_I("pipe_server",
@@ -626,9 +631,15 @@ static void cmd_list_instances(PipeServer *server, char *response,
    * We accumulate into a temporary buffer first, then escape it
    * into the json_payload field.
    */
-  char array[PIPE_STRUCT_JSON_MAX];
+  char *array = (char *)calloc(PIPE_STRUCT_JSON_MAX, sizeof(*array));
+  if (!array) {
+    omni_format(response, respSize,
+                "{\"type\":\"response\",\"success\":0,"
+                "\"error_message\":\"Out of memory\","
+                "\"json_payload\":\"\"}");
+    return;
+  }
   size_t pos = 0;
-  array[0] = '\0';
 
   for (unsigned int i = 0; i < server->mgr->instanceCount; i++) {
     PipeInstanceInfo info;
@@ -638,7 +649,7 @@ static void cmd_list_instances(PipeServer *server, char *response,
       continue;
 
     int written = omni_format(
-        array + pos, sizeof(array) - pos,
+        array + pos, PIPE_STRUCT_JSON_MAX - pos,
         "%s{\"name\":\"%s\",\"state\":%d,\"viewer_count\":%lu,"
         "\"backend_hostname\":\"%s\",\"backend_port\":%u,"
         "\"viewer_port\":%u}",
@@ -646,21 +657,31 @@ static void cmd_list_instances(PipeServer *server, char *response,
         info.backend_hostname, (unsigned int)info.backend_port,
         (unsigned int)info.viewer_port);
 
-    if (written > 0 && (size_t)written < sizeof(array) - pos)
+    if (written > 0 && (size_t)written < PIPE_STRUCT_JSON_MAX - pos)
       pos += (size_t)written;
     else
       break; /* buffer full — truncate */
   }
 
   /* Escape the array and wrap in a response with json_payload */
-  char escaped[PIPE_STRUCT_JSON_MAX];
-  json_escape_string(array, escaped, sizeof(escaped));
+  char *escaped = (char *)calloc(PIPE_STRUCT_JSON_MAX, sizeof(*escaped));
+  if (!escaped) {
+    free(array);
+    omni_format(response, respSize,
+                "{\"type\":\"response\",\"success\":0,"
+                "\"error_message\":\"Out of memory\","
+                "\"json_payload\":\"\"}");
+    return;
+  }
+  json_escape_string(array, escaped, PIPE_STRUCT_JSON_MAX);
+  free(array);
 
   omni_format(response, respSize,
               "{\"type\":\"response\",\"success\":1,"
               "\"error_message\":\"\","
               "\"json_payload\":\"{\\\"instances\\\":[%s]}\"}",
               escaped);
+  free(escaped);
 }
 
 /**
@@ -680,8 +701,23 @@ static void cmd_start_instance(PipeServer *server, const char *payload,
     return;
   }
 
-  char name[128];
-  if (extract_instance_name(payload, name, sizeof(name)) != 0) {
+  enum { INSTANCE_NAME_CAPACITY = 128, ESCAPED_NAME_CAPACITY = 256 };
+  char *name = (char *)calloc(INSTANCE_NAME_CAPACITY, sizeof(*name));
+  char *escaped_name =
+      (char *)calloc(ESCAPED_NAME_CAPACITY, sizeof(*escaped_name));
+  if (!name || !escaped_name) {
+    free(name);
+    free(escaped_name);
+    omni_format(response, respSize,
+                "{\"type\":\"response\",\"success\":0,"
+                "\"error_message\":\"Out of memory\","
+                "\"json_payload\":\"\"}");
+    return;
+  }
+
+  if (extract_instance_name(payload, name, INSTANCE_NAME_CAPACITY) != 0) {
+    free(name);
+    free(escaped_name);
     omni_format(response, respSize,
                 "{\"type\":\"response\",\"success\":0,"
                 "\"error_message\":\"Missing or invalid instance_name\","
@@ -689,8 +725,7 @@ static void cmd_start_instance(PipeServer *server, const char *payload,
     return;
   }
 
-  char escaped_name[256];
-  json_escape_string(name, escaped_name, sizeof(escaped_name));
+  json_escape_string(name, escaped_name, ESCAPED_NAME_CAPACITY);
 
   int ret = inst_mgr_start(server->mgr, name);
   if (ret == 0) {
@@ -704,6 +739,8 @@ static void cmd_start_instance(PipeServer *server, const char *payload,
                 "\"json_payload\":\"\"}",
                 escaped_name);
   }
+  free(name);
+  free(escaped_name);
 }
 
 /**
@@ -723,8 +760,23 @@ static void cmd_stop_instance(PipeServer *server, const char *payload,
     return;
   }
 
-  char name[128];
-  if (extract_instance_name(payload, name, sizeof(name)) != 0) {
+  enum { INSTANCE_NAME_CAPACITY = 128, ESCAPED_NAME_CAPACITY = 256 };
+  char *name = (char *)calloc(INSTANCE_NAME_CAPACITY, sizeof(*name));
+  char *escaped_name =
+      (char *)calloc(ESCAPED_NAME_CAPACITY, sizeof(*escaped_name));
+  if (!name || !escaped_name) {
+    free(name);
+    free(escaped_name);
+    omni_format(response, respSize,
+                "{\"type\":\"response\",\"success\":0,"
+                "\"error_message\":\"Out of memory\","
+                "\"json_payload\":\"\"}");
+    return;
+  }
+
+  if (extract_instance_name(payload, name, INSTANCE_NAME_CAPACITY) != 0) {
+    free(name);
+    free(escaped_name);
     omni_format(response, respSize,
                 "{\"type\":\"response\",\"success\":0,"
                 "\"error_message\":\"Missing or invalid instance_name\","
@@ -732,8 +784,7 @@ static void cmd_stop_instance(PipeServer *server, const char *payload,
     return;
   }
 
-  char escaped_name[256];
-  json_escape_string(name, escaped_name, sizeof(escaped_name));
+  json_escape_string(name, escaped_name, ESCAPED_NAME_CAPACITY);
 
   int ret = inst_mgr_stop(server->mgr, name);
   if (ret == 0) {
@@ -747,6 +798,8 @@ static void cmd_stop_instance(PipeServer *server, const char *payload,
                 "\"json_payload\":\"\"}",
                 escaped_name);
   }
+  free(name);
+  free(escaped_name);
 }
 
 /**
@@ -766,8 +819,23 @@ static void cmd_restart_instance(PipeServer *server, const char *payload,
     return;
   }
 
-  char name[128];
-  if (extract_instance_name(payload, name, sizeof(name)) != 0) {
+  enum { INSTANCE_NAME_CAPACITY = 128, ESCAPED_NAME_CAPACITY = 256 };
+  char *name = (char *)calloc(INSTANCE_NAME_CAPACITY, sizeof(*name));
+  char *escaped_name =
+      (char *)calloc(ESCAPED_NAME_CAPACITY, sizeof(*escaped_name));
+  if (!name || !escaped_name) {
+    free(name);
+    free(escaped_name);
+    omni_format(response, respSize,
+                "{\"type\":\"response\",\"success\":0,"
+                "\"error_message\":\"Out of memory\","
+                "\"json_payload\":\"\"}");
+    return;
+  }
+
+  if (extract_instance_name(payload, name, INSTANCE_NAME_CAPACITY) != 0) {
+    free(name);
+    free(escaped_name);
     omni_format(response, respSize,
                 "{\"type\":\"response\",\"success\":0,"
                 "\"error_message\":\"Missing or invalid instance_name\","
@@ -775,8 +843,7 @@ static void cmd_restart_instance(PipeServer *server, const char *payload,
     return;
   }
 
-  char escaped_name[256];
-  json_escape_string(name, escaped_name, sizeof(escaped_name));
+  json_escape_string(name, escaped_name, ESCAPED_NAME_CAPACITY);
 
   int ret = inst_mgr_restart(server->mgr, name);
   if (ret == 0) {
@@ -790,6 +857,8 @@ static void cmd_restart_instance(PipeServer *server, const char *payload,
                 "\"json_payload\":\"\"}",
                 escaped_name);
   }
+  free(name);
+  free(escaped_name);
 }
 
 /**
@@ -838,7 +907,17 @@ static void cmd_reload_config(PipeServer *server, char *response,
 static void cmd_get_logs(PipeServer *server, const char *payload,
                          char *response, size_t respSize) {
   /* ── Determine log file path ─────────────────────────────── */
-  char logDirBuf[MAX_PATH];
+  char *logDirBuf = (char *)calloc(MAX_PATH, sizeof(*logDirBuf));
+  char *logPath = (char *)calloc(MAX_PATH, sizeof(*logPath));
+  if (!logDirBuf || !logPath) {
+    free(logDirBuf);
+    free(logPath);
+    omni_format(response, respSize,
+                "{\"type\":\"response\",\"success\":0,"
+                "\"error_message\":\"Out of memory\","
+                "\"json_payload\":\"\"}");
+    return;
+  }
   const char *logDir = "C:\\ProgramData\\OmniRDP\\logs";
   if (server->mgr && server->mgr->config &&
       server->mgr->config->service.log_dir[0] != '\0') {
@@ -846,13 +925,11 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
   }
 
   /* Append service name subdirectory to match svc_service.c log path */
-  omni_format(logDirBuf, sizeof(logDirBuf), "%s\\%s", logDir,
-              server->serviceName);
-  logDirBuf[sizeof(logDirBuf) - 1] = '\0';
+  omni_format(logDirBuf, MAX_PATH, "%s\\%s", logDir, server->serviceName);
+  logDirBuf[MAX_PATH - 1] = '\0';
 
-  char logPath[MAX_PATH];
-  omni_format(logPath, sizeof(logPath), "%s\\%s", logDirBuf, LOG_FILE_NAME);
-  logPath[sizeof(logPath) - 1] = '\0';
+  omni_format(logPath, MAX_PATH, "%s\\%s", logDirBuf, LOG_FILE_NAME);
+  logPath[MAX_PATH - 1] = '\0';
 
   /* ── Open the log file ───────────────────────────────────── */
   /* Use _fsopen with _SH_DENYNO to allow concurrent reads.
@@ -860,6 +937,8 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
    * can be read while the service is actively writing to it. */
   FILE *f = _fsopen(logPath, "r", _SH_DENYNO);
   if (!f) {
+    free(logDirBuf);
+    free(logPath);
     omni_format(response, respSize,
                 "{\"type\":\"response\",\"success\":0,"
                 "\"error_message\":\"Cannot open log file\","
@@ -872,6 +951,8 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
    * newlines until we have MAX_LOG_LINES or reach the start. */
   if (fseek(f, 0, SEEK_END) != 0) {
     fclose(f);
+    free(logDirBuf);
+    free(logPath);
     omni_format(response, respSize,
                 "{\"type\":\"response\",\"success\":0,"
                 "\"error_message\":\"Cannot seek log file\","
@@ -882,6 +963,8 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
   long fileSize = ftell(f);
   if (fileSize <= 0) {
     fclose(f);
+    free(logDirBuf);
+    free(logPath);
     omni_format(response, respSize,
                 "{\"type\":\"response\",\"success\":1,"
                 "\"error_message\":\"\","
@@ -893,7 +976,17 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
    * tail from the discovered offset to get the actual lines. */
   long tailStart = fileSize; /* byte offset to start reading from */
   unsigned int lineCount = 0;
-  char chunk[TAIL_CHUNK_SIZE];
+  char *chunk = (char *)calloc(TAIL_CHUNK_SIZE, sizeof(*chunk));
+  if (!chunk) {
+    fclose(f);
+    free(logDirBuf);
+    free(logPath);
+    omni_format(response, respSize,
+                "{\"type\":\"response\",\"success\":0,"
+                "\"error_message\":\"Out of memory\","
+                "\"json_payload\":\"\"}");
+    return;
+  }
   long readPos = fileSize;
 
   while (readPos > 0 && lineCount < MAX_LOG_LINES) {
@@ -931,6 +1024,9 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
 
   if (fseek(f, tailStart, SEEK_SET) != 0) {
     fclose(f);
+    free(chunk);
+    free(logDirBuf);
+    free(logPath);
     omni_format(response, respSize,
                 "{\"type\":\"response\",\"success\":0,"
                 "\"error_message\":\"Cannot seek in log file\","
@@ -943,6 +1039,9 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
   char *tailBuf = (char *)malloc(tailBytes + 1);
   if (!tailBuf) {
     fclose(f);
+    free(chunk);
+    free(logDirBuf);
+    free(logPath);
     omni_format(response, respSize,
                 "{\"type\":\"response\",\"success\":0,"
                 "\"error_message\":\"Out of memory\","
@@ -952,19 +1051,29 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
 
   size_t bytesRead = fread(tailBuf, 1, tailBytes, f);
   fclose(f);
+  free(chunk);
   tailBuf[bytesRead] = '\0';
 
   /* ── Build JSON array of lines ───────────────────────────── */
   /* Escape backslashes, quotes, and control characters. */
-  char linesBuf[PIPE_STRUCT_JSON_MAX];
+  char *linesBuf = (char *)calloc(PIPE_STRUCT_JSON_MAX, sizeof(*linesBuf));
+  if (!linesBuf) {
+    free(tailBuf);
+    free(logDirBuf);
+    free(logPath);
+    omni_format(response, respSize,
+                "{\"type\":\"response\",\"success\":0,"
+                "\"error_message\":\"Out of memory\","
+                "\"json_payload\":\"\"}");
+    return;
+  }
   size_t outPos = 0;
-  linesBuf[0] = '\0';
 
   char *line = tailBuf;
   char *nextLine = NULL;
   BOOL first = TRUE;
 
-  while (line && *line && outPos < sizeof(linesBuf) - 64) {
+  while (line && *line && outPos < PIPE_STRUCT_JSON_MAX - 64) {
     /* Find end of line */
     nextLine = strchr(line, '\n');
     if (nextLine)
@@ -977,7 +1086,7 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
       line[--lineLen] = '\0';
 
     if (!first) {
-      if (outPos < sizeof(linesBuf) - 1)
+      if (outPos < PIPE_STRUCT_JSON_MAX - 1)
         linesBuf[outPos++] = ',';
     }
     first = FALSE;
@@ -985,7 +1094,8 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
     linesBuf[outPos++] = '"';
 
     /* Copy with minimal JSON escaping */
-    for (const char *src = line; *src && outPos < sizeof(linesBuf) - 8; src++) {
+    for (const char *src = line; *src && outPos < PIPE_STRUCT_JSON_MAX - 8;
+         src++) {
       char c = *src;
       switch (c) {
       case '"':
@@ -1015,7 +1125,7 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
 
     linesBuf[outPos++] = '"';
 
-    if (outPos >= sizeof(linesBuf) - 64)
+    if (outPos >= PIPE_STRUCT_JSON_MAX - 64)
       break;
 
     line = nextLine ? nextLine + 1 : NULL;
@@ -1025,14 +1135,28 @@ static void cmd_get_logs(PipeServer *server, const char *payload,
   free(tailBuf);
 
   /* Escape the log lines array for embedding in json_payload */
-  char escaped[PIPE_STRUCT_JSON_MAX];
-  json_escape_string(linesBuf, escaped, sizeof(escaped));
+  char *escaped = (char *)calloc(PIPE_STRUCT_JSON_MAX, sizeof(*escaped));
+  if (!escaped) {
+    free(linesBuf);
+    free(logDirBuf);
+    free(logPath);
+    omni_format(response, respSize,
+                "{\"type\":\"response\",\"success\":0,"
+                "\"error_message\":\"Out of memory\","
+                "\"json_payload\":\"\"}");
+    return;
+  }
+  json_escape_string(linesBuf, escaped, PIPE_STRUCT_JSON_MAX);
 
   omni_format(response, respSize,
               "{\"type\":\"response\",\"success\":1,"
               "\"error_message\":\"\","
               "\"json_payload\":\"{\\\"logs\\\":[%s]}\"}",
               escaped);
+  free(escaped);
+  free(linesBuf);
+  free(logDirBuf);
+  free(logPath);
 }
 
 /* ════════════════════════════════════════════════════════════════ */
@@ -1268,10 +1392,12 @@ void pipe_server_push_stats(PipeServer *server) {
 
   /* Build a compact stats JSON payload.
    * Format: {"type":"push","push_type":"stats","stats":{...}} */
-  char json[PIPE_STRUCT_JSON_MAX];
+  char *json = (char *)calloc(PIPE_STRUCT_JSON_MAX, sizeof(*json));
+  if (!json)
+    return;
   size_t pos = 0;
 
-  int n = omni_format(json + pos, sizeof(json) - pos,
+  int n = omni_format(json + pos, PIPE_STRUCT_JSON_MAX - pos,
                       "{\"type\":\"push\",\"push_type\":\"stats\",\"stats\":{");
   if (n > 0)
     pos += (size_t)n;
@@ -1283,23 +1409,24 @@ void pipe_server_push_stats(PipeServer *server) {
     if (inst_mgr_get_info(server->mgr, i, &info) != 0)
       continue;
 
-    n = omni_format(json + pos, sizeof(json) - pos,
+    n = omni_format(json + pos, PIPE_STRUCT_JSON_MAX - pos,
                     "%s\"%s\":{\"state\":%d,\"viewer_count\":%lu}",
                     first ? "" : ",", info.name, (int)info.state,
                     info.viewer_count);
-    if (n > 0 && (size_t)n < sizeof(json) - pos)
+    if (n > 0 && (size_t)n < PIPE_STRUCT_JSON_MAX - pos)
       pos += (size_t)n;
     first = FALSE;
 
-    if (pos >= sizeof(json) - 64)
+    if (pos >= PIPE_STRUCT_JSON_MAX - 64)
       break;
   }
 
-  n = omni_format(json + pos, sizeof(json) - pos, "}}");
+  n = omni_format(json + pos, PIPE_STRUCT_JSON_MAX - pos, "}}");
   if (n > 0)
     pos += (size_t)n;
 
   push_to_all(server, json, (DWORD)pos);
+  free(json);
 }
 
 void pipe_server_push_event(PipeServer *server, const char *eventType,
@@ -1307,23 +1434,42 @@ void pipe_server_push_event(PipeServer *server, const char *eventType,
   if (!server || !server->running || !eventType)
     return;
 
-  char json[PIPE_STRUCT_JSON_MAX];
+  char *json = (char *)calloc(PIPE_STRUCT_JSON_MAX, sizeof(*json));
+  char *escaped_event =
+      (char *)calloc(PIPE_STRUCT_JSON_MAX, sizeof(*escaped_event));
+  char *escaped_instance =
+      (char *)calloc(PIPE_STRUCT_JSON_MAX, sizeof(*escaped_instance));
+  if (!json || !escaped_event || !escaped_instance) {
+    free(json);
+    free(escaped_event);
+    free(escaped_instance);
+    return;
+  }
+  json_escape_string(eventType, escaped_event, PIPE_STRUCT_JSON_MAX);
   int n;
 
   if (instanceName && instanceName[0] != '\0') {
-    n = omni_format(json, sizeof(json),
+    json_escape_string(instanceName, escaped_instance, PIPE_STRUCT_JSON_MAX);
+    n = omni_format(json, PIPE_STRUCT_JSON_MAX,
                     "{\"type\":\"push\",\"push_type\":\"event\","
                     "\"event\":\"%s\",\"instance_name\":\"%s\"}",
-                    eventType, instanceName);
+                    escaped_event, escaped_instance);
   } else {
-    n = omni_format(json, sizeof(json),
+    n = omni_format(json, PIPE_STRUCT_JSON_MAX,
                     "{\"type\":\"push\",\"push_type\":\"event\","
                     "\"event\":\"%s\"}",
-                    eventType);
+                    escaped_event);
   }
 
-  if (n < 0 || (size_t)n >= sizeof(json))
+  if (n < 0 || (size_t)n >= PIPE_STRUCT_JSON_MAX) {
+    free(json);
+    free(escaped_event);
+    free(escaped_instance);
     return;
+  }
 
   push_to_all(server, json, (DWORD)n);
+  free(escaped_event);
+  free(escaped_instance);
+  free(json);
 }

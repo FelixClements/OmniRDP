@@ -605,10 +605,17 @@ void tray_icon_show_menu(TrayAppCtx *ctx, HWND hwnd) {
         continue;
 
       /* Service name header (disabled) */
-      char svcHeader[280];
-      omni_format(svcHeader, sizeof(svcHeader), "%s", svc->serviceName);
-      svcHeader[sizeof(svcHeader) - 1] = '\0';
+      enum { SERVICE_HEADER_CAPACITY = 280 };
+      char *svcHeader =
+          (char *)calloc(SERVICE_HEADER_CAPACITY, sizeof(*svcHeader));
+      if (!svcHeader) {
+        DestroyMenu(hSvcMenu);
+        continue;
+      }
+      omni_format(svcHeader, SERVICE_HEADER_CAPACITY, "%s", svc->serviceName);
+      svcHeader[SERVICE_HEADER_CAPACITY - 1] = '\0';
       AppendMenuA(hSvcMenu, MF_STRING | MF_GRAYED | MF_DISABLED, 0, svcHeader);
+      free(svcHeader);
 
       /* Separator after header */
       AppendMenuA(hSvcMenu, MF_SEPARATOR, 0, NULL);
@@ -624,10 +631,20 @@ void tray_icon_show_menu(TrayAppCtx *ctx, HWND hwnd) {
           continue;
 
         /* Instance label (disabled) */
-        char instLabel[192];
-        omni_format(instLabel, sizeof(instLabel), "%s [%s]", inst->name,
+        enum { INSTANCE_LABEL_CAPACITY = 192 };
+        char *instLabel =
+            (char *)calloc(INSTANCE_LABEL_CAPACITY, sizeof(*instLabel));
+        char *instMenuText =
+            (char *)calloc(INSTANCE_LABEL_CAPACITY, sizeof(*instMenuText));
+        if (!instLabel || !instMenuText) {
+          free(instLabel);
+          free(instMenuText);
+          DestroyMenu(hInstMenu);
+          continue;
+        }
+        omni_format(instLabel, INSTANCE_LABEL_CAPACITY, "%s [%s]", inst->name,
                     stateStr);
-        instLabel[sizeof(instLabel) - 1] = '\0';
+        instLabel[INSTANCE_LABEL_CAPACITY - 1] = '\0';
         AppendMenuA(hInstMenu, MF_STRING | MF_GRAYED | MF_DISABLED, 0,
                     instLabel);
 
@@ -647,13 +664,14 @@ void tray_icon_show_menu(TrayAppCtx *ctx, HWND hwnd) {
         /* STARTING/RECONNECTING: no actionable items */
 
         /* Add instance submenu to the service menu */
-        char instMenuText[192];
-        omni_format(instMenuText, sizeof(instMenuText), "%s [%s]", inst->name,
-                    stateStr);
-        instMenuText[sizeof(instMenuText) - 1] = '\0';
+        omni_format(instMenuText, INSTANCE_LABEL_CAPACITY, "%s [%s]",
+                    inst->name, stateStr);
+        instMenuText[INSTANCE_LABEL_CAPACITY - 1] = '\0';
 
         AppendMenuA(hSvcMenu, MF_POPUP | MF_STRING, (UINT_PTR)hInstMenu,
                     instMenuText);
+        free(instLabel);
+        free(instMenuText);
       }
 
       /* Add the service submenu to the services menu */
@@ -1169,13 +1187,15 @@ static void tray_on_command(TrayAppCtx *ctx, WPARAM wParam) {
     LOG_I(LOG_TAG, "Menu: Install Service");
     {
       /* Find OmniRDP-svc.exe in the same directory as the tray app */
-      char exePath[MAX_PATH];
+      char *exePath = (char *)calloc(MAX_PATH, sizeof(*exePath));
+      if (!exePath)
+        break;
       GetModuleFileNameA(NULL, exePath, MAX_PATH);
       /* Replace tray exe name with service exe name */
       char *lastSlash = strrchr(exePath, '\\');
       if (lastSlash) {
         omni_format(lastSlash + 1,
-                    (size_t)(exePath + sizeof(exePath) - (lastSlash + 1)),
+                    (size_t)(exePath + MAX_PATH - (lastSlash + 1)),
                     "OmniRDP-svc.exe");
       }
 
@@ -1202,6 +1222,7 @@ static void tray_on_command(TrayAppCtx *ctx, WPARAM wParam) {
               "Service installation failed or was cancelled (error %lu)",
               GetLastError());
       }
+      free(exePath);
     }
     break;
 

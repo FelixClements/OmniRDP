@@ -13,6 +13,7 @@
 #ifndef SVC_PIPE_SERVER_H
 #define SVC_PIPE_SERVER_H
 
+#include "fixed_buffer.h"
 #include "svc_instance_mgr.h"
 #include <windows.h>
 
@@ -27,8 +28,8 @@ extern "C" {
  * Runs in the service process (Session 0).
  */
 typedef struct {
-  char pipeName[256]; /* Full pipe path, e.g. "\\.\pipe\OmniRDP_ServicePipe" */
-  char serviceName[256]; /* Windows service name (e.g., "OmniRDP") */
+  OMNI_FIXED_CHAR_FIELD(pipeName, 256);    /* Full pipe path. */
+  OMNI_FIXED_CHAR_FIELD(serviceName, 256); /* Windows service name. */
   InstanceManager *mgr;  /* Pointer to instance manager (not owned) */
   CRITICAL_SECTION lock; /* Protects client list */
 

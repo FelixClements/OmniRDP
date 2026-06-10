@@ -7,8 +7,8 @@
 #define ASSERT_TRUE(expr)                                                      \
   do {                                                                         \
     if (!(expr)) {                                                             \
-      fprintf(stderr, "Assertion failed at %s:%d: %s\n", __FILE__, __LINE__,   \
-              #expr);                                                          \
+      fprintf_s(stderr, "Assertion failed at %s:%d: %s\n", __FILE__, __LINE__, \
+                #expr);                                                        \
       return FALSE;                                                            \
     }                                                                          \
   } while (0)

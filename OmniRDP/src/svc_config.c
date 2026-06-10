@@ -100,9 +100,9 @@ static int strcpy_safe(char *dest, size_t dest_size, const char *src) {
     return 0;
   int ret = omni_format(dest, dest_size, "%s", src);
   if (ret < 0 || (size_t)ret >= dest_size) {
-    fprintf(stderr,
-            "Warning: config value truncated: '%s' -> '%s' (max %zu chars)\n",
-            src, dest, dest_size - 1);
+    fprintf_s(stderr,
+              "Warning: config value truncated: '%s' -> '%s' (max %zu chars)\n",
+              src, dest, dest_size - 1);
     return -1;
   }
   return 0;
@@ -119,9 +119,10 @@ static uint16_t svc_config_get_port(const IniFile *ini, const char *section,
   if (end == val || *end != '\0')
     return default_val;
   if (result > 65535UL) {
-    fprintf(stderr,
-            "Warning: [%s] %s=%lu is outside valid TCP port range; using %u\n",
-            section, key, result, (unsigned int)default_val);
+    fprintf_s(
+        stderr,
+        "Warning: [%s] %s=%lu is outside valid TCP port range; using %u\n",
+        section, key, result, (unsigned int)default_val);
     return default_val;
   }
   return (uint16_t)result;
@@ -159,10 +160,10 @@ static int svc_config_get_viewer_gfx_codec(const IniFile *ini,
       svc_config_str_equal_ci(value, "remote_fx"))
     return SVC_VIEWER_GFX_CODEC_RFX;
 
-  fprintf(stderr,
-          "Warning: [%s] %s=%s is not a supported viewer GFX codec; using "
-          "uncompressed\n",
-          section, key, value);
+  fprintf_s(stderr,
+            "Warning: [%s] %s=%s is not a supported viewer GFX codec; using "
+            "uncompressed\n",
+            section, key, value);
   return SVC_VIEWER_GFX_CODEC_UNCOMPRESSED;
 }
 
@@ -170,10 +171,15 @@ static int svc_config_get_viewer_gfx_codec(const IniFile *ini,
 
 static int parse_one_instance(const IniFile *ini, const char *name,
                               InstanceConfig *inst) {
-  char section[256];
-  int ret = omni_format(section, sizeof(section), "instance:%s", name);
-  if (ret < 0 || (size_t)ret >= sizeof(section))
+  enum { SECTION_CAPACITY = 256 };
+  char *section = (char *)calloc(SECTION_CAPACITY, sizeof(*section));
+  if (!section)
     return -1;
+  int ret = omni_format(section, SECTION_CAPACITY, "instance:%s", name);
+  if (ret < 0 || (size_t)ret >= SECTION_CAPACITY) {
+    free(section);
+    return -1;
+  }
 
   svc_config_default_instance(inst);
   strcpy_safe(inst->name, sizeof(inst->name), name);
@@ -384,26 +390,33 @@ static int parse_one_instance(const IniFile *ini, const char *name,
 
   /* Validate required fields */
   if (inst->backend_hostname[0] == '\0') {
-    fprintf(stderr,
-            "Instance '%s': missing required field 'backend.hostname'\n", name);
+    fprintf_s(stderr,
+              "Instance '%s': missing required field 'backend.hostname'\n",
+              name);
+    free(section);
     return -1;
   }
   if (inst->backend_username[0] == '\0') {
-    fprintf(stderr,
-            "Instance '%s': missing required field 'backend.username'\n", name);
+    fprintf_s(stderr,
+              "Instance '%s': missing required field 'backend.username'\n",
+              name);
+    free(section);
     return -1;
   }
   if (inst->backend_port == 0) {
-    fprintf(stderr, "Instance '%s': missing required field 'backend.port'\n",
-            name);
+    fprintf_s(stderr, "Instance '%s': missing required field 'backend.port'\n",
+              name);
+    free(section);
     return -1;
   }
   if (inst->viewer_port == 0) {
-    fprintf(stderr, "Instance '%s': missing required field 'viewer.port'\n",
-            name);
+    fprintf_s(stderr, "Instance '%s': missing required field 'viewer.port'\n",
+              name);
+    free(section);
     return -1;
   }
 
+  free(section);
   return 0;
 }
 

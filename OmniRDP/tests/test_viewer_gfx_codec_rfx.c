@@ -7,7 +7,7 @@
 
 static int expect_true(BOOL value, const char *message) {
   if (!value) {
-    (void)fprintf(stderr, "FAIL: %s\n", message);
+    (void)fprintf_s(stderr, "FAIL: %s\n", message);
     return 0;
   }
   return 1;
@@ -15,7 +15,7 @@ static int expect_true(BOOL value, const char *message) {
 
 static int expect_false(BOOL value, const char *message) {
   if (value) {
-    (void)fprintf(stderr, "FAIL: %s\n", message);
+    (void)fprintf_s(stderr, "FAIL: %s\n", message);
     return 0;
   }
   return 1;
@@ -23,8 +23,8 @@ static int expect_false(BOOL value, const char *message) {
 
 static int expect_uint32(UINT32 actual, UINT32 expected, const char *message) {
   if (actual != expected) {
-    (void)fprintf(stderr, "FAIL: %s actual=%u expected=%u\n", message, actual,
-                  expected);
+    (void)fprintf_s(stderr, "FAIL: %s actual=%u expected=%u\n", message, actual,
+                    expected);
     return 0;
   }
   return 1;

@@ -1160,16 +1160,25 @@ UINT viewer_gfx_pipeline_caps_advertise(
   BOOL caps_ready_was = FALSE;
   BOOL use_rdpgfx_was = FALSE;
   ViewerGfxNegotiationOutcome outcome_was = VIEWER_GFX_NEGOTIATION_PENDING;
-  char cap_desc[80] = {0};
-  char canonical_desc[80] = {0};
+  enum { CAP_DESC_CAPACITY = 80 };
+  char *cap_desc = NULL;
+  char *canonical_desc = NULL;
 
   if (!viewer || !server || !caps_advertise || !context->CapsConfirm)
     return ERROR_INVALID_PARAMETER;
 
+  cap_desc = (char *)calloc(CAP_DESC_CAPACITY, sizeof(*cap_desc));
+  canonical_desc = (char *)calloc(CAP_DESC_CAPACITY, sizeof(*canonical_desc));
+  if (!cap_desc || !canonical_desc) {
+    free(cap_desc);
+    free(canonical_desc);
+    return CHANNEL_RC_NO_MEMORY;
+  }
+
   EnterCriticalSection(&server->gfx.lock);
   if (server->gfx.canonical_caps_valid &&
       viewer_gfx_capset_describe(&server->gfx.canonical_caps, canonical_desc,
-                                 sizeof(canonical_desc))) {
+                                 CAP_DESC_CAPACITY)) {
     WLog_INFO(TAG,
               "Viewer %u RDPEGFX caps advertise: canonical=%s "
               "advertisedCount=%" PRIu16,
@@ -1183,7 +1192,7 @@ UINT viewer_gfx_pipeline_caps_advertise(
   if (caps_advertise->capsSets) {
     for (UINT16 i = 0; i < caps_advertise->capsSetCount; i++) {
       if (viewer_gfx_capset_describe(&caps_advertise->capsSets[i], cap_desc,
-                                     sizeof(cap_desc))) {
+                                     CAP_DESC_CAPACITY)) {
         WLog_INFO(TAG, "Viewer %u RDPEGFX advertised cap[%" PRIu16 "]: %s",
                   viewer->id, i, cap_desc);
       }
@@ -1208,6 +1217,8 @@ UINT viewer_gfx_pipeline_caps_advertise(
     if (viewer->gfx.negotiation_outcome ==
         VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK) {
       LeaveCriticalSection(&viewer->gfx.lock);
+      free(cap_desc);
+      free(canonical_desc);
       return CHANNEL_RC_OK;
     }
     viewer_gfx_pipeline_caps_result_add_locked(
@@ -1219,10 +1230,12 @@ UINT viewer_gfx_pipeline_caps_advertise(
         CHANNEL_RC_OK, viewer->activated ? "incompatible RDPEGFX caps" : NULL,
         NULL);
     LeaveCriticalSection(&viewer->gfx.lock);
+    free(cap_desc);
+    free(canonical_desc);
     return CHANNEL_RC_OK;
   }
 
-  if (viewer_gfx_capset_describe(&caps, cap_desc, sizeof(cap_desc)))
+  if (viewer_gfx_capset_describe(&caps, cap_desc, CAP_DESC_CAPACITY))
     WLog_INFO(TAG, "Viewer %u RDPEGFX selected cap: %s", viewer->id, cap_desc);
 
   EnterCriticalSection(&viewer->gfx.lock);
@@ -1241,6 +1254,8 @@ UINT viewer_gfx_pipeline_caps_advertise(
              viewer_gfx_pipeline_join_state_name(viewer->gfx.join_state),
              caps_ready_was);
     LeaveCriticalSection(&viewer->gfx.lock);
+    free(cap_desc);
+    free(canonical_desc);
     return CHANNEL_RC_OK;
   }
   LeaveCriticalSection(&viewer->gfx.lock);
@@ -1283,6 +1298,8 @@ UINT viewer_gfx_pipeline_caps_advertise(
   }
   LeaveCriticalSection(&viewer->gfx.lock);
 
+  free(cap_desc);
+  free(canonical_desc);
   return rc;
 }
 

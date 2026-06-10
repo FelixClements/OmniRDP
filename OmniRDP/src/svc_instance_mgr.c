@@ -219,10 +219,14 @@ static BSTR svc_firewall_utf8_to_bstr(const char *value, size_t maxBytes) {
   if (!value || strnlen_s(value, maxBytes) >= maxBytes)
     return NULL;
 
-  wideChars =
-      MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
+  wideChars = MultiByteToWideChar(
+      CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL,
+      0); /* Flawfinder: ignore - returns required WCHAR count. */
   if (wideChars <= 0) {
-    wideChars = MultiByteToWideChar(CP_ACP, 0, value, -1, NULL, 0);
+    wideChars = MultiByteToWideChar(
+        CP_ACP, 0, value, -1,
+        NULL, /* Flawfinder: ignore - returns required WCHAR count. */
+        0);
   }
   if (wideChars <= 0)
     return NULL;
@@ -232,8 +236,12 @@ static BSTR svc_firewall_utf8_to_bstr(const char *value, size_t maxBytes) {
     return NULL;
 
   if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, bstr,
-                          wideChars) == 0 &&
-      MultiByteToWideChar(CP_ACP, 0, value, -1, bstr, wideChars) == 0) {
+                          wideChars) ==
+          0 && /* Flawfinder: ignore - wideChars is WCHAR capacity from the size
+                  query. */
+      MultiByteToWideChar(CP_ACP, 0, value, -1, bstr, wideChars) ==
+          0) { /* Flawfinder: ignore - wideChars is WCHAR capacity from the size
+                  query. */
     SysFreeString(bstr);
     return NULL;
   }
@@ -284,28 +292,35 @@ static HRESULT svc_firewall_get_rules(INetFwPolicy2 **policy,
 }
 
 static void svc_remove_firewall_rule(const char *instanceName) {
-  char ruleName[256];
+  enum { FIREWALL_RULE_NAME_CAPACITY = 256 };
+  char *ruleName =
+      (char *)calloc(FIREWALL_RULE_NAME_CAPACITY, sizeof(*ruleName));
   BSTR ruleNameBstr = NULL;
   BOOL shouldUninitialize = FALSE;
   INetFwPolicy2 *policy = NULL;
   INetFwRules *rules = NULL;
   HRESULT hr;
 
-  if (!svc_build_firewall_rule_name(instanceName, ruleName, sizeof(ruleName))) {
+  if (!ruleName || !svc_build_firewall_rule_name(instanceName, ruleName,
+                                                 FIREWALL_RULE_NAME_CAPACITY)) {
     LOG_W("svc_inst_mgr", "Firewall: invalid rule name for instance '%s'",
           instanceName ? instanceName : "(null)");
+    free(ruleName);
     return;
   }
 
-  ruleNameBstr = svc_firewall_utf8_to_bstr(ruleName, sizeof(ruleName));
+  ruleNameBstr =
+      svc_firewall_utf8_to_bstr(ruleName, FIREWALL_RULE_NAME_CAPACITY);
   if (!ruleNameBstr) {
     LOG_W("svc_inst_mgr", "Firewall: failed to convert rule name '%s'",
           ruleName);
+    free(ruleName);
     return;
   }
 
   if (!svc_firewall_com_begin(&shouldUninitialize)) {
     SysFreeString(ruleNameBstr);
+    free(ruleName);
     return;
   }
 
@@ -331,10 +346,13 @@ static void svc_remove_firewall_rule(const char *instanceName) {
     INetFwPolicy2_Release(policy);
   svc_firewall_com_end(shouldUninitialize);
   SysFreeString(ruleNameBstr);
+  free(ruleName);
 }
 
 static void svc_add_firewall_rule(const char *instanceName, uint16_t port) {
-  char ruleName[256];
+  enum { FIREWALL_RULE_NAME_CAPACITY = 256 };
+  char *ruleName =
+      (char *)calloc(FIREWALL_RULE_NAME_CAPACITY, sizeof(*ruleName));
   WCHAR portW[16];
   BSTR ruleNameBstr = NULL;
   BSTR descriptionBstr = NULL;
@@ -346,9 +364,11 @@ static void svc_add_firewall_rule(const char *instanceName, uint16_t port) {
   INetFwRule *rule = NULL;
   HRESULT hr = S_OK;
 
-  if (!svc_build_firewall_rule_name(instanceName, ruleName, sizeof(ruleName))) {
+  if (!ruleName || !svc_build_firewall_rule_name(instanceName, ruleName,
+                                                 FIREWALL_RULE_NAME_CAPACITY)) {
     LOG_E("svc_inst_mgr", "Firewall: invalid rule name for instance '%s'",
           instanceName ? instanceName : "(null)");
+    free(ruleName);
     return;
   }
 
@@ -357,11 +377,13 @@ static void svc_add_firewall_rule(const char *instanceName, uint16_t port) {
   if (_snwprintf(portW, sizeof(portW) / sizeof(portW[0]), L"%u",
                  (unsigned)port) < 0) {
     LOG_E("svc_inst_mgr", "Firewall: failed to format port %u", (unsigned)port);
+    free(ruleName);
     return;
   }
   portW[(sizeof(portW) / sizeof(portW[0])) - 1] = L'\0';
 
-  ruleNameBstr = svc_firewall_utf8_to_bstr(ruleName, sizeof(ruleName));
+  ruleNameBstr =
+      svc_firewall_utf8_to_bstr(ruleName, FIREWALL_RULE_NAME_CAPACITY);
   descriptionBstr = SysAllocString(L"Allows inbound OmniRDP viewer traffic");
   groupingBstr = SysAllocString(L"OmniRDP");
   portBstr = SysAllocString(portW);
@@ -435,6 +457,7 @@ cleanup:
     SysFreeString(descriptionBstr);
   if (ruleNameBstr)
     SysFreeString(ruleNameBstr);
+  free(ruleName);
 }
 
 /* ── inst_mgr_start (single instance) ──────────────────────────── */
@@ -614,15 +637,33 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
    *   "<exePath>" --instance "<name>" --secrets-handle <handle> --config
    * "<configPath>"
    */
-  char cmdline[32768];
-  int cmdlen = omni_format(cmdline, sizeof(cmdline),
+  enum { INSTANCE_CMDLINE_CAPACITY = 32768 };
+  char *cmdline = (char *)calloc(INSTANCE_CMDLINE_CAPACITY, sizeof(*cmdline));
+  if (!cmdline) {
+    LOG_E("svc_inst_mgr", "Start: command line allocation failed for '%s'",
+          instanceName);
+    CloseHandle(hPipeRead);
+    CloseHandle(hPipeWrite);
+    if (pSD)
+      HeapFree(GetProcessHeap(), 0, pSD);
+    if (pACL)
+      LocalFree(pACL);
+    if (hStopEvent)
+      CloseHandle(hStopEvent);
+    SecureZeroMemory(decrypted_password, sizeof(decrypted_password));
+    inst->state = INST_STOPPED;
+    LeaveCriticalSection(&mgr->lock);
+    return -1;
+  }
+  int cmdlen = omni_format(cmdline, INSTANCE_CMDLINE_CAPACITY,
                            "\"%s\" --instance \"%s\" --secrets-handle %Iu "
                            "--stop-event %Iu --config \"%s\"",
                            mgr->exePath, instanceName, (SIZE_T)hPipeRead,
                            (SIZE_T)hStopEvent, mgr->configPath);
-  if (cmdlen < 0 || (size_t)cmdlen >= sizeof(cmdline)) {
+  if (cmdlen < 0 || (size_t)cmdlen >= INSTANCE_CMDLINE_CAPACITY) {
     LOG_E("svc_inst_mgr", "Start: command line too long for '%s'",
           instanceName);
+    free(cmdline);
     CloseHandle(hPipeRead);
     CloseHandle(hPipeWrite);
     if (pSD)
@@ -657,6 +698,7 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
   if (!hJob) {
     LOG_E("svc_inst_mgr", "Start: CreateJobObject failed for '%s' (err=%lu)",
           instanceName, GetLastError());
+    free(cmdline);
     CloseHandle(hPipeRead);
     CloseHandle(hPipeWrite);
     if (hStopEvent)
@@ -704,6 +746,7 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
       NULL,                 /* lpCurrentDirectory */
       &si,                  /* lpStartupInfo */
       &pi);                 /* lpProcessInformation */
+  free(cmdline);
 
   if (!created) {
     LOG_E("svc_inst_mgr", "Start: CreateProcess failed for '%s' (err=%lu)",
@@ -860,9 +903,15 @@ static void inst_mgr_wait_stopped_timeout(InstanceManager *mgr,
   HANDLE hHeartbeatPipe = inst->hHeartbeatPipe;
   HANDLE hStopEvent = inst->hStopEvent;
   DWORD pid = inst->pid;
-  char name_copy[128];
+  enum { INSTANCE_NAME_COPY_CAPACITY = 128 };
+  char *name_copy =
+      (char *)calloc(INSTANCE_NAME_COPY_CAPACITY, sizeof(*name_copy));
 
-  omni_format(name_copy, sizeof(name_copy), "%s", inst->name);
+  if (!name_copy || omni_format(name_copy, INSTANCE_NAME_COPY_CAPACITY, "%s",
+                                inst->name) < 0) {
+    free(name_copy);
+    name_copy = NULL;
+  }
 
   inst->state = INST_STOPPED;
   inst->hProcess = NULL;
@@ -873,7 +922,8 @@ static void inst_mgr_wait_stopped_timeout(InstanceManager *mgr,
 
   LeaveCriticalSection(&mgr->lock);
 
-  LOG_I("svc_inst_mgr", "Stopping instance '%s' (PID=%lu)...", name_copy, pid);
+  LOG_I("svc_inst_mgr", "Stopping instance '%s' (PID=%lu)...",
+        name_copy ? name_copy : "(unknown)", pid);
 
   if (hProcess) {
     DWORD waitResult = WaitForSingleObject(hProcess, timeout_ms);
@@ -881,20 +931,24 @@ static void inst_mgr_wait_stopped_timeout(InstanceManager *mgr,
     if (waitResult == WAIT_TIMEOUT) {
       LOG_W("svc_inst_mgr",
             "Stop: instance '%s' did not exit within %u sec, terminating",
-            name_copy, mgr->config->service.graceful_shutdown_sec);
+            name_copy ? name_copy : "(unknown)",
+            mgr->config->service.graceful_shutdown_sec);
       TerminateProcess(hProcess, 1);
       WaitForSingleObject(hProcess, 5000);
     } else if (waitResult == WAIT_OBJECT_0) {
-      LOG_I("svc_inst_mgr", "Stop: instance '%s' exited gracefully", name_copy);
+      LOG_I("svc_inst_mgr", "Stop: instance '%s' exited gracefully",
+            name_copy ? name_copy : "(unknown)");
     } else {
       LOG_E("svc_inst_mgr",
             "Stop: unexpected WaitForSingleObject result for '%s' (%lu)",
-            name_copy, GetLastError());
+            name_copy ? name_copy : "(unknown)", GetLastError());
     }
 
     CloseHandle(hProcess);
-    svc_remove_firewall_rule(name_copy);
+    if (name_copy)
+      svc_remove_firewall_rule(name_copy);
   }
+  free(name_copy);
   if (hJob)
     CloseHandle(hJob);
   if (hHeartbeatPipe)

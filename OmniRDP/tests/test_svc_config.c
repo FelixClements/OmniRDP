@@ -10,18 +10,18 @@ static int write_backend_port_config(const char *path) {
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp, "[service]\n"
-              "log_level = warn\n"
-              "\n"
-              "[instances]\n"
-              "names = Test\n"
-              "\n"
-              "[instance:Test]\n"
-              "backend.hostname = 127.0.0.1\n"
-              "backend.port = 70000\n"
-              "backend.username = alice\n"
-              "backend.password = secret\n"
-              "viewer.port = 3390\n");
+  fprintf_s(fp, "[service]\n"
+                "log_level = warn\n"
+                "\n"
+                "[instances]\n"
+                "names = Test\n"
+                "\n"
+                "[instance:Test]\n"
+                "backend.hostname = 127.0.0.1\n"
+                "backend.port = 70000\n"
+                "backend.username = alice\n"
+                "backend.password = secret\n"
+                "viewer.port = 3390\n");
 
   fclose(fp);
   return 1;
@@ -32,15 +32,15 @@ static int write_viewer_port_config(const char *path) {
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp, "[instances]\n"
-              "names = Test\n"
-              "\n"
-              "[instance:Test]\n"
-              "backend.hostname = 127.0.0.1\n"
-              "backend.port = 3389\n"
-              "backend.username = alice\n"
-              "backend.password = secret\n"
-              "viewer.port = 70000\n");
+  fprintf_s(fp, "[instances]\n"
+                "names = Test\n"
+                "\n"
+                "[instance:Test]\n"
+                "backend.hostname = 127.0.0.1\n"
+                "backend.port = 3389\n"
+                "backend.username = alice\n"
+                "backend.password = secret\n"
+                "viewer.port = 70000\n");
 
   fclose(fp);
   return 1;
@@ -51,20 +51,20 @@ static int write_classic_latest_config(const char *path, int enabled) {
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp,
-          "[instances]\n"
-          "names = Test\n"
-          "\n"
-          "[instance:Test]\n"
-          "backend.hostname = 127.0.0.1\n"
-          "backend.port = 3389\n"
-          "backend.username = alice\n"
-          "backend.password = secret\n"
-          "viewer.port = 3390\n"
-          "viewer.classic_latest_state_enabled = %s\n"
-          "viewer.classic_latest_state_max_queue_depth = 7\n"
-          "viewer.classic_latest_state_max_queue_bytes = 4096\n",
-          enabled ? "true" : "false");
+  fprintf_s(fp,
+            "[instances]\n"
+            "names = Test\n"
+            "\n"
+            "[instance:Test]\n"
+            "backend.hostname = 127.0.0.1\n"
+            "backend.port = 3389\n"
+            "backend.username = alice\n"
+            "backend.password = secret\n"
+            "viewer.port = 3390\n"
+            "viewer.classic_latest_state_enabled = %s\n"
+            "viewer.classic_latest_state_max_queue_depth = 7\n"
+            "viewer.classic_latest_state_max_queue_bytes = 4096\n",
+            enabled ? "true" : "false");
 
   fclose(fp);
   return 1;
@@ -75,18 +75,18 @@ static int write_viewer_gfx_config(const char *path, int enabled) {
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp,
-          "[instances]\n"
-          "names = Test\n"
-          "\n"
-          "[instance:Test]\n"
-          "backend.hostname = 127.0.0.1\n"
-          "backend.port = 3389\n"
-          "backend.username = alice\n"
-          "backend.password = secret\n"
-          "viewer.port = 3390\n"
-          "viewer.gfx.enabled = %s\n",
-          enabled ? "true" : "false");
+  fprintf_s(fp,
+            "[instances]\n"
+            "names = Test\n"
+            "\n"
+            "[instance:Test]\n"
+            "backend.hostname = 127.0.0.1\n"
+            "backend.port = 3389\n"
+            "backend.username = alice\n"
+            "backend.password = secret\n"
+            "viewer.port = 3390\n"
+            "viewer.gfx.enabled = %s\n",
+            enabled ? "true" : "false");
 
   fclose(fp);
   return 1;
@@ -98,18 +98,18 @@ static int write_viewer_gfx_full_frame_dirty_config(const char *path,
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp,
-          "[instances]\n"
-          "names = Test\n"
-          "\n"
-          "[instance:Test]\n"
-          "backend.hostname = 127.0.0.1\n"
-          "backend.port = 3389\n"
-          "backend.username = alice\n"
-          "backend.password = secret\n"
-          "viewer.port = 3390\n"
-          "viewer.gfx.diagnostic.full_frame_dirty = %s\n",
-          enabled ? "true" : "false");
+  fprintf_s(fp,
+            "[instances]\n"
+            "names = Test\n"
+            "\n"
+            "[instance:Test]\n"
+            "backend.hostname = 127.0.0.1\n"
+            "backend.port = 3389\n"
+            "backend.username = alice\n"
+            "backend.password = secret\n"
+            "viewer.port = 3390\n"
+            "viewer.gfx.diagnostic.full_frame_dirty = %s\n",
+            enabled ? "true" : "false");
 
   fclose(fp);
   return 1;
@@ -121,18 +121,18 @@ static int write_viewer_gfx_codec_config(const char *path,
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp,
-          "[instances]\n"
-          "names = Test\n"
-          "\n"
-          "[instance:Test]\n"
-          "backend.hostname = 127.0.0.1\n"
-          "backend.port = 3389\n"
-          "backend.username = alice\n"
-          "backend.password = secret\n"
-          "viewer.port = 3390\n"
-          "viewer.gfx.codec = %s\n",
-          codec_value);
+  fprintf_s(fp,
+            "[instances]\n"
+            "names = Test\n"
+            "\n"
+            "[instance:Test]\n"
+            "backend.hostname = 127.0.0.1\n"
+            "backend.port = 3389\n"
+            "backend.username = alice\n"
+            "backend.password = secret\n"
+            "viewer.port = 3390\n"
+            "viewer.gfx.codec = %s\n",
+            codec_value);
 
   fclose(fp);
   return 1;
@@ -145,19 +145,19 @@ static int write_viewer_gfx_dirty_limits_config(const char *path,
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp,
-          "[instances]\n"
-          "names = Test\n"
-          "\n"
-          "[instance:Test]\n"
-          "backend.hostname = 127.0.0.1\n"
-          "backend.port = 3389\n"
-          "backend.username = alice\n"
-          "backend.password = secret\n"
-          "viewer.port = 3390\n"
-          "viewer.gfx.dirty_max_in_flight_frames = %u\n"
-          "viewer.gfx.dirty_max_in_flight_bytes = %u\n",
-          frames, bytes);
+  fprintf_s(fp,
+            "[instances]\n"
+            "names = Test\n"
+            "\n"
+            "[instance:Test]\n"
+            "backend.hostname = 127.0.0.1\n"
+            "backend.port = 3389\n"
+            "backend.username = alice\n"
+            "backend.password = secret\n"
+            "viewer.port = 3390\n"
+            "viewer.gfx.dirty_max_in_flight_frames = %u\n"
+            "viewer.gfx.dirty_max_in_flight_bytes = %u\n",
+            frames, bytes);
 
   fclose(fp);
   return 1;
@@ -168,21 +168,21 @@ static int write_backend_rdp_file_options_config(const char *path) {
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp, "[instances]\n"
-              "names = Test\n"
-              "\n"
-              "[instance:Test]\n"
-              "backend.hostname = rds-broker.domain.com\n"
-              "backend.port = 3389\n"
-              "backend.username = alice\n"
-              "backend.password = secret\n"
-              "viewer.port = 3390\n"
-              "backend.rdp_file.workspace_id = rds-broker.domain.com\n"
-              "backend.rdp_file.use_redirection_server_name = true\n"
-              "backend.rdp_file.loadbalanceinfo = "
-              "tsv://MS Terminal Services Plugin.1.Marketing_Pool\n"
-              "backend.rdp_file.alternate_full_address = "
-              "rds-broker.domain.com\n");
+  fprintf_s(fp, "[instances]\n"
+                "names = Test\n"
+                "\n"
+                "[instance:Test]\n"
+                "backend.hostname = rds-broker.domain.com\n"
+                "backend.port = 3389\n"
+                "backend.username = alice\n"
+                "backend.password = secret\n"
+                "viewer.port = 3390\n"
+                "backend.rdp_file.workspace_id = rds-broker.domain.com\n"
+                "backend.rdp_file.use_redirection_server_name = true\n"
+                "backend.rdp_file.loadbalanceinfo = "
+                "tsv://MS Terminal Services Plugin.1.Marketing_Pool\n"
+                "backend.rdp_file.alternate_full_address = "
+                "rds-broker.domain.com\n");
 
   fclose(fp);
   return 1;
@@ -193,15 +193,15 @@ static int write_backend_rdp_file_options_default_config(const char *path) {
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp, "[instances]\n"
-              "names = Test\n"
-              "\n"
-              "[instance:Test]\n"
-              "backend.hostname = rds-broker.domain.com\n"
-              "backend.port = 3389\n"
-              "backend.username = alice\n"
-              "backend.password = secret\n"
-              "viewer.port = 3390\n");
+  fprintf_s(fp, "[instances]\n"
+                "names = Test\n"
+                "\n"
+                "[instance:Test]\n"
+                "backend.hostname = rds-broker.domain.com\n"
+                "backend.port = 3389\n"
+                "backend.username = alice\n"
+                "backend.password = secret\n"
+                "viewer.port = 3390\n");
 
   fclose(fp);
   return 1;
@@ -211,18 +211,18 @@ static int write_backend_credentials_without_nla_config(const char *path) {
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp, "[instances]\n"
-              "names = Test\n"
-              "\n"
-              "[instance:Test]\n"
-              "backend.hostname = 127.0.0.1\n"
-              "backend.port = 3389\n"
-              "backend.username = alice\n"
-              "backend.password = secret\n"
-              "viewer.port = 3390\n"
-              "viewer.security.nla_enabled = false\n"
-              "viewer.security.tls_enabled = true\n"
-              "viewer.auth.mode = backend_credentials\n");
+  fprintf_s(fp, "[instances]\n"
+                "names = Test\n"
+                "\n"
+                "[instance:Test]\n"
+                "backend.hostname = 127.0.0.1\n"
+                "backend.port = 3389\n"
+                "backend.username = alice\n"
+                "backend.password = secret\n"
+                "viewer.port = 3390\n"
+                "viewer.security.nla_enabled = false\n"
+                "viewer.security.tls_enabled = true\n"
+                "viewer.auth.mode = backend_credentials\n");
 
   fclose(fp);
   return 1;
@@ -234,19 +234,19 @@ static int write_backend_gfx_config(const char *path, int backend_gfx,
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp,
-          "[instances]\n"
-          "names = Test\n"
-          "\n"
-          "[instance:Test]\n"
-          "backend.hostname = 127.0.0.1\n"
-          "backend.port = 3389\n"
-          "backend.username = alice\n"
-          "backend.password = secret\n"
-          "viewer.port = 3390\n"
-          "backend.gfx.decode_only_enabled = %s\n"
-          "codec.graphics_pipeline = %s\n",
-          backend_gfx ? "true" : "false", codec_gfx ? "true" : "false");
+  fprintf_s(fp,
+            "[instances]\n"
+            "names = Test\n"
+            "\n"
+            "[instance:Test]\n"
+            "backend.hostname = 127.0.0.1\n"
+            "backend.port = 3389\n"
+            "backend.username = alice\n"
+            "backend.password = secret\n"
+            "viewer.port = 3390\n"
+            "backend.gfx.decode_only_enabled = %s\n"
+            "codec.graphics_pipeline = %s\n",
+            backend_gfx ? "true" : "false", codec_gfx ? "true" : "false");
 
   fclose(fp);
   return 1;
@@ -258,19 +258,20 @@ static int write_backend_rfx_config(const char *path, int backend_rfx,
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp,
-          "[instances]\n"
-          "names = Test\n"
-          "\n"
-          "[instance:Test]\n"
-          "backend.hostname = 127.0.0.1\n"
-          "backend.port = 3389\n"
-          "backend.username = alice\n"
-          "backend.password = secret\n"
-          "viewer.port = 3390\n"
-          "backend.gfx.rfx_enabled = %s\n"
-          "codec.remote_fx = %s\n",
-          backend_rfx ? "true" : "false", legacy_remote_fx ? "true" : "false");
+  fprintf_s(fp,
+            "[instances]\n"
+            "names = Test\n"
+            "\n"
+            "[instance:Test]\n"
+            "backend.hostname = 127.0.0.1\n"
+            "backend.port = 3389\n"
+            "backend.username = alice\n"
+            "backend.password = secret\n"
+            "viewer.port = 3390\n"
+            "backend.gfx.rfx_enabled = %s\n"
+            "codec.remote_fx = %s\n",
+            backend_rfx ? "true" : "false",
+            legacy_remote_fx ? "true" : "false");
 
   fclose(fp);
   return 1;
@@ -282,18 +283,18 @@ static int write_viewer_gfx_rfx_threading_config(const char *path,
   if (fopen_s(&fp, path, "w") != 0 || !fp)
     return 0;
 
-  fprintf(fp,
-          "[instances]\n"
-          "names = Test\n"
-          "\n"
-          "[instance:Test]\n"
-          "backend.hostname = 127.0.0.1\n"
-          "backend.port = 3389\n"
-          "backend.username = alice\n"
-          "backend.password = secret\n"
-          "viewer.port = 3390\n"
-          "viewer.gfx.rfx_threading_enabled = %s\n",
-          enabled ? "true" : "false");
+  fprintf_s(fp,
+            "[instances]\n"
+            "names = Test\n"
+            "\n"
+            "[instance:Test]\n"
+            "backend.hostname = 127.0.0.1\n"
+            "backend.port = 3389\n"
+            "backend.username = alice\n"
+            "backend.password = secret\n"
+            "viewer.port = 3390\n"
+            "viewer.gfx.rfx_threading_enabled = %s\n",
+            enabled ? "true" : "false");
 
   fclose(fp);
   return 1;
