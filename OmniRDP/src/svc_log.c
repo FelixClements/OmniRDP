@@ -14,6 +14,7 @@
 
 #include "svc_log.h"
 
+#include "fixed_buffer.h"
 #include <share.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -39,8 +40,8 @@ static int g_init = 0; /* non-zero after init */
 static SvcLogLevel g_min_level = SVC_LOG_INFO;
 static unsigned int g_max_size = 10; /* MB */
 static unsigned int g_max_files = 5;
-static char g_log_dir[MAX_PATH] = {0};
-static char g_log_path[MAX_PATH] = {0};
+static OMNI_FIXED_CHAR_FIELD(g_log_dir, MAX_PATH) = {0};
+static OMNI_FIXED_CHAR_FIELD(g_log_path, MAX_PATH) = {0};
 
 /* ── Directory helpers ─────────────────────────────────────────── */
 
@@ -69,10 +70,14 @@ static int svc_log_mkdir_recursive(const char *path) {
     return -1;
 
   /* One or more parent components are missing -- walk the path. */
-  char tmp[MAX_PATH];
-  if (omni_format(tmp, sizeof(tmp), "%s", path) < 0 ||
-      strnlen_s(path, sizeof(tmp)) >= sizeof(tmp))
+  char *tmp = (char *)calloc(MAX_PATH, sizeof(*tmp));
+  if (!tmp)
     return -1;
+  if (omni_format(tmp, MAX_PATH, "%s", path) < 0 ||
+      strnlen_s(path, MAX_PATH) >= MAX_PATH) {
+    free(tmp);
+    return -1;
+  }
 
   /* Skip the leading "X:\" (drive root) on absolute paths */
   char *p = tmp;
@@ -96,10 +101,14 @@ static int svc_log_mkdir_recursive(const char *path) {
   }
 
   /* Final attempt to create the full path */
-  if (CreateDirectoryA(path, NULL))
+  if (CreateDirectoryA(path, NULL)) {
+    free(tmp);
     return 0;
+  }
 
-  return (GetLastError() == ERROR_ALREADY_EXISTS) ? 0 : -1;
+  int result = (GetLastError() == ERROR_ALREADY_EXISTS) ? 0 : -1;
+  free(tmp);
+  return result;
 }
 
 /* ── Level helpers ────────────────────────────────────────────── */
@@ -166,8 +175,13 @@ static void svc_log_rotate_internal(void) {
   if (!g_init || g_max_files == 0)
     return;
 
-  char oldpath[MAX_PATH];
-  char newpath[MAX_PATH];
+  char *oldpath = (char *)calloc(MAX_PATH, sizeof(*oldpath));
+  char *newpath = (char *)calloc(MAX_PATH, sizeof(*newpath));
+  if (!oldpath || !newpath) {
+    free(oldpath);
+    free(newpath);
+    return;
+  }
 
   /* 1. Close the current file */
   if (g_logfile) {
@@ -176,25 +190,26 @@ static void svc_log_rotate_internal(void) {
   }
 
   /* 2. Delete the highest-numbered archive */
-  omni_format(oldpath, sizeof(oldpath), "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
+  omni_format(oldpath, MAX_PATH, "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
               g_max_files);
   DeleteFileA(oldpath);
 
   /* 3. Shift the chain: (N-1) -> N, ..., 1 -> 2 */
   for (unsigned int i = g_max_files - 1; i >= 1; i--) {
-    omni_format(oldpath, sizeof(oldpath), "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
-                i);
-    omni_format(newpath, sizeof(newpath), "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
+    omni_format(oldpath, MAX_PATH, "%s\\%s.%u", g_log_dir, LOG_FILE_NAME, i);
+    omni_format(newpath, MAX_PATH, "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
                 i + 1);
     MoveFileExA(oldpath, newpath, MOVEFILE_REPLACE_EXISTING);
   }
 
   /* 4. Rename current log -> .1 */
-  omni_format(newpath, sizeof(newpath), "%s\\%s.1", g_log_dir, LOG_FILE_NAME);
+  omni_format(newpath, MAX_PATH, "%s\\%s.1", g_log_dir, LOG_FILE_NAME);
   MoveFileExA(g_log_path, newpath, MOVEFILE_REPLACE_EXISTING);
 
   /* 5. Open a fresh file — use _SH_DENYNO to allow concurrent reads */
   g_logfile = _fsopen(g_log_path, "a", _SH_DENYNO);
+  free(oldpath);
+  free(newpath);
 }
 
 /**
@@ -232,18 +247,31 @@ int svc_log_rotate_file(const char *filepath, FILE **logfile_ptr,
   if (!filepath || !logfile_ptr || max_files == 0)
     return -1;
 
-  char oldpath[MAX_PATH];
-  char newpath[MAX_PATH];
+  char *oldpath = (char *)calloc(MAX_PATH, sizeof(*oldpath));
+  char *newpath = (char *)calloc(MAX_PATH, sizeof(*newpath));
+  char *dir = (char *)calloc(MAX_PATH, sizeof(*dir));
+  if (!oldpath || !newpath || !dir) {
+    free(oldpath);
+    free(newpath);
+    free(dir);
+    return -1;
+  }
 
   /* Extract directory from filepath */
-  char dir[MAX_PATH];
-  if (omni_format(dir, sizeof(dir), "%s", filepath) < 0 ||
-      strnlen_s(filepath, sizeof(dir)) >= sizeof(dir))
+  if (omni_format(dir, MAX_PATH, "%s", filepath) < 0 ||
+      strnlen_s(filepath, MAX_PATH) >= MAX_PATH) {
+    free(oldpath);
+    free(newpath);
+    free(dir);
     return -1;
+  }
   char *backslash = strrchr(dir, '\\');
   if (backslash) {
     *backslash = '\0';
   } else {
+    free(oldpath);
+    free(newpath);
+    free(dir);
     return -1;
   }
 
@@ -256,23 +284,27 @@ int svc_log_rotate_file(const char *filepath, FILE **logfile_ptr,
   }
 
   /* 2. Delete the highest-numbered archive */
-  omni_format(oldpath, sizeof(oldpath), "%s\\%s.%u", dir, filename, max_files);
+  omni_format(oldpath, MAX_PATH, "%s\\%s.%u", dir, filename, max_files);
   DeleteFileA(oldpath);
 
   /* 3. Shift the chain: (N-1) -> N, ..., 1 -> 2 */
   for (unsigned int i = max_files - 1; i >= 1; i--) {
-    omni_format(oldpath, sizeof(oldpath), "%s\\%s.%u", dir, filename, i);
-    omni_format(newpath, sizeof(newpath), "%s\\%s.%u", dir, filename, i + 1);
+    omni_format(oldpath, MAX_PATH, "%s\\%s.%u", dir, filename, i);
+    omni_format(newpath, MAX_PATH, "%s\\%s.%u", dir, filename, i + 1);
     MoveFileExA(oldpath, newpath, MOVEFILE_REPLACE_EXISTING);
   }
 
   /* 4. Rename current log -> .1 */
-  omni_format(newpath, sizeof(newpath), "%s\\%s.1", dir, filename);
+  omni_format(newpath, MAX_PATH, "%s\\%s.1", dir, filename);
   MoveFileExA(filepath, newpath, MOVEFILE_REPLACE_EXISTING);
 
   /* 5. Open a fresh file — use _SH_DENYNO to allow concurrent reads */
   *logfile_ptr = _fsopen(filepath, "a", _SH_DENYNO);
-  return (*logfile_ptr != NULL) ? 0 : -1;
+  int result = (*logfile_ptr != NULL) ? 0 : -1;
+  free(oldpath);
+  free(newpath);
+  free(dir);
+  return result;
 }
 
 /* ── Timestamp ────────────────────────────────────────────────── */
@@ -352,19 +384,22 @@ void svc_log_write(SvcLogLevel level, const char *source, const char *fmt,
    * early-startup messages are not completely lost.
    */
   if (!g_init) {
-    char debug_buf[LINE_BUF_SIZE];
-    int n = omni_format(debug_buf, sizeof(debug_buf), "[svc_log] [%s] [%s] ",
+    char *debug_buf = (char *)calloc(LINE_BUF_SIZE, sizeof(*debug_buf));
+    if (!debug_buf)
+      return;
+    int n = omni_format(debug_buf, LINE_BUF_SIZE, "[svc_log] [%s] [%s] ",
                         svc_log_level_name(level), source ? source : "?");
 
-    if (n > 0 && (size_t)n < sizeof(debug_buf)) {
+    if (n > 0 && (size_t)n < LINE_BUF_SIZE) {
       va_list args;
       va_start(args, fmt);
-      omni_vformat(debug_buf + n, sizeof(debug_buf) - (size_t)n, fmt, args);
+      omni_vformat(debug_buf + n, LINE_BUF_SIZE - (size_t)n, fmt, args);
       va_end(args);
     }
-    debug_buf[sizeof(debug_buf) - 1] = '\0';
+    debug_buf[LINE_BUF_SIZE - 1] = '\0';
     OutputDebugStringA(debug_buf);
     OutputDebugStringA("\n");
+    free(debug_buf);
     return;
   }
 
@@ -383,25 +418,36 @@ void svc_log_write(SvcLogLevel level, const char *source, const char *fmt,
   }
 
   /* Timestamp */
-  char ts[24];
-  svc_log_timestamp(ts, sizeof(ts));
+  char *ts = (char *)calloc(24, sizeof(*ts));
+  if (!ts) {
+    LeaveCriticalSection(&g_cs);
+    return;
+  }
+  svc_log_timestamp(ts, 24);
 
   /* Format the full line: [TIMESTAMP] [LEVEL] [source] message */
-  char line[LINE_BUF_SIZE];
-  int n = omni_format(line, sizeof(line), "[%s] [%s] [%s] ", ts,
+  char *line = (char *)calloc(LINE_BUF_SIZE, sizeof(*line));
+  if (!line) {
+    free(ts);
+    LeaveCriticalSection(&g_cs);
+    return;
+  }
+  int n = omni_format(line, LINE_BUF_SIZE, "[%s] [%s] [%s] ", ts,
                       svc_log_level_name(level), source ? source : "?");
 
-  if (n > 0 && (size_t)n < sizeof(line)) {
+  if (n > 0 && (size_t)n < LINE_BUF_SIZE) {
     va_list args;
     va_start(args, fmt);
-    omni_vformat(line + n, sizeof(line) - (size_t)n, fmt, args);
+    omni_vformat(line + n, LINE_BUF_SIZE - (size_t)n, fmt, args);
     va_end(args);
   }
-  line[sizeof(line) - 1] = '\0';
+  line[LINE_BUF_SIZE - 1] = '\0';
 
   /* Write to file */
-  fprintf(g_logfile, "%s\n", line);
+  fprintf_s(g_logfile, "%s\n", line);
   fflush(g_logfile);
+  free(ts);
+  free(line);
 
   LeaveCriticalSection(&g_cs);
 }

@@ -306,8 +306,9 @@ int main(int argc, char *argv[]) {
         last_bitmap_batch_count = bitmap_batches;
         last_surface_bits_decode_count = surface_decodes;
       } else {
-        printf("[Stats] No new forwarded updates | ProcessCPU: %.1f%%\n",
-               process_cpu_percent);
+        fprintf_s(stdout,
+                  "[Stats] No new forwarded updates | ProcessCPU: %.1f%%\n",
+                  process_cpu_percent);
       }
 
       last_stats = now;

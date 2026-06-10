@@ -309,42 +309,56 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
   if (!config_path || !instance_name || !key)
     return -1;
 
+  enum {
+    SECTION_CAPACITY = 256,
+    CONFIG_LINE_CAPACITY = 8192,
+    ENCRYPTED_VALUE_CAPACITY = 4096
+  };
+  int result = -1;
+  FILE *orig = NULL;
+  FILE *tmp = NULL;
+  char *section = NULL;
+  char *tmp_path = NULL;
+  char *line = NULL;
+  char *current_section = NULL;
+
   /* Build the section name: "instance:<name>" */
-  char section[256];
-  int ret = omni_format(section, sizeof(section), "instance:%s", instance_name);
-  if (ret < 0 || (size_t)ret >= sizeof(section))
-    return -1;
+  section = (char *)calloc(SECTION_CAPACITY, sizeof(*section));
+  if (!section)
+    goto cleanup;
+  int ret =
+      omni_format(section, SECTION_CAPACITY, "instance:%s", instance_name);
+  if (ret < 0 || (size_t)ret >= SECTION_CAPACITY)
+    goto cleanup;
 
   /* ── Open original file for reading ───────────────────────── */
-  FILE *orig = NULL;
   fopen_s(&orig, config_path, "r");
   if (!orig)
-    return -1;
+    goto cleanup;
 
   /* ── Build temp file path ─────────────────────────────────── */
-  char tmp_path[MAX_PATH];
-  ret = omni_format(tmp_path, sizeof(tmp_path), "%s.tmp", config_path);
-  if (ret < 0 || (size_t)ret >= sizeof(tmp_path)) {
-    fclose(orig);
-    return -1;
-  }
+  tmp_path = (char *)calloc(MAX_PATH, sizeof(*tmp_path));
+  if (!tmp_path)
+    goto cleanup;
+  ret = omni_format(tmp_path, MAX_PATH, "%s.tmp", config_path);
+  if (ret < 0 || (size_t)ret >= MAX_PATH)
+    goto cleanup;
 
-  FILE *tmp = NULL;
   fopen_s(&tmp, tmp_path, "w");
-  if (!tmp) {
-    fclose(orig);
-    return -1;
-  }
+  if (!tmp)
+    goto cleanup;
 
   /* ── Line-by-line processing ──────────────────────────────── */
-  char line[8192];
-  char current_section[256] = "";
+  line = (char *)calloc(CONFIG_LINE_CAPACITY, sizeof(*line));
+  current_section = (char *)calloc(SECTION_CAPACITY, sizeof(*current_section));
+  if (!line || !current_section)
+    goto cleanup;
   int in_target_section = 0;
   int target_found = 0;
   int target_modified = 0;
   int encryption_failed = 0;
 
-  while (fgets(line, sizeof(line), orig)) {
+  while (fgets(line, CONFIG_LINE_CAPACITY, orig)) {
     /* ── Detect section header ──────────────────────────── */
     /* Trim leading whitespace to check for '[' */
     const char *p = line;
@@ -356,15 +370,15 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
       const char *end_bracket = strchr(p, ']');
       if (end_bracket) {
         /* Extract section name */
-        char sec[256];
+        char *sec = (char *)calloc(SECTION_CAPACITY, sizeof(*sec));
+        if (!sec)
+          goto cleanup;
         size_t sec_len = (size_t)(end_bracket - p - 1);
-        if (sec_len >= sizeof(sec))
-          sec_len = sizeof(sec) - 1;
-        if (memcpy_s(sec, sizeof(sec), p + 1, sec_len) != 0) {
-          fclose(orig);
-          fclose(tmp);
-          remove(tmp_path);
-          return -1;
+        if (sec_len >= SECTION_CAPACITY)
+          sec_len = SECTION_CAPACITY - 1;
+        if (memcpy_s(sec, SECTION_CAPACITY, p + 1, sec_len) != 0) {
+          free(sec);
+          goto cleanup;
         }
         sec[sec_len] = '\0';
 
@@ -372,22 +386,20 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
         char *sp = sec;
         while (*sp && isspace((unsigned char)*sp))
           sp++;
-        size_t sp_len = strnlen_s(sp, sizeof(sec));
+        size_t sp_len = strnlen_s(sp, SECTION_CAPACITY);
         if (sp_len > 0) {
           char *se = sp + sp_len - 1;
           while (se > sp && isspace((unsigned char)*se))
             *se-- = '\0';
         }
 
-        if (omni_format(current_section, sizeof(current_section), "%s", sp) <
-            0) {
-          fclose(orig);
-          fclose(tmp);
-          remove(tmp_path);
-          return -1;
+        if (omni_format(current_section, SECTION_CAPACITY, "%s", sp) < 0) {
+          free(sec);
+          goto cleanup;
         }
-        current_section[sizeof(current_section) - 1] = '\0';
+        current_section[SECTION_CAPACITY - 1] = '\0';
         in_target_section = (strcmp(current_section, section) == 0);
+        free(sec);
       } else {
         in_target_section = 0;
       }
@@ -431,37 +443,46 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
                 val_start++;
 
               /* Copy the value and trim trailing ws/newlines */
-              char value[8192];
-              if (omni_format(value, sizeof(value), "%s", val_start) < 0) {
-                fclose(orig);
-                fclose(tmp);
-                remove(tmp_path);
-                return -1;
+              char *value =
+                  (char *)calloc(CONFIG_LINE_CAPACITY, sizeof(*value));
+              if (!value)
+                goto cleanup;
+              if (omni_format(value, CONFIG_LINE_CAPACITY, "%s", val_start) <
+                  0) {
+                free(value);
+                goto cleanup;
               }
-              value[sizeof(value) - 1] = '\0';
+              value[CONFIG_LINE_CAPACITY - 1] = '\0';
 
-              size_t vlen = strnlen_s(value, sizeof(value));
+              size_t vlen = strnlen_s(value, CONFIG_LINE_CAPACITY);
               while (vlen > 0 && isspace((unsigned char)value[vlen - 1]))
                 value[--vlen] = '\0';
 
               /* Check if already encrypted */
               if (strncmp(value, DPAPI_PREFIX, dpapi_prefix_len()) != 0) {
                 /* Encrypt the value */
-                char encrypted[4096];
-                if (svc_dpapi_encrypt(value, encrypted, sizeof(encrypted)) ==
-                    0) {
+                char *encrypted = (char *)calloc(ENCRYPTED_VALUE_CAPACITY,
+                                                 sizeof(*encrypted));
+                if (!encrypted) {
+                  free(value);
+                  goto cleanup;
+                }
+                if (svc_dpapi_encrypt(value, encrypted,
+                                      ENCRYPTED_VALUE_CAPACITY) == 0) {
                   /* Write modified line */
-                  fprintf(tmp, "%s = %s\n", key, encrypted);
+                  fprintf_s(tmp, "%s = %s\n", key, encrypted);
                   target_modified = 1;
                 } else {
                   /* Encryption failed – write original */
                   fputs(line, tmp);
                   encryption_failed = 1;
                 }
+                free(encrypted);
               } else {
                 /* Already encrypted – write original */
                 fputs(line, tmp);
               }
+              free(value);
 
               continue;
             }
@@ -476,26 +497,42 @@ int svc_dpapi_encrypt_in_file(const char *config_path,
 
   /* ── Cleanup ──────────────────────────────────────────────── */
   fclose(orig);
+  orig = NULL;
   fclose(tmp);
+  tmp = NULL;
 
   if (target_modified) {
     /* Atomically replace original with temp file */
     if (!MoveFileExA(tmp_path, config_path, MOVEFILE_REPLACE_EXISTING)) {
       /* Attempt to clean up the temp file */
       remove(tmp_path);
-      return -1;
+      goto cleanup;
     }
-    return 0;
+    result = 0;
+    goto cleanup;
   }
 
   /* No modification was made: clean up temp file */
   remove(tmp_path);
 
   if (encryption_failed)
-    return -1; /* encryption was attempted and failed */
+    goto cleanup; /* encryption was attempted and failed */
 
   if (!target_found)
-    return -1; /* key was not found in the specified section */
+    goto cleanup; /* key was not found in the specified section */
 
-  return 0; /* key found but already encrypted */
+  result = 0; /* key found but already encrypted */
+
+cleanup:
+  if (orig)
+    fclose(orig);
+  if (tmp)
+    fclose(tmp);
+  if (result != 0 && tmp_path)
+    remove(tmp_path);
+  free(section);
+  free(tmp_path);
+  free(line);
+  free(current_section);
+  return result;
 }

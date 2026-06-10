@@ -62,7 +62,7 @@ BOOL viewer_server_publish_frame_marker(BackendClient *backend,
 
 static int expect_true(BOOL value, const char *message) {
   if (!value) {
-    (void)fprintf(stderr, "FAIL: %s\n", message);
+    (void)fprintf_s(stderr, "FAIL: %s\n", message);
     return 0;
   }
   return 1;

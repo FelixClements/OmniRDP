@@ -582,27 +582,36 @@ int svc_service_install(const char *serviceName, const char *configPath) {
    * Including --service-name ensures the SCM restarts the service
    * with the correct custom name rather than falling back to "OmniRDP".
    */
-  char binaryPath[2048];
-  int ret = omni_format(binaryPath, sizeof(binaryPath),
+  enum { BINARY_PATH_CAPACITY = 2048 };
+  char *binaryPath = (char *)calloc(BINARY_PATH_CAPACITY, sizeof(*binaryPath));
+  if (!binaryPath) {
+    fputs("Out of memory while building service binary path\n", stderr);
+    CloseServiceHandle(schSCManager);
+    return -1;
+  }
+  int ret = omni_format(binaryPath, BINARY_PATH_CAPACITY,
                         "\"%s\" --service --service-name \"%s\"", modulePath,
                         serviceName);
-  if (ret < 0 || (size_t)ret >= sizeof(binaryPath)) {
-    fprintf(stderr, "Binary path too long\n");
+  if (ret < 0 || (size_t)ret >= BINARY_PATH_CAPACITY) {
+    fputs("Binary path too long\n", stderr);
+    free(binaryPath);
     CloseServiceHandle(schSCManager);
     return -1;
   }
 
   if (configPath && configPath[0] != '\0') {
-    size_t existing = strnlen_s(binaryPath, sizeof(binaryPath));
-    if (existing >= sizeof(binaryPath)) {
-      fprintf(stderr, "Binary path too long\n");
+    size_t existing = strnlen_s(binaryPath, BINARY_PATH_CAPACITY);
+    if (existing >= BINARY_PATH_CAPACITY) {
+      fputs("Binary path too long\n", stderr);
+      free(binaryPath);
       CloseServiceHandle(schSCManager);
       return -1;
     }
-    ret = omni_format(binaryPath + existing, sizeof(binaryPath) - existing,
+    ret = omni_format(binaryPath + existing, BINARY_PATH_CAPACITY - existing,
                       " --config \"%s\"", configPath);
-    if (ret < 0 || existing + (size_t)ret >= sizeof(binaryPath)) {
-      fprintf(stderr, "Binary path with config too long\n");
+    if (ret < 0 || existing + (size_t)ret >= BINARY_PATH_CAPACITY) {
+      fputs("Binary path with config too long\n", stderr);
+      free(binaryPath);
       CloseServiceHandle(schSCManager);
       return -1;
     }
@@ -676,12 +685,14 @@ int svc_service_install(const char *serviceName, const char *configPath) {
     }
 
     if (!schService) {
-      fprintf(stderr, "CreateService failed: %lu\n", createErr);
+      fprintf_s(stderr, "CreateService failed: %lu\n", createErr);
       if (schSCManager)
         CloseServiceHandle(schSCManager);
+      free(binaryPath);
       return -1;
     }
   }
+  free(binaryPath);
 
   /* Set a human-readable description */
   SERVICE_DESCRIPTIONA desc;
@@ -694,8 +705,8 @@ int svc_service_install(const char *serviceName, const char *configPath) {
     sidInfo.dwServiceSidType = SERVICE_SID_TYPE_UNRESTRICTED;
     if (!ChangeServiceConfig2A(schService, SERVICE_CONFIG_SERVICE_SID_INFO,
                                &sidInfo)) {
-      fprintf(stderr, "ChangeServiceConfig2(SERVICE_SID_INFO) failed: %lu\n",
-              GetLastError());
+      fprintf_s(stderr, "ChangeServiceConfig2(SERVICE_SID_INFO) failed: %lu\n",
+                GetLastError());
       CloseServiceHandle(schService);
       CloseServiceHandle(schSCManager);
       return -1;
@@ -821,7 +832,7 @@ int svc_service_uninstall(const char *serviceName) {
   }
 
   if (!stopped) {
-    fprintf(
+    fprintf_s(
         stderr,
         "Service '%s' did not stop within 10 seconds. Cannot safely delete.\n",
         serviceName);
@@ -999,12 +1010,16 @@ int svc_service_start(const char *serviceName, const char *configPath) {
 
   /* Initialize pipe server for tray app communication */
   if (mgrInitialized) {
-    char pipeName[256];
-    if (omni_format(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName) <
-            0 ||
-        strnlen_s(pipeName, sizeof(pipeName)) >= sizeof(pipeName))
+    enum { PIPE_NAME_CAPACITY = 256 };
+    char *pipeName = (char *)calloc(PIPE_NAME_CAPACITY, sizeof(*pipeName));
+    if (!pipeName) {
+      LOG_E("svc_service_start", "Pipe name allocation failed");
+    } else if (omni_format(pipeName, PIPE_NAME_CAPACITY, "%s_Pipe",
+                           ctx.serviceName) < 0 ||
+               strnlen_s(pipeName, PIPE_NAME_CAPACITY) >= PIPE_NAME_CAPACITY) {
       pipeName[0] = '\0';
-    if (pipeName[0] == '\0') {
+    }
+    if (!pipeName || pipeName[0] == '\0') {
       LOG_E("svc_service_start", "Pipe name construction failed");
     } else {
       /* Replace hyphens with underscores for Windows pipe name compatibility */
@@ -1020,6 +1035,7 @@ int svc_service_start(const char *serviceName, const char *configPath) {
         pipeInitialized = TRUE;
       }
     }
+    free(pipeName);
   }
 
   /* ── 9. Main service loop ───────────────────────────────── */
@@ -1221,12 +1237,16 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
 
   /* Initialize pipe server for tray app communication */
   if (mgrInitialized) {
-    char pipeName[256];
-    if (omni_format(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName) <
-            0 ||
-        strnlen_s(pipeName, sizeof(pipeName)) >= sizeof(pipeName))
+    enum { PIPE_NAME_CAPACITY = 256 };
+    char *pipeName = (char *)calloc(PIPE_NAME_CAPACITY, sizeof(*pipeName));
+    if (!pipeName) {
+      LOG_E("svc_service_run_console", "Pipe name allocation failed");
+    } else if (omni_format(pipeName, PIPE_NAME_CAPACITY, "%s_Pipe",
+                           ctx.serviceName) < 0 ||
+               strnlen_s(pipeName, PIPE_NAME_CAPACITY) >= PIPE_NAME_CAPACITY) {
       pipeName[0] = '\0';
-    if (pipeName[0] == '\0') {
+    }
+    if (!pipeName || pipeName[0] == '\0') {
       LOG_E("svc_service_run_console", "Pipe name construction failed");
     } else {
       /* Replace hyphens with underscores for Windows pipe name compatibility */
@@ -1242,6 +1262,7 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
         pipeInitialized = TRUE;
       }
     }
+    free(pipeName);
   }
 
   /* ── Main loop ──────────────────────────────────────────────── */

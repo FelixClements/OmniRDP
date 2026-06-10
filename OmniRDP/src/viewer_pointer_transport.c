@@ -18,7 +18,7 @@ BOOL viewer_pointer_transport_send_plan(ViewerPointerTransport *transport,
   (void)viewer_classic_transport_begin_batch(&transport->classic_transport);
   if (plan->send_system) {
     IFCALLRET(peer->context->update->pointer->PointerSystem, sent,
-              peer->context, &plan->system);
+              peer->context, &plan->system_update);
   } else if (plan->send_new && peer->context->update->pointer->PointerNew) {
     IFCALLRET(peer->context->update->pointer->PointerNew, sent, peer->context,
               &plan->pointer_new);

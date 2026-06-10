@@ -23,7 +23,8 @@ BOOL viewer_pointer_plan_from_snapshot(const ViewerPointerSnapshot *snapshot,
   if (shape_changed) {
     if (!snapshot->visible || !shape) {
       plan->send_system = TRUE;
-      plan->system.type = snapshot->visible ? snapshot->type : SYSPTR_NULL;
+      plan->system_update.type =
+          snapshot->visible ? snapshot->type : SYSPTR_NULL;
     } else {
       plan->color.cacheIndex = shape->cacheIndex;
       plan->color.hotSpotX = shape->hotSpotX;

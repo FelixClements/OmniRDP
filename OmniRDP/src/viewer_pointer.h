@@ -26,7 +26,7 @@ typedef struct {
   BOOL send_color;
   BOOL send_new;
   BOOL send_position;
-  POINTER_SYSTEM_UPDATE system;
+  POINTER_SYSTEM_UPDATE system_update;
   POINTER_POSITION_UPDATE position;
   POINTER_COLOR_UPDATE color;
   POINTER_NEW_UPDATE pointer_new;

@@ -95,12 +95,18 @@ static const char *svc_log_level_to_text(SvcLogLevel level) {
 static int instance_key_configured(const SvcConfig *config,
                                    const InstanceConfig *inst,
                                    const char *key) {
-  char section[256];
+  enum { SECTION_CAPACITY = 256 };
+  char *section = NULL;
+  int configured = 0;
   if (!config || !config->ini || !inst || !key)
     return 0;
-  if (omni_format(section, sizeof(section), "instance:%s", inst->name) < 0)
+  section = (char *)calloc(SECTION_CAPACITY, sizeof(*section));
+  if (!section)
     return 0;
-  return ini_get(config->ini, section, key, NULL) != NULL;
+  if (omni_format(section, SECTION_CAPACITY, "instance:%s", inst->name) >= 0)
+    configured = ini_get(config->ini, section, key, NULL) != NULL;
+  free(section);
+  return configured;
 }
 
 static void log_effective_instance_config(const SvcConfig *config,
@@ -236,9 +242,9 @@ static BOOL viewer_wlog_callback(const wLogMessage *msg) {
     return FALSE;
 
   /* Write: prefix is already formatted by WLog layout engine */
-  fprintf(g_viewer_logfile, "%s%s\n",
-          msg->PrefixString ? msg->PrefixString : "",
-          msg->TextString ? msg->TextString : "");
+  fprintf_s(g_viewer_logfile, "%s%s\n",
+            msg->PrefixString ? msg->PrefixString : "",
+            msg->TextString ? msg->TextString : "");
   fflush(g_viewer_logfile);
   return TRUE;
 }
@@ -251,9 +257,17 @@ static BOOL viewer_wlog_callback(const wLogMessage *msg) {
  */
 static DWORD WINAPI heartbeat_thread(LPVOID param) {
   const char *instanceName = (const char *)param;
-  char pipePath[256];
-  omni_format(pipePath, sizeof(pipePath), "\\\\.\\pipe\\OmniRDP_Instance_%s",
-              instanceName);
+  enum { PIPE_PATH_CAPACITY = 256, HEARTBEAT_MSG_CAPACITY = 64 };
+  char *pipePath = (char *)calloc(PIPE_PATH_CAPACITY, sizeof(*pipePath));
+  if (!pipePath)
+    return 1;
+  int pipePathLen =
+      omni_format(pipePath, PIPE_PATH_CAPACITY,
+                  "\\\\.\\pipe\\OmniRDP_Instance_%s", instanceName);
+  if (pipePathLen < 0 || (size_t)pipePathLen >= PIPE_PATH_CAPACITY) {
+    free(pipePath);
+    return 1;
+  }
 
   /* Wait for the pipe to become available (service creates it) */
   for (int retry = 0; retry < 30; retry++) {
@@ -268,23 +282,32 @@ static DWORD WINAPI heartbeat_thread(LPVOID param) {
     LOG_W("heartbeat",
           "Failed to connect to heartbeat pipe for '%s' (error %lu)",
           instanceName, GetLastError());
+    free(pipePath);
     return 1;
   }
 
   LOG_I("heartbeat", "Connected to heartbeat pipe for '%s'", instanceName);
+  char *msg = (char *)calloc(HEARTBEAT_MSG_CAPACITY, sizeof(*msg));
+  if (!msg) {
+    CloseHandle(hPipe);
+    free(pipePath);
+    return 1;
+  }
 
   while (g_running) {
     /* Send heartbeat: timestamp and viewer count */
-    char msg[64];
     unsigned int vc = viewer_server_get_count(g_server);
-    int len = omni_format(msg, sizeof(msg), "heartbeat:%llu:%u\n",
+    int len = omni_format(msg, HEARTBEAT_MSG_CAPACITY, "heartbeat:%llu:%u\n",
                           (unsigned long long)GetTickCount64(), vc);
     DWORD written;
-    WriteFile(hPipe, msg, (DWORD)len, &written, NULL);
+    if (len > 0 && (size_t)len < HEARTBEAT_MSG_CAPACITY)
+      WriteFile(hPipe, msg, (DWORD)len, &written, NULL);
 
     Sleep(5000); /* Heartbeat every 5 seconds */
   }
 
+  free(msg);
+  free(pipePath);
   CloseHandle(hPipe);
   return 0;
 }
@@ -808,7 +831,7 @@ int instance_runner_main(int argc, char *argv[]) {
 
   while (g_running && backend_is_connected(client)) {
     if (!backend_iterate(client)) {
-      printf("Connection lost\n");
+      puts("Connection lost");
       break;
     }
 

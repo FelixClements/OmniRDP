@@ -10,6 +10,7 @@
 #ifndef SVC_CONFIG_H
 #define SVC_CONFIG_H
 
+#include "fixed_buffer.h"
 #include "ini_parser.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -24,11 +25,12 @@ extern "C" {
 /* ── Service-level settings (from [service] section) ────────── */
 
 typedef struct {
-  char log_level[64];           /* default: "info" */
-  char log_dir[512];            /* default: "C:\ProgramData\OmniRDP\logs" */
+  OMNI_FIXED_CHAR_FIELD(log_level, 64); /* default: "info" */
+  OMNI_FIXED_CHAR_FIELD(log_dir,
+                        512);   /* default: "C:\ProgramData\OmniRDP\logs" */
   unsigned int log_max_size_mb; /* default: 10 */
   unsigned int log_max_files;   /* default: 5 */
-  char pipe_name[256];          /* default: "OmniRDP_ServicePipe" */
+  OMNI_FIXED_CHAR_FIELD(pipe_name, 256);  /* default: "OmniRDP_ServicePipe" */
   unsigned int heartbeat_timeout_sec;     /* default: 10 */
   unsigned int graceful_shutdown_sec;     /* default: 10 */
   unsigned int health_poll_interval_sec;  /* default: 2 */
@@ -38,22 +40,24 @@ typedef struct {
 /* ── Instance-level settings (from [instance:<name>] section) ─ */
 
 typedef struct {
-  char name[128]; /* instance name (from section header) */
-  int enabled;    /* default: 1 (true) */
+  OMNI_FIXED_CHAR_FIELD(name, 128); /* instance name (from section header) */
+  int enabled;                      /* default: 1 (true) */
 
   /* Backend connection */
-  char backend_hostname[256];  /* REQUIRED */
-  uint16_t backend_port;       /* default: 3389 */
-  char backend_username[256];  /* REQUIRED */
-  char backend_password[1024]; /* REQUIRED (may be dpapi:... or plaintext) */
-  char backend_domain[256];    /* default: "" */
-  unsigned int backend_connect_timeout_ms;      /* default: 30000 */
-  int backend_gfx_decode_only_enabled;          /* default: 0 */
-  int backend_gfx_rfx_enabled;                  /* default: 0 */
-  char backend_rdp_workspace_id[256];           /* default: "" */
-  int backend_rdp_use_redirection_server_name;  /* default: 0 */
-  char backend_rdp_loadbalanceinfo[1024];       /* default: "" */
-  char backend_rdp_alternate_full_address[256]; /* default: "" */
+  OMNI_FIXED_CHAR_FIELD(backend_hostname, 256); /* REQUIRED */
+  uint16_t backend_port;                        /* default: 3389 */
+  OMNI_FIXED_CHAR_FIELD(backend_username, 256); /* REQUIRED */
+  OMNI_FIXED_CHAR_FIELD(backend_password,
+                        1024); /* REQUIRED (may be dpapi:... or plaintext) */
+  OMNI_FIXED_CHAR_FIELD(backend_domain, 256);               /* default: "" */
+  unsigned int backend_connect_timeout_ms;                  /* default: 30000 */
+  int backend_gfx_decode_only_enabled;                      /* default: 0 */
+  int backend_gfx_rfx_enabled;                              /* default: 0 */
+  OMNI_FIXED_CHAR_FIELD(backend_rdp_workspace_id, 256);     /* default: "" */
+  int backend_rdp_use_redirection_server_name;              /* default: 0 */
+  OMNI_FIXED_CHAR_FIELD(backend_rdp_loadbalanceinfo, 1024); /* default: "" */
+  OMNI_FIXED_CHAR_FIELD(backend_rdp_alternate_full_address,
+                        256); /* default: "" */
 
   /* Reconnect policy */
   int reconnect_enabled;                   /* default: 1 */
@@ -63,11 +67,11 @@ typedef struct {
   double reconnect_backoff_multiplier;     /* default: 2.0 */
 
   /* Viewer listener */
-  char viewer_bind_address[64];                      /* default: "127.0.0.1" */
+  OMNI_FIXED_CHAR_FIELD(viewer_bind_address, 64);    /* default: "127.0.0.1" */
   uint16_t viewer_port;                              /* REQUIRED */
   unsigned int viewer_max_viewers;                   /* default: 10 */
-  char viewer_cert_path[512];                        /* default: "" */
-  char viewer_key_path[512];                         /* default: "" */
+  OMNI_FIXED_CHAR_FIELD(viewer_cert_path, 512);      /* default: "" */
+  OMNI_FIXED_CHAR_FIELD(viewer_key_path, 512);       /* default: "" */
   int viewer_slow_disconnect_enabled;                /* default: 1 */
   unsigned int viewer_slow_lag_interval_ms;          /* default: 5000 */
   unsigned int viewer_slow_disconnect_after_ms;      /* default: 30000 */
@@ -87,7 +91,8 @@ typedef struct {
   int viewer_security_nla_enabled;                          /* default: 1 */
   int viewer_security_tls_enabled;                          /* default: 1 */
   int viewer_security_rdp_enabled;                          /* default: 1 */
-  char viewer_auth_mode[32]; /* default: "backend_credentials" */
+  OMNI_FIXED_CHAR_FIELD(viewer_auth_mode,
+                        32); /* default: "backend_credentials" */
 
   /* Display */
   unsigned int display_monitor_count;  /* default: 1 */
@@ -111,11 +116,11 @@ typedef struct {
   int backend_security_server_authentication; /* default: 1 */
   int backend_security_ignore_certificate;    /* default: 0 */
   /* Legacy compatibility viewer/security keys retained for older configs */
-  int security_tls_enabled;           /* default: 1 */
-  int security_nla_enabled;           /* default: 1 */
-  char security_tls_min_version[16];  /* default: "1.2" */
-  int security_server_authentication; /* default: 1 */
-  int security_ignore_certificate;    /* default: 0 */
+  int security_tls_enabled;                            /* default: 1 */
+  int security_nla_enabled;                            /* default: 1 */
+  OMNI_FIXED_CHAR_FIELD(security_tls_min_version, 16); /* default: "1.2" */
+  int security_server_authentication;                  /* default: 1 */
+  int security_ignore_certificate;                     /* default: 0 */
 } InstanceConfig;
 
 /* ── Top-level config ────────────────────────────────────────── */

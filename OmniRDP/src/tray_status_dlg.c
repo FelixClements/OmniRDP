@@ -95,41 +95,49 @@ static void populate_listview(HWND hListView, const TrayAppCtx *ctx) {
 
     for (ii = 0; ii < svc->instanceCount; ii++) {
       const PipeInstanceInfo *inst = &svc->instances[ii];
-      char serviceName[256];
-      char instanceName[128];
-      char stateText[32];
-      char viewers[32];
-      char backend[320];
+      char *serviceName = (char *)calloc(256, sizeof(*serviceName));
+      char *instanceName = (char *)calloc(128, sizeof(*instanceName));
+      char *stateText = (char *)calloc(32, sizeof(*stateText));
+      char *viewers = (char *)calloc(32, sizeof(*viewers));
+      char *backend = (char *)calloc(320, sizeof(*backend));
       int itemIndex;
       LPARAM lParam;
       LVITEMA lvi;
+
+      if (!serviceName || !instanceName || !stateText || !viewers || !backend) {
+        free(serviceName);
+        free(instanceName);
+        free(stateText);
+        free(viewers);
+        free(backend);
+        continue;
+      }
 
       /* Pack service & instance indices into lParam */
       lParam =
           (LPARAM)((si << LPARAM_SERVICE_SHIFT) | (ii & LPARAM_INSTANCE_MASK));
 
-      omni_format(serviceName, sizeof(serviceName), "%s", svc->serviceName);
-      serviceName[sizeof(serviceName) - 1] = '\0';
+      omni_format(serviceName, 256, "%s", svc->serviceName);
+      serviceName[255] = '\0';
 
-      omni_format(instanceName, sizeof(instanceName), "%s", inst->name);
-      instanceName[sizeof(instanceName) - 1] = '\0';
+      omni_format(instanceName, 128, "%s", inst->name);
+      instanceName[127] = '\0';
 
-      omni_format(stateText, sizeof(stateText), "%s",
-                  state_to_string(inst->state));
-      stateText[sizeof(stateText) - 1] = '\0';
+      omni_format(stateText, 32, "%s", state_to_string(inst->state));
+      stateText[31] = '\0';
 
       /* Viewer column */
       if (inst->state == INSTANCE_STOPPED)
-        omni_format(viewers, sizeof(viewers), "-");
+        omni_format(viewers, 32, "-");
       else {
-        omni_format(viewers, sizeof(viewers), "%lu/10", inst->viewer_count);
-        viewers[sizeof(viewers) - 1] = '\0';
+        omni_format(viewers, 32, "%lu/10", inst->viewer_count);
+        viewers[31] = '\0';
       }
 
       /* Backend column */
-      omni_format(backend, sizeof(backend), "%s:%u", inst->backend_hostname,
+      omni_format(backend, 320, "%s:%u", inst->backend_hostname,
                   inst->backend_port);
-      backend[sizeof(backend) - 1] = '\0';
+      backend[319] = '\0';
 
       itemIndex = ListView_GetItemCount(hListView);
 
@@ -149,12 +157,18 @@ static void populate_listview(HWND hListView, const TrayAppCtx *ctx) {
 
       /* Viewer Port column */
       {
-        char cell[32];
-        if (inst->viewer_port > 0) {
-          omni_format(cell, sizeof(cell), "%u", inst->viewer_port);
+        char *cell = (char *)calloc(32, sizeof(*cell));
+        if (cell && inst->viewer_port > 0) {
+          omni_format(cell, 32, "%u", inst->viewer_port);
           ListView_SetItemText(hListView, itemIndex, 5, cell);
         }
+        free(cell);
       }
+      free(serviceName);
+      free(instanceName);
+      free(stateText);
+      free(viewers);
+      free(backend);
     }
   }
 }

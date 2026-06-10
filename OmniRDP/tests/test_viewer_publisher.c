@@ -5,7 +5,7 @@
 
 static int expect_true(BOOL value, const char *message) {
   if (!value) {
-    (void)fprintf(stderr, "FAIL: %s\n", message);
+    (void)fprintf_s(stderr, "FAIL: %s\n", message);
     return 0;
   }
   return 1;
@@ -13,8 +13,8 @@ static int expect_true(BOOL value, const char *message) {
 
 static int expect_uint64(UINT64 actual, UINT64 expected, const char *message) {
   if (actual != expected) {
-    (void)fprintf(stderr, "FAIL: %s actual=%llu expected=%llu\n", message,
-                  (unsigned long long)actual, (unsigned long long)expected);
+    (void)fprintf_s(stderr, "FAIL: %s actual=%llu expected=%llu\n", message,
+                    (unsigned long long)actual, (unsigned long long)expected);
     return 0;
   }
   return 1;
@@ -22,8 +22,8 @@ static int expect_uint64(UINT64 actual, UINT64 expected, const char *message) {
 
 static int expect_uint32(UINT32 actual, UINT32 expected, const char *message) {
   if (actual != expected) {
-    (void)fprintf(stderr, "FAIL: %s actual=%u expected=%u\n", message, actual,
-                  expected);
+    (void)fprintf_s(stderr, "FAIL: %s actual=%u expected=%u\n", message, actual,
+                    expected);
     return 0;
   }
   return 1;
@@ -31,8 +31,8 @@ static int expect_uint32(UINT32 actual, UINT32 expected, const char *message) {
 
 static int expect_int(int actual, int expected, const char *message) {
   if (actual != expected) {
-    (void)fprintf(stderr, "FAIL: %s actual=%d expected=%d\n", message, actual,
-                  expected);
+    (void)fprintf_s(stderr, "FAIL: %s actual=%d expected=%d\n", message, actual,
+                    expected);
     return 0;
   }
   return 1;

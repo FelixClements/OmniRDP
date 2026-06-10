@@ -58,7 +58,7 @@ static void test_forced_default_cursor_and_position(void) {
 
   assert(viewer_pointer_plan_from_snapshot(&snapshot, 4, 5, TRUE, &plan));
   assert(plan.send_system);
-  assert(plan.system.type == SYSPTR_DEFAULT);
+  assert(plan.system_update.type == SYSPTR_DEFAULT);
   assert(!plan.send_color);
   assert(!plan.send_new);
   assert(plan.send_position);
@@ -80,7 +80,7 @@ static void test_hidden_cursor_sends_null_and_no_position(void) {
 
   assert(viewer_pointer_plan_from_snapshot(&snapshot, 3, 4, TRUE, &plan));
   assert(plan.send_system);
-  assert(plan.system.type == SYSPTR_NULL);
+  assert(plan.system_update.type == SYSPTR_NULL);
   assert(!plan.send_position);
 }
 

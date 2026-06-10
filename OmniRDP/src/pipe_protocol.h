@@ -37,6 +37,7 @@
 #ifndef PIPE_PROTOCOL_H
 #define PIPE_PROTOCOL_H
 
+#include "fixed_buffer.h"
 #include <stdint.h>
 #include <windows.h>
 
@@ -156,14 +157,14 @@ typedef struct {
    * Target instance name, or empty string if the command does not
    * apply to a specific instance (e.g. PIPE_CMD_LIST_INSTANCES).
    */
-  char instance_name[128];
+  OMNI_FIXED_CHAR_FIELD(instance_name, 128);
 
   /**
    * Additional JSON payload to merge into the request message.
    * Can be empty for simple commands.  For large payloads, bypass
    * this struct and pass the JSON directly to pipe_frame_send().
    */
-  char json_payload[PIPE_STRUCT_JSON_MAX];
+  OMNI_FIXED_CHAR_FIELD(json_payload, PIPE_STRUCT_JSON_MAX);
 } PipeRequest;
 
 /**
@@ -174,7 +175,7 @@ typedef struct {
   int success;
 
   /** Human-readable error message, empty string when success is TRUE. */
-  char error_message[512];
+  OMNI_FIXED_CHAR_FIELD(error_message, 512);
 
   /**
    * Response data as JSON.  The structure depends on the command:
@@ -182,7 +183,7 @@ typedef struct {
    *   - PIPE_CMD_GET_LOGS      : array of log line strings
    *   - other commands          : typically empty or a simple status object
    */
-  char json_payload[PIPE_STRUCT_JSON_MAX];
+  OMNI_FIXED_CHAR_FIELD(json_payload, PIPE_STRUCT_JSON_MAX);
 } PipeResponse;
 
 /**
@@ -192,7 +193,7 @@ typedef struct {
  */
 typedef struct {
   /** Instance name (matches [instance:<name>] in config). */
-  char name[128];
+  OMNI_FIXED_CHAR_FIELD(name, 128);
 
   /** Current lifecycle state (see PipeInstanceState enum). */
   PipeInstanceState state;
@@ -201,7 +202,7 @@ typedef struct {
   DWORD viewer_count;
 
   /** Backend RDP server hostname or IP address. */
-  char backend_hostname[256];
+  OMNI_FIXED_CHAR_FIELD(backend_hostname, 256);
 
   /** Backend RDP server TCP port (typically 3389). */
   uint16_t backend_port;
