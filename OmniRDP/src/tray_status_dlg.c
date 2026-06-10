@@ -21,6 +21,7 @@
 #endif
 #include <windows.h>
 
+#include "safe_string.h"
 #include <commctrl.h>
 #include <stdio.h>
 #include <string.h>
@@ -107,27 +108,27 @@ static void populate_listview(HWND hListView, const TrayAppCtx *ctx) {
       lParam =
           (LPARAM)((si << LPARAM_SERVICE_SHIFT) | (ii & LPARAM_INSTANCE_MASK));
 
-      _snprintf(serviceName, sizeof(serviceName), "%s", svc->serviceName);
+      omni_format(serviceName, sizeof(serviceName), "%s", svc->serviceName);
       serviceName[sizeof(serviceName) - 1] = '\0';
 
-      _snprintf(instanceName, sizeof(instanceName), "%s", inst->name);
+      omni_format(instanceName, sizeof(instanceName), "%s", inst->name);
       instanceName[sizeof(instanceName) - 1] = '\0';
 
-      _snprintf(stateText, sizeof(stateText), "%s",
-                state_to_string(inst->state));
+      omni_format(stateText, sizeof(stateText), "%s",
+                  state_to_string(inst->state));
       stateText[sizeof(stateText) - 1] = '\0';
 
       /* Viewer column */
       if (inst->state == INSTANCE_STOPPED)
-        snprintf(viewers, sizeof(viewers), "-");
+        omni_format(viewers, sizeof(viewers), "-");
       else {
-        _snprintf(viewers, sizeof(viewers), "%lu/10", inst->viewer_count);
+        omni_format(viewers, sizeof(viewers), "%lu/10", inst->viewer_count);
         viewers[sizeof(viewers) - 1] = '\0';
       }
 
       /* Backend column */
-      _snprintf(backend, sizeof(backend), "%s:%u", inst->backend_hostname,
-                inst->backend_port);
+      omni_format(backend, sizeof(backend), "%s:%u", inst->backend_hostname,
+                  inst->backend_port);
       backend[sizeof(backend) - 1] = '\0';
 
       itemIndex = ListView_GetItemCount(hListView);
@@ -150,7 +151,7 @@ static void populate_listview(HWND hListView, const TrayAppCtx *ctx) {
       {
         char cell[32];
         if (inst->viewer_port > 0) {
-          snprintf(cell, sizeof(cell), "%u", inst->viewer_port);
+          omni_format(cell, sizeof(cell), "%u", inst->viewer_port);
           ListView_SetItemText(hListView, itemIndex, 5, cell);
         }
       }
@@ -241,8 +242,8 @@ static void send_instance_command(HWND hwnd, TrayAppCtx *ctx, PipeCommand cmd) {
   /* Build the request */
   memset(&req, 0, sizeof(req));
   req.command = cmd;
-  snprintf(req.instance_name, sizeof(req.instance_name), "%s",
-           ctx->services[si].instances[ii].name);
+  omni_format(req.instance_name, sizeof(req.instance_name), "%s",
+              ctx->services[si].instances[ii].name);
 
   memset(&resp, 0, sizeof(resp));
 

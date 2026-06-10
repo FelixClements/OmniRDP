@@ -1,5 +1,6 @@
 #include "backend.h"
 #include "platform_compat.h"
+#include "safe_string.h"
 #include "viewer_internal.h"
 #include "viewer_server.h"
 #include <freerdp/addin.h>
@@ -240,10 +241,11 @@ static void backend_normalize_domain_username(const char **domain,
   size_t dom_len = (size_t)(slash - u);
   if (dom_len >= sizeof(domain_buf))
     dom_len = sizeof(domain_buf) - 1;
-  written = snprintf(domain_buf, sizeof(domain_buf), "%.*s", (int)dom_len, u);
+  written =
+      omni_format(domain_buf, sizeof(domain_buf), "%.*s", (int)dom_len, u);
   if ((written < 0) || ((size_t)written >= sizeof(domain_buf)))
     return;
-  written = snprintf(user_buf, sizeof(user_buf), "%s", slash + 1);
+  written = omni_format(user_buf, sizeof(user_buf), "%s", slash + 1);
   if ((written < 0) || ((size_t)written >= sizeof(user_buf)))
     return;
   if (domain)

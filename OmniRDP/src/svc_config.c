@@ -9,6 +9,7 @@
 #include "svc_config.h"
 #include "ini_parser.h"
 
+#include "safe_string.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,12 +19,13 @@
 
 static void svc_config_default_service(SvcServiceConfig *cfg) {
   memset(cfg, 0, sizeof(*cfg));
-  snprintf(cfg->log_level, sizeof(cfg->log_level), "%s", "info");
-  snprintf(cfg->log_dir, sizeof(cfg->log_dir), "%s",
-           "C:\\ProgramData\\OmniRDP\\logs");
+  omni_format(cfg->log_level, sizeof(cfg->log_level), "%s", "info");
+  omni_format(cfg->log_dir, sizeof(cfg->log_dir), "%s",
+              "C:\\ProgramData\\OmniRDP\\logs");
   cfg->log_max_size_mb = 10;
   cfg->log_max_files = 5;
-  snprintf(cfg->pipe_name, sizeof(cfg->pipe_name), "%s", "OmniRDP_ServicePipe");
+  omni_format(cfg->pipe_name, sizeof(cfg->pipe_name), "%s",
+              "OmniRDP_ServicePipe");
   cfg->heartbeat_timeout_sec = 10;
   cfg->graceful_shutdown_sec = 10;
   cfg->health_poll_interval_sec = 2;
@@ -43,8 +45,8 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->reconnect_initial_delay_ms = 1000;
   cfg->reconnect_max_delay_ms = 60000;
   cfg->reconnect_backoff_multiplier = 2.0;
-  snprintf(cfg->viewer_bind_address, sizeof(cfg->viewer_bind_address), "%s",
-           "127.0.0.1");
+  omni_format(cfg->viewer_bind_address, sizeof(cfg->viewer_bind_address), "%s",
+              "127.0.0.1");
   cfg->viewer_max_viewers = 10;
   cfg->viewer_slow_disconnect_enabled = 1;
   cfg->viewer_slow_lag_interval_ms = 5000;
@@ -65,8 +67,8 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->viewer_security_nla_enabled = 1;
   cfg->viewer_security_tls_enabled = 1;
   cfg->viewer_security_rdp_enabled = 1;
-  snprintf(cfg->viewer_auth_mode, sizeof(cfg->viewer_auth_mode), "%s",
-           "backend_credentials");
+  omni_format(cfg->viewer_auth_mode, sizeof(cfg->viewer_auth_mode), "%s",
+              "backend_credentials");
   cfg->display_monitor_count = 1;
   cfg->display_monitor_width = 1920;
   cfg->display_monitor_height = 1080;
@@ -85,8 +87,8 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
   cfg->backend_security_ignore_certificate = 0;
   cfg->security_tls_enabled = 1;
   cfg->security_nla_enabled = 1;
-  snprintf(cfg->security_tls_min_version, sizeof(cfg->security_tls_min_version),
-           "%s", "1.2");
+  omni_format(cfg->security_tls_min_version,
+              sizeof(cfg->security_tls_min_version), "%s", "1.2");
   cfg->security_server_authentication = 1;
   cfg->security_ignore_certificate = 0;
 }
@@ -96,7 +98,7 @@ static void svc_config_default_instance(InstanceConfig *cfg) {
 static int strcpy_safe(char *dest, size_t dest_size, const char *src) {
   if (!dest || dest_size == 0 || !src)
     return 0;
-  int ret = snprintf(dest, dest_size, "%s", src);
+  int ret = omni_format(dest, dest_size, "%s", src);
   if (ret < 0 || (size_t)ret >= dest_size) {
     fprintf(stderr,
             "Warning: config value truncated: '%s' -> '%s' (max %zu chars)\n",
@@ -169,7 +171,7 @@ static int svc_config_get_viewer_gfx_codec(const IniFile *ini,
 static int parse_one_instance(const IniFile *ini, const char *name,
                               InstanceConfig *inst) {
   char section[256];
-  int ret = snprintf(section, sizeof(section), "instance:%s", name);
+  int ret = omni_format(section, sizeof(section), "instance:%s", name);
   if (ret < 0 || (size_t)ret >= sizeof(section))
     return -1;
 

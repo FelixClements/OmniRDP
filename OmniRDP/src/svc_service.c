@@ -20,6 +20,7 @@
 #endif
 #include <windows.h>
 
+#include "safe_string.h"
 #include <aclapi.h>
 #include <shlobj.h>
 #include <stdio.h>
@@ -47,7 +48,7 @@ static int svc_copy_string(char *dest, size_t dest_size, const char *src) {
     SetLastError(ERROR_INVALID_PARAMETER);
     return -1;
   }
-  ret = snprintf(dest, dest_size, "%s", src);
+  ret = omni_format(dest, dest_size, "%s", src);
   if (ret < 0 || (size_t)ret >= dest_size) {
     SetLastError(ERROR_INSUFFICIENT_BUFFER);
     return -1;
@@ -100,7 +101,7 @@ static int get_binary_path(const char *binary_name, char *out,
 
   *(last_slash + 1) = '\0'; /* keep the trailing backslash */
 
-  int ret = _snprintf(out, out_size, "%s%s", module_path, binary_name);
+  int ret = omni_format(out, out_size, "%s%s", module_path, binary_name);
   if (ret < 0 || (size_t)ret >= out_size)
     return -1;
 
@@ -119,7 +120,7 @@ static int build_service_sid_name(const char *serviceName, char *out,
     return -1;
   }
 
-  ret = _snprintf(out, out_size, "NT SERVICE\\%s", serviceName);
+  ret = omni_format(out, out_size, "NT SERVICE\\%s", serviceName);
   if (ret < 0 || (size_t)ret >= out_size) {
     SetLastError(ERROR_INSUFFICIENT_BUFFER);
     return -1;
@@ -582,9 +583,9 @@ int svc_service_install(const char *serviceName, const char *configPath) {
    * with the correct custom name rather than falling back to "OmniRDP".
    */
   char binaryPath[2048];
-  int ret = _snprintf(binaryPath, sizeof(binaryPath),
-                      "\"%s\" --service --service-name \"%s\"", modulePath,
-                      serviceName);
+  int ret = omni_format(binaryPath, sizeof(binaryPath),
+                        "\"%s\" --service --service-name \"%s\"", modulePath,
+                        serviceName);
   if (ret < 0 || (size_t)ret >= sizeof(binaryPath)) {
     fprintf(stderr, "Binary path too long\n");
     CloseServiceHandle(schSCManager);
@@ -598,8 +599,8 @@ int svc_service_install(const char *serviceName, const char *configPath) {
       CloseServiceHandle(schSCManager);
       return -1;
     }
-    ret = _snprintf(binaryPath + existing, sizeof(binaryPath) - existing,
-                    " --config \"%s\"", configPath);
+    ret = omni_format(binaryPath + existing, sizeof(binaryPath) - existing,
+                      " --config \"%s\"", configPath);
     if (ret < 0 || existing + (size_t)ret >= sizeof(binaryPath)) {
       fprintf(stderr, "Binary path with config too long\n");
       CloseServiceHandle(schSCManager);
@@ -944,13 +945,14 @@ int svc_service_start(const char *serviceName, const char *configPath) {
     if (svcCfg && svcCfg->log_dir[0] != '\0') {
       /* Use configured log dir, but append service name for per-service
        * isolation */
-      if (snprintf(log_dir, sizeof(log_dir), "%s\\%s", svcCfg->log_dir,
-                   ctx.serviceName) < 0 ||
+      if (omni_format(log_dir, sizeof(log_dir), "%s\\%s", svcCfg->log_dir,
+                      ctx.serviceName) < 0 ||
           strnlen_s(log_dir, sizeof(log_dir)) >= sizeof(log_dir) - 1)
         log_dir[0] = '\0';
     } else {
-      if (snprintf(log_dir, sizeof(log_dir),
-                   "C:\\ProgramData\\OmniRDP\\logs\\%s", ctx.serviceName) < 0 ||
+      if (omni_format(log_dir, sizeof(log_dir),
+                      "C:\\ProgramData\\OmniRDP\\logs\\%s",
+                      ctx.serviceName) < 0 ||
           strnlen_s(log_dir, sizeof(log_dir)) >= sizeof(log_dir) - 1)
         log_dir[0] = '\0';
     }
@@ -998,7 +1000,8 @@ int svc_service_start(const char *serviceName, const char *configPath) {
   /* Initialize pipe server for tray app communication */
   if (mgrInitialized) {
     char pipeName[256];
-    if (snprintf(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName) < 0 ||
+    if (omni_format(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName) <
+            0 ||
         strnlen_s(pipeName, sizeof(pipeName)) >= sizeof(pipeName))
       pipeName[0] = '\0';
     if (pipeName[0] == '\0') {
@@ -1162,13 +1165,14 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
     if (svcCfg && svcCfg->log_dir[0] != '\0') {
       /* Use configured log dir, but append service name for per-service
        * isolation */
-      if (snprintf(log_dir, sizeof(log_dir), "%s\\%s", svcCfg->log_dir,
-                   ctx.serviceName) < 0 ||
+      if (omni_format(log_dir, sizeof(log_dir), "%s\\%s", svcCfg->log_dir,
+                      ctx.serviceName) < 0 ||
           strnlen_s(log_dir, sizeof(log_dir)) >= sizeof(log_dir) - 1)
         log_dir[0] = '\0';
     } else {
-      if (snprintf(log_dir, sizeof(log_dir),
-                   "C:\\ProgramData\\OmniRDP\\logs\\%s", ctx.serviceName) < 0 ||
+      if (omni_format(log_dir, sizeof(log_dir),
+                      "C:\\ProgramData\\OmniRDP\\logs\\%s",
+                      ctx.serviceName) < 0 ||
           strnlen_s(log_dir, sizeof(log_dir)) >= sizeof(log_dir) - 1)
         log_dir[0] = '\0';
     }
@@ -1218,7 +1222,8 @@ int svc_service_run_console(const char *serviceName, const char *configPath) {
   /* Initialize pipe server for tray app communication */
   if (mgrInitialized) {
     char pipeName[256];
-    if (snprintf(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName) < 0 ||
+    if (omni_format(pipeName, sizeof(pipeName), "%s_Pipe", ctx.serviceName) <
+            0 ||
         strnlen_s(pipeName, sizeof(pipeName)) >= sizeof(pipeName))
       pipeName[0] = '\0';
     if (pipeName[0] == '\0') {

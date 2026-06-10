@@ -26,6 +26,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 
+#include "safe_string.h"
 #include "svc_log.h"
 #include "tray_icon.h"
 #include "tray_pipe_client.h"
@@ -179,9 +180,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
       exePath[MAX_PATH - 1] = '\0';
       char *lastSlash = strrchr(exePath, '\\');
       if (lastSlash) {
-        snprintf(lastSlash + 1,
-                 (size_t)(exePath + sizeof(exePath) - (lastSlash + 1)),
-                 "OmniRDP-svc.exe");
+        omni_format(lastSlash + 1,
+                    (size_t)(exePath + sizeof(exePath) - (lastSlash + 1)),
+                    "OmniRDP-svc.exe");
       }
 
       SHELLEXECUTEINFOA sei = {0};
@@ -222,8 +223,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
           "OmniRDP", MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND);
       if (result == IDYES) {
         char configPath[MAX_PATH];
-        snprintf(configPath, sizeof(configPath),
-                 "C:\\ProgramData\\OmniRDP\\config.ini");
+        omni_format(configPath, sizeof(configPath),
+                    "C:\\ProgramData\\OmniRDP\\config.ini");
 
         /* Check if config file exists */
         DWORD attr = GetFileAttributesA(configPath);

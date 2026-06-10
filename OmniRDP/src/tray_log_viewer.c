@@ -1,5 +1,6 @@
 #include "tray_log_viewer.h"
 #include "pipe_protocol.h"
+#include "safe_string.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -85,7 +86,7 @@ static void load_log_content(void) {
 
   if (!arrStart) {
     /* Fallback: show raw payload */
-    snprintf(displayBuf, outMax, "%s", payload);
+    omni_format(displayBuf, outMax, "%s", payload);
     SetWindowTextA(g_hEdit, displayBuf);
     HeapFree(GetProcessHeap(), 0, displayBuf);
     return;

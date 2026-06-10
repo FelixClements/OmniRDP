@@ -1,5 +1,6 @@
 #include "viewer_internal.h"
 
+#include "safe_string.h"
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -91,9 +92,9 @@ BOOL viewer_gfx_capset_describe(const RDPGFX_CAPSET *caps, char *buffer,
   if (!caps || !buffer || (buffer_size == 0))
     return FALSE;
 
-  written = snprintf(buffer, buffer_size,
-                     "version=0x%08" PRIX32 " flags=0x%08" PRIX32,
-                     caps->version, caps->flags);
+  written = omni_format(buffer, buffer_size,
+                        "version=0x%08" PRIX32 " flags=0x%08" PRIX32,
+                        caps->version, caps->flags);
   if ((written < 0) || ((size_t)written >= buffer_size)) {
     buffer[0] = '\0';
     return FALSE;

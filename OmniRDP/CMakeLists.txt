@@ -96,6 +96,7 @@ set(HEADERS
     src/svc_config.h
     src/svc_log.h
     src/svc_dpapi.h
+    src/safe_string.h
     src/pipe_protocol.h
 )
 
@@ -178,6 +179,7 @@ set(SVC_HEADERS
     src/svc_config.h
     src/svc_log.h
     src/svc_dpapi.h
+    src/safe_string.h
     src/ini_parser.h
     src/pipe_protocol.h
     src/svc_pipe_server.h
@@ -217,6 +219,7 @@ set(TRAY_HEADERS
     src/tray_pipe_client.h
     src/pipe_protocol.h
     src/svc_log.h
+    src/safe_string.h
 )
 
 add_executable(OmniRDP-tray ${TRAY_SOURCES} ${TRAY_HEADERS})
