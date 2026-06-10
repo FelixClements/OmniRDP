@@ -141,6 +141,9 @@ typedef struct {
   ViewerGfxRfxContext *rfx_context;
   UINT64 dirty_last_sent_rect_count;
   UINT64 dirty_last_sent_area;
+  UINT64 dirty_last_sent_payload_bytes;
+  UINT64 dirty_last_sent_surface_command_count;
+  UINT64 dirty_last_sent_send_us;
   UINT64 gfx_encode_count;
   UINT64 gfx_encode_time_total_us;
   UINT64 gfx_encode_time_max_us;

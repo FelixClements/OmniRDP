@@ -38,6 +38,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "RdpCodecBenchmarkSummary.ps1")
+. (Join-Path $PSScriptRoot "RdpBenchmarkAutomation.ps1")
+
 function Get-IniValue {
     param(
         [string[]]$Lines,
@@ -682,6 +685,8 @@ public static class OmniRdpBenchmarkNative {
   public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")]
   public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")]
+  public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 }
 "@
     }
@@ -842,6 +847,13 @@ function Invoke-DesktopClickSequence {
             Start-Sleep -Milliseconds 500
             continue
         }
+        if ($trimmed.StartsWith("nativekeys:", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $chord = $trimmed.Substring(11)
+            $virtualKeys = Convert-RdpBenchmarkNativeKeyChord -Chord $chord
+            Invoke-RdpBenchmarkNativeKeyChord -VirtualKeys $virtualKeys -ActionLogPath $ActionLogPath
+            Start-Sleep -Milliseconds 700
+            continue
+        }
 
         $doubleClick = $false
         if ($trimmed.StartsWith("dbl:", [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -957,7 +969,7 @@ $viewerHost = Get-IniValue -Lines $originalLines -Section $section -Key "viewer.
 $viewerPort = Get-IniValue -Lines $originalLines -Section $section -Key "viewer.port" -Default "3390"
 
 $summaryPath = Join-Path $runRoot "summary.csv"
-Set-Content -LiteralPath $summaryPath -Value "row,status,start,end,notes" -Encoding UTF8
+Set-Content -LiteralPath $summaryPath -Value (Format-RdpCodecMetricSummaryCsvHeader) -Encoding UTF8
 $worktreeProcessIds = New-Object System.Collections.Generic.List[int]
 $runtimeConfigPaths = New-Object System.Collections.Generic.List[string]
 $viewerProcessIds = New-Object System.Collections.Generic.List[int]
@@ -1001,7 +1013,7 @@ try {
             Set-Content -LiteralPath (Join-Path $rowRoot "settings.txt") -Encoding UTF8
 
         if (-not $Apply) {
-            Add-Content -LiteralPath $summaryPath -Value ("{0},planned,{1:o},{1:o},dry run only" -f $rowName, $rowStart)
+            Add-Content -LiteralPath $summaryPath -Value (Format-RdpCodecMetricSummaryCsvRow -Row $rowName -Status "planned" -Start $rowStart -End $rowStart -ThreadedRfx $settings["viewer.gfx.rfx_threading_enabled"] -Metrics $null -Notes "dry run only")
             continue
         }
 
@@ -1106,6 +1118,7 @@ try {
         }
 
         Copy-InstanceLogs -Instance $InstanceName -Destination (Join-Path $rowRoot "logs-after") -LogRoot $activeLogRoot
+        $rowMetrics = Get-RdpCodecLogMetrics -LogRoot (Join-Path $rowRoot "logs-after")
         if ($viewerProcess) {
             Stop-ProcessTree -RootProcessId ([int]$viewerProcess.Id)
             Start-Sleep -Milliseconds 500
@@ -1137,7 +1150,7 @@ try {
         }
 
         $rowEnd = Get-Date
-        Add-Content -LiteralPath $summaryPath -Value ("{0},captured,{1:o},{2:o},logs and cpu captured" -f $rowName, $rowStart, $rowEnd)
+        Add-Content -LiteralPath $summaryPath -Value (Format-RdpCodecMetricSummaryCsvRow -Row $rowName -Status "captured" -Start $rowStart -End $rowEnd -ThreadedRfx $settings["viewer.gfx.rfx_threading_enabled"] -Metrics $rowMetrics -Notes "logs and cpu captured")
     }
 } finally {
     if ($Apply -and -not $KeepLastConfig -and -not $useWorktreeConsole) {

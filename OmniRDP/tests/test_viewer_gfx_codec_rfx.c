@@ -204,6 +204,40 @@ static int test_dirty_rect_encode_uses_cropped_snapshot_origin(void) {
   return ok;
 }
 
+static int test_dirty_rect_batch_encode_builds_bounding_surface(void) {
+  BYTE pixels[128] = {0};
+  ViewerFramebufferSnapshot snapshot = make_snapshot(pixels, 8, 4, 32, 128);
+  RECTANGLE_16 dirty_rects[2] = {{1, 1, 2, 1}, {4, 2, 5, 3}};
+  ViewerGfxRfxContext *context = viewer_gfx_rfx_context_new();
+  RDPGFX_SURFACE_COMMAND command = {0};
+  BOOL batched = FALSE;
+  int ok = 1;
+
+  fill_pixels(pixels, sizeof(pixels));
+  ok =
+      ok && expect_true(context != NULL, "RFX context creates for dirty batch");
+  ok = ok && expect_true(viewer_gfx_rfx_build_surface_command_rects(
+                             context, &snapshot, 12, dirty_rects, 2, &command,
+                             &batched),
+                         "dirty-rect RFX batch command builds");
+  ok = ok && expect_true(batched, "dirty batch reports batched encode");
+  ok = ok && expect_uint32(command.surfaceId, 12, "batch dirty surface id");
+  ok = ok && expect_uint32(command.codecId, RDPGFX_CODECID_CAVIDEO,
+                           "batch dirty RFX codec id");
+  ok = ok && expect_uint32(command.left, 1, "batch dirty left");
+  ok = ok && expect_uint32(command.top, 1, "batch dirty top");
+  ok = ok && expect_uint32(command.right, 6, "batch dirty exclusive right");
+  ok = ok && expect_uint32(command.bottom, 4, "batch dirty exclusive bottom");
+  ok = ok && expect_uint32(command.width, 5, "batch dirty width");
+  ok = ok && expect_uint32(command.height, 3, "batch dirty height");
+  ok = ok && expect_true(command.length > 0, "batch dirty RFX payload nonzero");
+  ok = ok && expect_true(command.data != NULL, "batch dirty RFX payload set");
+
+  viewer_gfx_rfx_surface_command_reset(&command);
+  viewer_gfx_rfx_context_free(context);
+  return ok;
+}
+
 static int test_dirty_rect_edge_bounds(void) {
   BYTE pixels[64] = {0};
   ViewerFramebufferSnapshot snapshot = make_snapshot(pixels, 4, 4, 16, 64);
@@ -353,6 +387,7 @@ int main(void) {
   ok = ok && test_full_frame_encode_builds_cavideo_command();
   ok = ok && test_dirty_rect_encode_builds_destination_bounds();
   ok = ok && test_dirty_rect_encode_uses_cropped_snapshot_origin();
+  ok = ok && test_dirty_rect_batch_encode_builds_bounding_surface();
   ok = ok && test_dirty_rect_edge_bounds();
   ok = ok && test_invalid_inputs_are_rejected_and_reset();
   ok = ok && test_replacement_and_reset_cleanup();

@@ -716,6 +716,72 @@ static int test_snapshot_rfx_threading_flag_reaches_codec(void) {
   return ok;
 }
 
+static int test_snapshot_rfx_threading_state_is_per_viewer_context(void) {
+  ViewerServer server = {0};
+  Viewer threaded_viewer = {0};
+  Viewer non_threaded_viewer = {0};
+  RdpgfxServerContext threaded_rdpgfx = {0};
+  RdpgfxServerContext non_threaded_rdpgfx = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[16] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&threaded_viewer, 2, 2),
+                         "threaded viewer init");
+  ok = ok && expect_true(init_test_viewer(&non_threaded_viewer, 2, 2),
+                         "non-threaded viewer init");
+  init_test_rdpgfx(&threaded_rdpgfx);
+  init_test_rdpgfx(&non_threaded_rdpgfx);
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+  snapshot.pixels = pixels;
+  snapshot.width = 2;
+  snapshot.height = 2;
+  snapshot.stride = 8;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixel_bytes = sizeof(pixels);
+
+  threaded_viewer.gfx.rdpgfx = &threaded_rdpgfx;
+  threaded_viewer.gfx.caps_ready = TRUE;
+  threaded_viewer.gfx.use_rdpgfx = TRUE;
+  threaded_viewer.gfx.channel_opened = TRUE;
+  threaded_viewer.gfx.preferred_codec = VIEWER_GFX_CODEC_RFX;
+  threaded_viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+  threaded_viewer.gfx.rfx_threading_enabled = TRUE;
+
+  non_threaded_viewer.gfx.rdpgfx = &non_threaded_rdpgfx;
+  non_threaded_viewer.gfx.caps_ready = TRUE;
+  non_threaded_viewer.gfx.use_rdpgfx = TRUE;
+  non_threaded_viewer.gfx.channel_opened = TRUE;
+  non_threaded_viewer.gfx.preferred_codec = VIEWER_GFX_CODEC_RFX;
+  non_threaded_viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+  non_threaded_viewer.gfx.rfx_threading_enabled = FALSE;
+
+  reset_send_recorder();
+  ok = ok && expect_true(viewer_gfx_pipeline_send_snapshot(
+                             &server, &threaded_viewer, &snapshot),
+                         "threaded viewer sends RFX snapshot");
+  ok = ok && expect_uint32(viewer_gfx_rfx_test_context_threading_flags(
+                               threaded_viewer.gfx.rfx_context),
+                           0, "threaded viewer context keeps threaded flags");
+
+  reset_send_recorder();
+  ok = ok && expect_true(viewer_gfx_pipeline_send_snapshot(
+                             &server, &non_threaded_viewer, &snapshot),
+                         "non-threaded viewer sends RFX snapshot");
+  ok = ok && expect_uint32(viewer_gfx_rfx_test_context_threading_flags(
+                               non_threaded_viewer.gfx.rfx_context),
+                           THREADING_FLAGS_DISABLE_THREADS,
+                           "non-threaded viewer context keeps disabled flags");
+  ok = ok && expect_uint32(viewer_gfx_rfx_test_context_threading_flags(
+                               threaded_viewer.gfx.rfx_context),
+                           0, "threaded viewer context is unchanged by peer");
+
+  uninit_test_viewer(&non_threaded_viewer);
+  uninit_test_viewer(&threaded_viewer);
+  return ok;
+}
+
 static int test_snapshot_rfx_context_failure_downgrades_to_uncompressed(void) {
   ViewerServer server = {0};
   Viewer viewer = {0};
@@ -1223,6 +1289,50 @@ static int test_dirty_update_rfx_codec_emits_cavideo(void) {
                              viewer.gfx.last_gfx_encode_start_us,
                          "RFX dirty records encode window");
 
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_update_rfx_batches_multiple_rects(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[64] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 32, 2);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 13;
+  viewer.gfx.preferred_codec = VIEWER_GFX_CODEC_RFX;
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+
+  reset_send_recorder();
+  ok = ok && expect_true(viewer_gfx_pipeline_send_dirty_update(&server, &viewer,
+                                                               &snapshot),
+                         "RFX multi-rect dirty update sends");
+  ok = ok && expect_uint32(g_send_count, 3, "start batched surface end");
+  ok = ok && expect_uint32(g_surface_count, 1, "one batched RFX dirty command");
+  ok = ok && expect_uint32(g_last_surface.codecId, RDPGFX_CODECID_CAVIDEO,
+                           "batched RFX dirty uses CAVIDEO");
+  ok = ok && expect_uint32(g_last_surface.left, 1, "batched RFX dirty left");
+  ok = ok && expect_uint32(g_last_surface.top, 1, "batched RFX dirty top");
+  ok = ok && expect_uint32(g_last_surface.right, 3,
+                           "batched RFX dirty exclusive right");
+  ok = ok && expect_uint32(g_last_surface.bottom, 3,
+                           "batched RFX dirty exclusive bottom");
+  ok = ok && expect_uint32(g_last_surface.width, 2, "batched RFX dirty width");
+  ok =
+      ok && expect_uint32(g_last_surface.height, 2, "batched RFX dirty height");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_rect_count, 2,
+                           "batched RFX records logical rect count");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_surface_command_count, 1,
+                           "batched RFX records one surface command");
+
+  viewer.gfx.rdpgfx = NULL;
   uninit_test_viewer(&viewer);
   return ok;
 }
@@ -2534,17 +2644,14 @@ static int test_pending_dirty_region_union_and_thresholds(void) {
                              &viewer.gfx, &batch),
                          "move RFX greater-than-60-percent dirty rect");
   LeaveCriticalSection(&viewer.gfx.lock);
-  ok = ok && expect_true(batch.full_frame, "RFX >60 percent forces full frame");
-  ok = ok && expect_true(batch.full_frame_reason &&
-                             (strcmp(batch.full_frame_reason,
-                                     "pending area threshold") == 0),
-                         "RFX >60 percent records threshold reason");
+  ok = ok && expect_true(!batch.full_frame,
+                         "RFX >60 percent uses cost model before full frame");
   ok = ok && expect_uint32(batch.rect_count, 1,
-                           "RFX >60 percent produces one full-frame rect");
-  ok = ok && expect_uint32(batch.rects[0].right, 99,
-                           "RFX >60 percent full-frame right");
+                           "RFX >60 percent keeps one shaped rect");
+  ok = ok &&
+       expect_uint32(batch.rects[0].right, 63, "RFX >60 percent shaped right");
   ok = ok && expect_uint32(batch.rects[0].bottom, 99,
-                           "RFX >60 percent full-frame bottom");
+                           "RFX >60 percent shaped bottom");
 
   EnterCriticalSection(&viewer.gfx.lock);
   ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
@@ -2562,6 +2669,107 @@ static int test_pending_dirty_region_union_and_thresholds(void) {
   ok = ok && expect_uint32(batch.rects[0].right, 99, "empty full-frame right");
   ok =
       ok && expect_uint32(batch.rects[0].bottom, 99, "empty full-frame bottom");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int
+test_rfx_large_desktop_dirty_uses_cost_model_before_full_frame(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  RECTANGLE_16 large_drag_rect = {0, 0, 1199, 1079};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 1920, 1080), "viewer init");
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+  ok = ok &&
+       expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                       &viewer.gfx, &large_drag_rect, 1, FALSE, 67, 1920, 1080),
+                   "RFX large desktop dirty rect accepted");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move RFX large desktop dirty rect");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok =
+      ok && expect_true(!batch.full_frame,
+                        "RFX large desktop dirty avoids fixed area full-frame");
+  ok = ok && expect_uint32(batch.rect_count, 1,
+                           "RFX large desktop dirty keeps one rect");
+  ok = ok && expect_uint32(batch.rects[0].right, 1215,
+                           "RFX large desktop dirty right tile-aligned");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 1079,
+                           "RFX large desktop dirty bottom preserved");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_rfx_dirty_shaping_tiles_and_merges_dense_rects(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  RECTANGLE_16 same_tile[2] = {{65, 65, 66, 66}, {95, 65, 96, 66}};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 192, 192), "viewer init");
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, same_tile, 2, FALSE, 68, 192, 192),
+                         "RFX same-tile dirty rects accepted");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move shaped same-tile dirty rects");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok && expect_true(!batch.full_frame,
+                         "same-tile dirty shaping avoids full frame");
+  ok =
+      ok && expect_uint32(batch.rect_count, 1, "same-tile rects merge to tile");
+  ok = ok && expect_uint32(batch.rects[0].left, 64, "same-tile left aligned");
+  ok = ok && expect_uint32(batch.rects[0].top, 64, "same-tile top aligned");
+  ok =
+      ok && expect_uint32(batch.rects[0].right, 127, "same-tile right aligned");
+  ok = ok &&
+       expect_uint32(batch.rects[0].bottom, 127, "same-tile bottom aligned");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_rfx_dirty_shaping_preserves_sparse_tiles(void) {
+  Viewer viewer = {0};
+  ViewerGfxPendingDirtyBatch batch = {0};
+  RECTANGLE_16 sparse[2] = {{1, 1, 1, 1}, {300, 300, 300, 300}};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 512, 512), "viewer init");
+
+  EnterCriticalSection(&viewer.gfx.lock);
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_RFX;
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_add_locked(
+                             &viewer.gfx, sparse, 2, FALSE, 69, 512, 512),
+                         "RFX sparse dirty rects accepted");
+  ok = ok && expect_true(viewer_gfx_pipeline_pending_dirty_move_locked(
+                             &viewer.gfx, &batch),
+                         "move shaped sparse dirty rects");
+  LeaveCriticalSection(&viewer.gfx.lock);
+
+  ok = ok &&
+       expect_true(!batch.full_frame, "sparse tile shaping avoids full frame");
+  ok = ok && expect_uint32(batch.rect_count, 2, "sparse tiles stay separate");
+  ok = ok && expect_uint32(batch.rects[0].left, 0, "first sparse left aligned");
+  ok = ok && expect_uint32(batch.rects[0].top, 0, "first sparse top aligned");
+  ok = ok && expect_uint32(batch.rects[0].right, 63, "first sparse right");
+  ok = ok && expect_uint32(batch.rects[0].bottom, 63, "first sparse bottom");
+  ok = ok && expect_uint32(batch.rects[1].left, 256, "second sparse left");
+  ok = ok && expect_uint32(batch.rects[1].top, 256, "second sparse top");
+  ok = ok && expect_uint32(batch.rects[1].right, 319, "second sparse right");
+  ok = ok && expect_uint32(batch.rects[1].bottom, 319, "second sparse bottom");
 
   uninit_test_viewer(&viewer);
   return ok;
@@ -2716,6 +2924,14 @@ static int test_dirty_diagnostic_counters_increment(void) {
   ok = ok &&
        expect_uint64(viewer.gfx.dirty_diag_successful_sends, 1,
                      "diagnostic successful dirty send counter increments");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_payload_bytes,
+                           (UINT64)g_last_surface.length,
+                           "diagnostic last dirty payload bytes recorded");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_surface_command_count, 1,
+                           "diagnostic surface command count recorded");
+  ok = ok && expect_uint64(viewer.gfx.dirty_last_sent_send_us,
+                           viewer.gfx.gfx_send_time_max_us,
+                           "diagnostic last dirty send duration recorded");
   viewer_gfx_pipeline_reset_dirty_state_locked(&viewer.gfx);
   ok = ok && expect_uint64(viewer.gfx.dirty_diag_successful_sends, 1,
                            "dirty reset preserves diagnostic counters");
@@ -3319,6 +3535,8 @@ int main(void) {
     return 1;
   if (!test_snapshot_rfx_threading_flag_reaches_codec())
     return 1;
+  if (!test_snapshot_rfx_threading_state_is_per_viewer_context())
+    return 1;
   if (!test_snapshot_rfx_context_failure_downgrades_to_uncompressed())
     return 1;
   if (!test_snapshot_rfx_context_failure_is_per_viewer())
@@ -3342,6 +3560,8 @@ int main(void) {
   if (!test_dirty_update_command_bounds_validation())
     return 1;
   if (!test_dirty_update_rfx_codec_emits_cavideo())
+    return 1;
+  if (!test_dirty_update_rfx_batches_multiple_rects())
     return 1;
   if (!test_monitor_layout_snapshot_uses_server_layout())
     return 1;
@@ -3396,6 +3616,12 @@ int main(void) {
   if (!test_pending_dirty_overflow_forces_full_frame())
     return 1;
   if (!test_pending_dirty_region_union_and_thresholds())
+    return 1;
+  if (!test_rfx_large_desktop_dirty_uses_cost_model_before_full_frame())
+    return 1;
+  if (!test_rfx_dirty_shaping_tiles_and_merges_dense_rects())
+    return 1;
+  if (!test_rfx_dirty_shaping_preserves_sparse_tiles())
     return 1;
   if (!test_consecutive_deferred_dirty_fallback_by_codec())
     return 1;

@@ -213,6 +213,55 @@ static BOOL viewer_gfx_pipeline_build_surface_command_rect(
   return selected_codec == VIEWER_GFX_CODEC_UNCOMPRESSED;
 }
 
+static BOOL viewer_gfx_pipeline_build_surface_command_rects(
+    Viewer *viewer, const ViewerFramebufferSnapshot *snapshot,
+    UINT16 surface_id, const RECTANGLE_16 *dirty_rects, UINT32 dirty_rect_count,
+    RDPGFX_SURFACE_COMMAND *command) {
+  ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
+  ViewerGfxRfxContext *rfx_context = NULL;
+  UINT64 encode_start_us = 0;
+  UINT64 encode_us = 0;
+  BOOL batched = FALSE;
+
+  if (!gfx || !command || !dirty_rects || (dirty_rect_count < 2U))
+    return FALSE;
+
+  EnterCriticalSection(&gfx->lock);
+  if (gfx->selected_codec == VIEWER_GFX_CODEC_RFX) {
+    if (viewer_gfx_pipeline_ensure_rfx_context_locked(gfx))
+      rfx_context = gfx->rfx_context;
+    else
+      viewer_gfx_pipeline_downgrade_to_uncompressed_locked(gfx);
+  }
+  LeaveCriticalSection(&gfx->lock);
+
+  if (!rfx_context)
+    return FALSE;
+
+  encode_start_us = viewer_gfx_pipeline_now_us();
+  if (!viewer_gfx_rfx_build_surface_command_rects(
+          rfx_context, snapshot, surface_id, dirty_rects, dirty_rect_count,
+          command, &batched)) {
+    viewer_gfx_pipeline_surface_command_reset(command);
+    return FALSE;
+  }
+
+  encode_us = viewer_gfx_pipeline_now_us() - encode_start_us;
+  EnterCriticalSection(&gfx->lock);
+  viewer_gfx_pipeline_record_encode_locked(gfx, encode_start_us, encode_us,
+                                           command->length);
+  LeaveCriticalSection(&gfx->lock);
+  WLog_DBG(
+      TAG,
+      "Viewer %u RDPEGFX RFX dirty batch encode: generation=%" PRIu64
+      " surface_id=%" PRIu16 " dirty_rects=%u batched=%s"
+      " bounds=(%u,%u)-(%u,%u) payload_bytes=%" PRIu32 " encode_us=%" PRIu64,
+      viewer ? viewer->id : 0U, snapshot ? snapshot->generation : 0, surface_id,
+      dirty_rect_count, batched ? "true" : "false", command->left, command->top,
+      command->right, command->bottom, command->length, encode_us);
+  return TRUE;
+}
+
 static UINT64 viewer_gfx_pipeline_dirty_area(const RECTANGLE_16 *dirty_rects,
                                              UINT32 dirty_rect_count) {
   UINT64 area = 0;
@@ -290,6 +339,127 @@ static void viewer_gfx_pipeline_rect_union(RECTANGLE_16 *target,
     target->right = rect->right;
   if (rect->bottom > target->bottom)
     target->bottom = rect->bottom;
+}
+
+static UINT32 viewer_gfx_pipeline_align_down(UINT32 value, UINT32 alignment) {
+  if (alignment == 0)
+    return value;
+  return value - (value % alignment);
+}
+
+static UINT32 viewer_gfx_pipeline_align_up_exclusive(UINT32 value,
+                                                     UINT32 alignment,
+                                                     UINT32 limit) {
+  UINT32 remainder = 0;
+
+  if ((alignment == 0) || (value >= limit))
+    return value;
+
+  remainder = value % alignment;
+  if (remainder == 0)
+    return value;
+  if ((alignment - remainder) > (limit - value))
+    return limit;
+  return value + (alignment - remainder);
+}
+
+static BOOL viewer_gfx_pipeline_rfx_tile_align_rect(const RECTANGLE_16 *input,
+                                                    UINT32 width, UINT32 height,
+                                                    RECTANGLE_16 *aligned) {
+  const UINT32 tile_size = 64U;
+  UINT32 left = 0;
+  UINT32 top = 0;
+  UINT32 right_exclusive = 0;
+  UINT32 bottom_exclusive = 0;
+
+  if (!input || !aligned || (width == 0) || (height == 0) ||
+      (input->left > input->right) || (input->top > input->bottom) ||
+      ((UINT32)input->left >= width) || ((UINT32)input->top >= height))
+    return FALSE;
+
+  left = viewer_gfx_pipeline_align_down((UINT32)input->left, tile_size);
+  top = viewer_gfx_pipeline_align_down((UINT32)input->top, tile_size);
+  right_exclusive = (UINT32)input->right + 1U;
+  bottom_exclusive = (UINT32)input->bottom + 1U;
+  if (right_exclusive > width)
+    right_exclusive = width;
+  if (bottom_exclusive > height)
+    bottom_exclusive = height;
+  right_exclusive =
+      viewer_gfx_pipeline_align_up_exclusive(right_exclusive, tile_size, width);
+  bottom_exclusive = viewer_gfx_pipeline_align_up_exclusive(bottom_exclusive,
+                                                            tile_size, height);
+  if ((left >= right_exclusive) || (top >= bottom_exclusive))
+    return FALSE;
+
+  aligned->left = (UINT16)left;
+  aligned->top = (UINT16)top;
+  aligned->right = (UINT16)(right_exclusive - 1U);
+  aligned->bottom = (UINT16)(bottom_exclusive - 1U);
+  return TRUE;
+}
+
+static BOOL
+viewer_gfx_pipeline_add_merged_dirty_rect_locked(ViewerGraphicsContext *gfx,
+                                                 const RECTANGLE_16 *rect) {
+  UINT32 j = 0;
+
+  if (!gfx || !rect)
+    return FALSE;
+
+  for (j = 0; j < gfx->pending_dirty_rect_count; j++) {
+    if (viewer_gfx_pipeline_rects_touch_or_overlap(&gfx->pending_dirty_rects[j],
+                                                   rect)) {
+      viewer_gfx_pipeline_rect_union(&gfx->pending_dirty_rects[j], rect);
+      return TRUE;
+    }
+  }
+
+  if (gfx->pending_dirty_rect_count >= VIEWER_GFX_PENDING_DIRTY_MAX_RECTS)
+    return FALSE;
+  gfx->pending_dirty_rects[gfx->pending_dirty_rect_count++] = *rect;
+  return TRUE;
+}
+
+static void
+viewer_gfx_pipeline_shape_rfx_dirty_locked(ViewerGraphicsContext *gfx,
+                                           UINT32 width, UINT32 height) {
+  RECTANGLE_16 shaped[VIEWER_GFX_PENDING_DIRTY_MAX_RECTS] = {0};
+  UINT32 original_count = 0;
+  UINT32 i = 0;
+
+  if (!gfx || (gfx->selected_codec != VIEWER_GFX_CODEC_RFX) ||
+      (gfx->pending_dirty_rect_count == 0))
+    return;
+
+  original_count = gfx->pending_dirty_rect_count;
+  for (i = 0; i < original_count; i++)
+    shaped[i] = gfx->pending_dirty_rects[i];
+
+  gfx->pending_dirty_rect_count = 0;
+  for (i = 0; i < original_count; i++) {
+    RECTANGLE_16 aligned = {0};
+    if (viewer_gfx_pipeline_rfx_tile_align_rect(&shaped[i], width, height,
+                                                &aligned))
+      (void)viewer_gfx_pipeline_add_merged_dirty_rect_locked(gfx, &aligned);
+  }
+}
+
+static UINT64 viewer_gfx_pipeline_rfx_full_frame_tile_area(UINT32 width,
+                                                           UINT32 height) {
+  const UINT64 tile_size = 64ULL;
+  UINT64 tile_columns = 0;
+  UINT64 tile_rows = 0;
+
+  if ((width == 0) || (height == 0))
+    return 0;
+
+  tile_columns = (((UINT64)width + tile_size - 1ULL) / tile_size);
+  tile_rows = (((UINT64)height + tile_size - 1ULL) / tile_size);
+  if ((tile_columns > (UINT64_MAX / tile_rows)) ||
+      ((tile_columns * tile_rows) > (UINT64_MAX / (tile_size * tile_size))))
+    return UINT64_MAX;
+  return tile_columns * tile_rows * tile_size * tile_size;
 }
 
 static void
@@ -440,29 +610,17 @@ BOOL viewer_gfx_pipeline_pending_dirty_add_locked(
 
   for (i = 0; i < dirty_rect_count; i++) {
     RECTANGLE_16 rect = {0};
-    UINT32 j = 0;
-    BOOL merged = FALSE;
 
     if (!viewer_gfx_pipeline_clamp_rect(&dirty_rects[i], width, height, &rect))
       continue;
 
-    for (j = 0; j < gfx->pending_dirty_rect_count; j++) {
-      if (viewer_gfx_pipeline_rects_touch_or_overlap(
-              &gfx->pending_dirty_rects[j], &rect)) {
-        viewer_gfx_pipeline_rect_union(&gfx->pending_dirty_rects[j], &rect);
-        merged = TRUE;
-        break;
-      }
-    }
-
-    if (!merged) {
+    if (!viewer_gfx_pipeline_add_merged_dirty_rect_locked(gfx, &rect)) {
       if (gfx->pending_dirty_rect_count >= VIEWER_GFX_PENDING_DIRTY_MAX_RECTS) {
         gfx->pending_dirty_overflow = TRUE;
         return viewer_gfx_pipeline_pending_dirty_force_full_locked(
             gfx, generation, width, height,
             "pending rectangle count threshold");
       }
-      gfx->pending_dirty_rects[gfx->pending_dirty_rect_count++] = rect;
     }
   }
 
@@ -470,13 +628,38 @@ BOOL viewer_gfx_pipeline_pending_dirty_add_locked(
     return viewer_gfx_pipeline_pending_dirty_force_full_locked(
         gfx, generation, width, height, "empty dirty input");
 
+  viewer_gfx_pipeline_shape_rfx_dirty_locked(gfx, width, height);
+  if (gfx->pending_dirty_rect_count == 0)
+    return viewer_gfx_pipeline_pending_dirty_force_full_locked(
+        gfx, generation, width, height, "empty dirty input");
+
   gfx->pending_dirty_area = viewer_gfx_pipeline_dirty_area(
       gfx->pending_dirty_rects, gfx->pending_dirty_rect_count);
   full_area = (UINT64)width * (UINT64)height;
+  if ((gfx->selected_codec == VIEWER_GFX_CODEC_RFX) &&
+      (gfx->pending_dirty_rect_count == 1U) &&
+      (gfx->pending_dirty_rects[0].left == 0) &&
+      (gfx->pending_dirty_rects[0].top == 0) &&
+      ((UINT32)gfx->pending_dirty_rects[0].right == (width - 1U)) &&
+      ((UINT32)gfx->pending_dirty_rects[0].bottom == (height - 1U))) {
+    return viewer_gfx_pipeline_pending_dirty_force_full_locked(
+        gfx, generation, width, height, "pending area threshold");
+  }
   if ((full_area > 0) &&
       (gfx->pending_dirty_area > ((full_area * 60ULL) / 100ULL))) {
     if (gfx->selected_codec == VIEWER_GFX_CODEC_UNCOMPRESSED)
       return TRUE;
+    if (gfx->selected_codec == VIEWER_GFX_CODEC_RFX) {
+      UINT64 command_penalty_area =
+          (UINT64)gfx->pending_dirty_rect_count * 4096ULL;
+      UINT64 estimated_rfx_cost = UINT64_MAX;
+      UINT64 full_frame_tile_area =
+          viewer_gfx_pipeline_rfx_full_frame_tile_area(width, height);
+      if ((UINT64_MAX - gfx->pending_dirty_area) >= command_penalty_area)
+        estimated_rfx_cost = gfx->pending_dirty_area + command_penalty_area;
+      if (estimated_rfx_cost < full_frame_tile_area)
+        return TRUE;
+    }
     return viewer_gfx_pipeline_pending_dirty_force_full_locked(
         gfx, generation, width, height, "pending area threshold");
   }
@@ -1548,8 +1731,11 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   UINT64 estimated_payload_bytes = 0;
   UINT64 max_dirty_bytes = 0;
   UINT32 i = 0;
+  UINT32 command_count = 0;
   UINT rc = CHANNEL_RC_OK;
   BOOL ok = FALSE;
+  BOOL rfx_batch_attempted = FALSE;
+  BOOL rfx_batch_used = FALSE;
   BOOL selected_uncompressed = FALSE;
 
   if (!server || !viewer || !gfx || !snapshot || !snapshot->pixels ||
@@ -1596,14 +1782,31 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   }
   LeaveCriticalSection(&gfx->lock);
 
-  for (i = 0; i < snapshot->dirty_rect_count; i++) {
-    if (!viewer_gfx_pipeline_build_surface_command_rect(
-            viewer, snapshot, surface_id, &snapshot->dirty_rects[i],
-            &commands[i]))
-      goto failed;
-    if ((UINT64_MAX - pending_payload_bytes) < (UINT64)commands[i].length)
-      goto failed;
-    pending_payload_bytes += (UINT64)commands[i].length;
+  if (!selected_uncompressed && (snapshot->dirty_rect_count > 1U)) {
+    rfx_batch_attempted = TRUE;
+    if (viewer_gfx_pipeline_build_surface_command_rects(
+            viewer, snapshot, surface_id, snapshot->dirty_rects,
+            snapshot->dirty_rect_count, &commands[0])) {
+      rfx_batch_used = TRUE;
+      command_count = 1;
+      pending_payload_bytes = (UINT64)commands[0].length;
+    }
+  }
+
+  if (!rfx_batch_used) {
+    pending_payload_bytes = 0;
+    command_count = 0;
+    viewer_gfx_pipeline_surface_command_reset(&commands[0]);
+    for (i = 0; i < snapshot->dirty_rect_count; i++) {
+      if (!viewer_gfx_pipeline_build_surface_command_rect(
+              viewer, snapshot, surface_id, &snapshot->dirty_rects[i],
+              &commands[i]))
+        goto failed;
+      command_count++;
+      if ((UINT64_MAX - pending_payload_bytes) < (UINT64)commands[i].length)
+        goto failed;
+      pending_payload_bytes += (UINT64)commands[i].length;
+    }
   }
   dirty_area = viewer_gfx_pipeline_dirty_area(snapshot->dirty_rects,
                                               snapshot->dirty_rect_count);
@@ -1652,7 +1855,7 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   EnterCriticalSection(&viewer->send_lock);
   viewer->last_viewer_send_start_us = send_start_us;
   rc = rdpgfx->StartFrame(rdpgfx, &start);
-  for (i = 0; (rc == CHANNEL_RC_OK) && (i < snapshot->dirty_rect_count); i++)
+  for (i = 0; (rc == CHANNEL_RC_OK) && (i < command_count); i++)
     rc = rdpgfx->SurfaceCommand(rdpgfx, &commands[i]);
   if (rc == CHANNEL_RC_OK)
     rc = rdpgfx->EndFrame(rdpgfx, &end);
@@ -1676,6 +1879,9 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   gfx->dirty_last_sent_generation = snapshot->generation;
   gfx->dirty_last_sent_rect_count = snapshot->dirty_rect_count;
   gfx->dirty_last_sent_area = dirty_area;
+  gfx->dirty_last_sent_payload_bytes = pending_payload_bytes;
+  gfx->dirty_last_sent_surface_command_count = command_count;
+  gfx->dirty_last_sent_send_us = send_us;
   gfx->dirty_consecutive_deferred_sends = 0;
   gfx->dirty_diag_successful_sends++;
   gfx->gfx_send_time_total_us += send_us;
@@ -1689,14 +1895,16 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   WLog_DBG(TAG,
            "Viewer %u RDPEGFX dirty send complete: generation=%" PRIu64
            " frame_id=%" PRIu32 " dirty_rects=%u dirty_area=%" PRIu64
+           " surface_commands=%u batch_attempted=%s batch_used=%s"
            " payload_bytes=%" PRIu64 " send_us=%" PRIu64,
            viewer->id, snapshot->generation, frame_id,
-           snapshot->dirty_rect_count, dirty_area, pending_payload_bytes,
-           send_us);
+           snapshot->dirty_rect_count, dirty_area, command_count,
+           rfx_batch_attempted ? "true" : "false",
+           rfx_batch_used ? "true" : "false", pending_payload_bytes, send_us);
 
 cleanup:
   if (commands) {
-    for (i = 0; i < snapshot->dirty_rect_count; i++)
+    for (i = 0; i < command_count; i++)
       viewer_gfx_pipeline_surface_command_reset(&commands[i]);
     free(commands);
   }
@@ -1704,7 +1912,7 @@ cleanup:
 
 deferred:
   if (commands) {
-    for (i = 0; i < snapshot->dirty_rect_count; i++)
+    for (i = 0; i < command_count; i++)
       viewer_gfx_pipeline_surface_command_reset(&commands[i]);
     free(commands);
   }
@@ -1712,7 +1920,7 @@ deferred:
 
 failed:
   if (commands) {
-    for (i = 0; i < snapshot->dirty_rect_count; i++)
+    for (i = 0; i < command_count; i++)
       viewer_gfx_pipeline_surface_command_reset(&commands[i]);
     free(commands);
   }

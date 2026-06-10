@@ -9,6 +9,9 @@
 
 struct ViewerGfxRfxContext {
   RFX_CONTEXT *rfx;
+#ifdef VIEWER_GFX_RFX_TESTING
+  UINT32 threading_flags;
+#endif
 };
 
 #ifdef VIEWER_GFX_RFX_TESTING
@@ -48,6 +51,11 @@ void viewer_gfx_rfx_test_set_force_context_new_failure(BOOL force_failure) {
 UINT32 viewer_gfx_rfx_test_last_threading_flags(void) {
   return g_viewer_gfx_rfx_last_threading_flags;
 }
+
+UINT32
+viewer_gfx_rfx_test_context_threading_flags(ViewerGfxRfxContext *context) {
+  return context ? context->threading_flags : UINT32_MAX;
+}
 #endif
 
 ViewerGfxRfxContext *viewer_gfx_rfx_context_new(void) {
@@ -84,6 +92,9 @@ ViewerGfxRfxContext *viewer_gfx_rfx_context_new_ex(BOOL threaded) {
   rfx_context_set_pixel_format(rfx, PIXEL_FORMAT_BGRX32);
 
   context->rfx = rfx;
+#ifdef VIEWER_GFX_RFX_TESTING
+  context->threading_flags = threading_flags;
+#endif
   return context;
 }
 
@@ -205,12 +216,15 @@ viewer_gfx_rfx_validate_rect(const ViewerFramebufferSnapshot *snapshot,
 static BOOL viewer_gfx_rfx_build_surface_command_bounds(
     ViewerGfxRfxContext *context, const ViewerFramebufferSnapshot *snapshot,
     UINT16 surface_id, UINT32 left, UINT32 top, UINT32 right, UINT32 bottom,
+    const RFX_RECT *rfx_rects, size_t rfx_rect_count,
     RDPGFX_SURFACE_COMMAND *command) {
   BYTE *data = NULL;
   const BYTE *source = NULL;
-  RFX_RECT rfx_rect = {0};
+  RFX_RECT full_rect = {0};
   UINT32 rect_width = 0;
   UINT32 rect_height = 0;
+  UINT32 origin_x = 0;
+  UINT32 origin_y = 0;
   size_t payload_bytes = 0;
   wStream *stream = NULL;
 
@@ -237,21 +251,22 @@ static BOOL viewer_gfx_rfx_build_surface_command_bounds(
   if (!stream)
     return FALSE;
 
-  rfx_rect.x = 0;
-  rfx_rect.y = 0;
-  rfx_rect.width = (UINT16)rect_width;
-  rfx_rect.height = (UINT16)rect_height;
-  {
-    UINT32 origin_x = 0;
-    UINT32 origin_y = 0;
-    viewer_gfx_rfx_pixel_bounds(snapshot, &origin_x, &origin_y, NULL, NULL);
-    source = snapshot->pixels +
-             ((size_t)(top - origin_y) * (size_t)snapshot->stride) +
-             ((size_t)(left - origin_x) * 4U);
+  viewer_gfx_rfx_pixel_bounds(snapshot, &origin_x, &origin_y, NULL, NULL);
+  source = snapshot->pixels +
+           ((size_t)(top - origin_y) * (size_t)snapshot->stride) +
+           ((size_t)(left - origin_x) * 4U);
+
+  if (!rfx_rects || (rfx_rect_count == 0)) {
+    full_rect.x = 0;
+    full_rect.y = 0;
+    full_rect.width = (UINT16)rect_width;
+    full_rect.height = (UINT16)rect_height;
+    rfx_rects = &full_rect;
+    rfx_rect_count = 1;
   }
 
-  if (!rfx_compose_message(context->rfx, stream, &rfx_rect, 1, source,
-                           rect_width, rect_height, snapshot->stride)) {
+  if (!rfx_compose_message(context->rfx, stream, rfx_rects, rfx_rect_count,
+                           source, rect_width, rect_height, snapshot->stride)) {
     Stream_Free(stream, TRUE);
     return FALSE;
   }
@@ -300,7 +315,7 @@ BOOL viewer_gfx_rfx_build_surface_command(
 
   return viewer_gfx_rfx_build_surface_command_bounds(
       context, snapshot, surface_id, 0, 0, snapshot->width, snapshot->height,
-      command);
+      NULL, 0, command);
 }
 
 BOOL viewer_gfx_rfx_build_surface_command_rect(
@@ -323,7 +338,90 @@ BOOL viewer_gfx_rfx_build_surface_command_rect(
     return FALSE;
 
   return viewer_gfx_rfx_build_surface_command_bounds(
-      context, snapshot, surface_id, left, top, right, bottom, command);
+      context, snapshot, surface_id, left, top, right, bottom, NULL, 0,
+      command);
+}
+
+BOOL viewer_gfx_rfx_build_surface_command_rects(
+    ViewerGfxRfxContext *context, const ViewerFramebufferSnapshot *snapshot,
+    UINT16 surface_id, const RECTANGLE_16 *dirty_rects, UINT32 dirty_rect_count,
+    RDPGFX_SURFACE_COMMAND *command, BOOL *batched) {
+  RFX_RECT *rfx_rects = NULL;
+  UINT32 bound_left = UINT32_MAX;
+  UINT32 bound_top = UINT32_MAX;
+  UINT32 bound_right = 0;
+  UINT32 bound_bottom = 0;
+  UINT32 i = 0;
+  BOOL ok = FALSE;
+
+  if (batched)
+    *batched = FALSE;
+  if (!command)
+    return FALSE;
+
+  viewer_gfx_rfx_surface_command_reset(command);
+
+  if (!viewer_gfx_rfx_validate_snapshot(snapshot) || !dirty_rects ||
+      (dirty_rect_count < 2U))
+    return FALSE;
+
+  if ((size_t)dirty_rect_count > (SIZE_MAX / sizeof(*rfx_rects)))
+    return FALSE;
+  rfx_rects = (RFX_RECT *)calloc(dirty_rect_count, sizeof(*rfx_rects));
+  if (!rfx_rects)
+    return FALSE;
+
+  for (i = 0; i < dirty_rect_count; i++) {
+    UINT32 left = 0;
+    UINT32 top = 0;
+    UINT32 right = 0;
+    UINT32 bottom = 0;
+
+    if (!viewer_gfx_rfx_validate_rect(snapshot, &dirty_rects[i], &left, &top,
+                                      &right, &bottom) ||
+        !viewer_gfx_rfx_bounds_available(snapshot, left, top, right, bottom))
+      goto cleanup;
+
+    if (left < bound_left)
+      bound_left = left;
+    if (top < bound_top)
+      bound_top = top;
+    if (right > bound_right)
+      bound_right = right;
+    if (bottom > bound_bottom)
+      bound_bottom = bottom;
+  }
+
+  if ((bound_left >= bound_right) || (bound_top >= bound_bottom) ||
+      ((bound_right - bound_left) > (UINT32)UINT16_MAX) ||
+      ((bound_bottom - bound_top) > (UINT32)UINT16_MAX))
+    goto cleanup;
+
+  for (i = 0; i < dirty_rect_count; i++) {
+    UINT32 left = 0;
+    UINT32 top = 0;
+    UINT32 right = 0;
+    UINT32 bottom = 0;
+
+    if (!viewer_gfx_rfx_validate_rect(snapshot, &dirty_rects[i], &left, &top,
+                                      &right, &bottom))
+      goto cleanup;
+
+    rfx_rects[i].x = (UINT16)(left - bound_left);
+    rfx_rects[i].y = (UINT16)(top - bound_top);
+    rfx_rects[i].width = (UINT16)(right - left);
+    rfx_rects[i].height = (UINT16)(bottom - top);
+  }
+
+  ok = viewer_gfx_rfx_build_surface_command_bounds(
+      context, snapshot, surface_id, bound_left, bound_top, bound_right,
+      bound_bottom, rfx_rects, dirty_rect_count, command);
+  if (ok && batched)
+    *batched = TRUE;
+
+cleanup:
+  free(rfx_rects);
+  return ok;
 }
 
 void viewer_gfx_rfx_surface_command_reset(RDPGFX_SURFACE_COMMAND *command) {
