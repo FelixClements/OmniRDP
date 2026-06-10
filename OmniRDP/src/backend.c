@@ -1,5 +1,6 @@
 #include "backend.h"
 #include "platform_compat.h"
+#include "safe_string.h"
 #include "viewer_internal.h"
 #include "viewer_server.h"
 #include <freerdp/addin.h>
@@ -32,7 +33,6 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include "safe_string.h"
 #include <windows.h>
 #endif
 

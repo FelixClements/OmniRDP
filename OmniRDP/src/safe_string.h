@@ -5,6 +5,12 @@
 #include <stddef.h>
 #include <stdio.h>
 
+#ifdef _MSC_VER
+#define OMNI_SAFE_STRING_INLINE static __inline
+#else
+#define OMNI_SAFE_STRING_INLINE static inline
+#endif
+
 /*
  * Central formatting wrappers for fixed-size buffers.
  *
@@ -13,8 +19,8 @@
  * an encoding/formatting error.  The destination is forced to a valid empty or
  * truncated C string whenever dest_size is nonzero.
  */
-static inline int omni_vformat(char *dest, size_t dest_size, const char *format,
-                               va_list args) {
+OMNI_SAFE_STRING_INLINE int omni_vformat(char *dest, size_t dest_size,
+                                         const char *format, va_list args) {
   int written;
 
   if (!dest || dest_size == 0 || !format)
@@ -25,8 +31,8 @@ static inline int omni_vformat(char *dest, size_t dest_size, const char *format,
   return written;
 }
 
-static inline int omni_format(char *dest, size_t dest_size, const char *format,
-                              ...) {
+OMNI_SAFE_STRING_INLINE int omni_format(char *dest, size_t dest_size,
+                                        const char *format, ...) {
   int written;
   va_list args;
 
@@ -36,5 +42,7 @@ static inline int omni_format(char *dest, size_t dest_size, const char *format,
 
   return written;
 }
+
+#undef OMNI_SAFE_STRING_INLINE
 
 #endif /* OMNIRDP_SAFE_STRING_H */
