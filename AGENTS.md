@@ -125,9 +125,9 @@ Common failures: missing `freerdp-3.26.0/CMakeLists.txt` means checkout failed; 
 
 ## CODE-SCANNING RULES
 
-Avoid patterns GitHub code scanning flags in this repo: `strcpy`, `strncpy`, raw `strlen`, raw `memcpy`, `fopen`, `_snprintf`, `_vsnprintf`, `atoi`, `getenv`, and direct `fgetc` loops without robust EOF/error handling.
+Avoid patterns GitHub code scanning flags in this repo: `strcpy`, `strncpy`, raw `strlen`, raw `memcpy`, `fopen`, raw `snprintf`, raw `vsnprintf`, `_snprintf`, `_vsnprintf`, `atoi`, `getenv`, and direct `fgetc` loops without robust EOF/error handling.
 
-Prefer checked patterns already used locally: C99 `snprintf`/`vsnprintf` with truncation checks, `strnlen_s`, `memcpy_s`, whole-struct assignment, `fopen_s`, `strtol`/`strtoul` with `errno`, end-pointer, and range checks, and checked `InitializeCriticalSectionAndSpinCount`/`InitializeCriticalSectionEx`.
+Prefer checked patterns already used locally: `safe_string.h` `omni_format`/`omni_vformat` wrappers for formatted output, `strnlen_s`, `memcpy_s`, whole-struct assignment, `fopen_s`, `strtol`/`strtoul` with `errno`, end-pointer, and range checks, and checked `InitializeCriticalSectionAndSpinCount`/`InitializeCriticalSectionEx`.
 
 ## ANTI-PATTERNS
 

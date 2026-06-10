@@ -20,6 +20,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include "safe_string.h"
 #include <windows.h>
 
 /* ── Defaults ──────────────────────────────────────────────────── */
@@ -135,8 +136,8 @@ void pipe_client_init(PipeClient *client, const char *pipeName) {
   }
 
   /* Build full pipe path: \\.\pipe\<pipeName> */
-  snprintf(client->pipeName, sizeof(client->pipeName), "\\\\.\\pipe\\%s",
-           pipeName);
+  omni_format(client->pipeName, sizeof(client->pipeName), "\\\\.\\pipe\\%s",
+              pipeName);
 
   LOG_I(LOG_TAG, "PipeClient initialised (pipe: %s)", client->pipeName);
 }
@@ -260,10 +261,10 @@ int pipe_client_send_request(PipeClient *client, const PipeRequest *request,
       return -1;
     }
 
-    snprintf(jsonReq, needed,
-             "{\"cmd\":%d,\"instance_name\":\"%s\",\"payload\":%s}",
-             (int)request->command, request->instance_name,
-             request->json_payload[0] != '\0' ? request->json_payload : "{}");
+    omni_format(
+        jsonReq, needed, "{\"cmd\":%d,\"instance_name\":\"%s\",\"payload\":%s}",
+        (int)request->command, request->instance_name,
+        request->json_payload[0] != '\0' ? request->json_payload : "{}");
     jsonReq[needed - 1] = '\0';
   }
 
@@ -390,7 +391,8 @@ int pipe_client_send_request(PipeClient *client, const PipeRequest *request,
     p = strstr(reply, "\"json_payload\":");
     if (p) {
       p += 15; /* skip past the key */
-      snprintf(response->json_payload, sizeof(response->json_payload), "%s", p);
+      omni_format(response->json_payload, sizeof(response->json_payload), "%s",
+                  p);
     }
   }
 

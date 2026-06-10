@@ -28,6 +28,7 @@
 #endif
 #include <windows.h>
 
+#include "safe_string.h"
 #include <aclapi.h>
 #include <limits.h>
 #include <netfw.h>
@@ -55,8 +56,8 @@ static void build_heartbeat_pipe_name(const char *instanceName, char *buf,
                                       size_t bufSize) {
   if (!buf || bufSize == 0)
     return;
-  if (snprintf(buf, bufSize, "\\\\.\\pipe\\OmniRDP_Instance_%s", instanceName) <
-      0)
+  if (omni_format(buf, bufSize, "\\\\.\\pipe\\OmniRDP_Instance_%s",
+                  instanceName) < 0)
     buf[0] = '\0';
   else
     buf[bufSize - 1] = '\0';
@@ -131,8 +132,8 @@ int inst_mgr_init(InstanceManager *mgr, SvcConfig *config,
     memset(inst, 0, sizeof(*inst));
 
     /* Copy name and config */
-    if (snprintf(inst->name, sizeof(inst->name), "%s",
-                 config->instances[i].name) < 0 ||
+    if (omni_format(inst->name, sizeof(inst->name), "%s",
+                    config->instances[i].name) < 0 ||
         strnlen_s(config->instances[i].name, sizeof(inst->name)) >=
             sizeof(inst->name)) {
       DeleteCriticalSection(&mgr->lock);
@@ -247,7 +248,7 @@ static BOOL svc_build_firewall_rule_name(const char *instanceName,
   if (!instanceName || !ruleName || ruleNameSize == 0)
     return FALSE;
 
-  n = snprintf(ruleName, ruleNameSize, "OmniRDP Viewer - %s", instanceName);
+  n = omni_format(ruleName, ruleNameSize, "OmniRDP Viewer - %s", instanceName);
   if (n < 0 || (size_t)n >= ruleNameSize) {
     ruleName[0] = '\0';
     return FALSE;
@@ -614,11 +615,11 @@ int inst_mgr_start(InstanceManager *mgr, const char *instanceName) {
    * "<configPath>"
    */
   char cmdline[32768];
-  int cmdlen = snprintf(cmdline, sizeof(cmdline),
-                        "\"%s\" --instance \"%s\" --secrets-handle %Iu "
-                        "--stop-event %Iu --config \"%s\"",
-                        mgr->exePath, instanceName, (SIZE_T)hPipeRead,
-                        (SIZE_T)hStopEvent, mgr->configPath);
+  int cmdlen = omni_format(cmdline, sizeof(cmdline),
+                           "\"%s\" --instance \"%s\" --secrets-handle %Iu "
+                           "--stop-event %Iu --config \"%s\"",
+                           mgr->exePath, instanceName, (SIZE_T)hPipeRead,
+                           (SIZE_T)hStopEvent, mgr->configPath);
   if (cmdlen < 0 || (size_t)cmdlen >= sizeof(cmdline)) {
     LOG_E("svc_inst_mgr", "Start: command line too long for '%s'",
           instanceName);
@@ -861,7 +862,7 @@ static void inst_mgr_wait_stopped_timeout(InstanceManager *mgr,
   DWORD pid = inst->pid;
   char name_copy[128];
 
-  snprintf(name_copy, sizeof(name_copy), "%s", inst->name);
+  omni_format(name_copy, sizeof(name_copy), "%s", inst->name);
 
   inst->state = INST_STOPPED;
   inst->hProcess = NULL;
@@ -1216,13 +1217,13 @@ int inst_mgr_get_info(InstanceManager *mgr, unsigned int index,
 
   ManagedInstance *inst = &mgr->instances[index];
 
-  snprintf(info->name, sizeof(info->name), "%s", inst->name);
+  omni_format(info->name, sizeof(info->name), "%s", inst->name);
 
   info->state = map_state_to_pipe(inst->state);
   info->viewer_count = inst->viewerCount;
 
-  snprintf(info->backend_hostname, sizeof(info->backend_hostname), "%s",
-           inst->config.backend_hostname);
+  omni_format(info->backend_hostname, sizeof(info->backend_hostname), "%s",
+              inst->config.backend_hostname);
 
   info->backend_port = inst->config.backend_port;
   info->viewer_port = inst->config.viewer_port;
@@ -1466,7 +1467,7 @@ int inst_mgr_reload_config(InstanceManager *mgr, const char *configPath) {
     InstanceConfig *nc = &newCfg->instances[i];
     ManagedInstance *ni = &newInstances[i];
 
-    if (snprintf(ni->name, sizeof(ni->name), "%s", nc->name) < 0 ||
+    if (omni_format(ni->name, sizeof(ni->name), "%s", nc->name) < 0 ||
         strnlen_s(nc->name, sizeof(ni->name)) >= sizeof(ni->name)) {
       LeaveCriticalSection(&mgr->lock);
       free(newInstances);

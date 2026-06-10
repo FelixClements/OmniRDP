@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #ifndef _WIN32
+#include "safe_string.h"
 #include <fcntl.h>
 #include <unistd.h>
 #endif
@@ -135,7 +136,7 @@ IniFile *ini_parse(const char *filename) {
         *end = '\0';
         char *name = trim(p + 1);
         int written =
-            snprintf(current_section, sizeof(current_section), "%s", name);
+            omni_format(current_section, sizeof(current_section), "%s", name);
         if (written < 0)
           current_section[0] = '\0';
       }

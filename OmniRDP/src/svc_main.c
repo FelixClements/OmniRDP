@@ -20,6 +20,7 @@
 #endif
 #include <windows.h>
 
+#include "safe_string.h"
 #include "svc_log.h"
 #include "svc_service.h"
 
@@ -55,7 +56,7 @@ static int copy_arg_string(char *dest, size_t dest_size, const char *src) {
   int ret;
   if (!dest || dest_size == 0 || !src)
     return -1;
-  ret = snprintf(dest, dest_size, "%s", src);
+  ret = omni_format(dest, dest_size, "%s", src);
   return (ret < 0 || (size_t)ret >= dest_size) ? -1 : 0;
 }
 

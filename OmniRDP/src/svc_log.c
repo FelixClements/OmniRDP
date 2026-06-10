@@ -22,6 +22,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include "safe_string.h"
 #include <windows.h>
 
 /* ── Constants ─────────────────────────────────────────────────── */
@@ -69,7 +70,7 @@ static int svc_log_mkdir_recursive(const char *path) {
 
   /* One or more parent components are missing -- walk the path. */
   char tmp[MAX_PATH];
-  if (snprintf(tmp, sizeof(tmp), "%s", path) < 0 ||
+  if (omni_format(tmp, sizeof(tmp), "%s", path) < 0 ||
       strnlen_s(path, sizeof(tmp)) >= sizeof(tmp))
     return -1;
 
@@ -175,21 +176,21 @@ static void svc_log_rotate_internal(void) {
   }
 
   /* 2. Delete the highest-numbered archive */
-  snprintf(oldpath, sizeof(oldpath), "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
-           g_max_files);
+  omni_format(oldpath, sizeof(oldpath), "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
+              g_max_files);
   DeleteFileA(oldpath);
 
   /* 3. Shift the chain: (N-1) -> N, ..., 1 -> 2 */
   for (unsigned int i = g_max_files - 1; i >= 1; i--) {
-    snprintf(oldpath, sizeof(oldpath), "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
-             i);
-    snprintf(newpath, sizeof(newpath), "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
-             i + 1);
+    omni_format(oldpath, sizeof(oldpath), "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
+                i);
+    omni_format(newpath, sizeof(newpath), "%s\\%s.%u", g_log_dir, LOG_FILE_NAME,
+                i + 1);
     MoveFileExA(oldpath, newpath, MOVEFILE_REPLACE_EXISTING);
   }
 
   /* 4. Rename current log -> .1 */
-  snprintf(newpath, sizeof(newpath), "%s\\%s.1", g_log_dir, LOG_FILE_NAME);
+  omni_format(newpath, sizeof(newpath), "%s\\%s.1", g_log_dir, LOG_FILE_NAME);
   MoveFileExA(g_log_path, newpath, MOVEFILE_REPLACE_EXISTING);
 
   /* 5. Open a fresh file — use _SH_DENYNO to allow concurrent reads */
@@ -236,7 +237,7 @@ int svc_log_rotate_file(const char *filepath, FILE **logfile_ptr,
 
   /* Extract directory from filepath */
   char dir[MAX_PATH];
-  if (snprintf(dir, sizeof(dir), "%s", filepath) < 0 ||
+  if (omni_format(dir, sizeof(dir), "%s", filepath) < 0 ||
       strnlen_s(filepath, sizeof(dir)) >= sizeof(dir))
     return -1;
   char *backslash = strrchr(dir, '\\');
@@ -255,18 +256,18 @@ int svc_log_rotate_file(const char *filepath, FILE **logfile_ptr,
   }
 
   /* 2. Delete the highest-numbered archive */
-  snprintf(oldpath, sizeof(oldpath), "%s\\%s.%u", dir, filename, max_files);
+  omni_format(oldpath, sizeof(oldpath), "%s\\%s.%u", dir, filename, max_files);
   DeleteFileA(oldpath);
 
   /* 3. Shift the chain: (N-1) -> N, ..., 1 -> 2 */
   for (unsigned int i = max_files - 1; i >= 1; i--) {
-    snprintf(oldpath, sizeof(oldpath), "%s\\%s.%u", dir, filename, i);
-    snprintf(newpath, sizeof(newpath), "%s\\%s.%u", dir, filename, i + 1);
+    omni_format(oldpath, sizeof(oldpath), "%s\\%s.%u", dir, filename, i);
+    omni_format(newpath, sizeof(newpath), "%s\\%s.%u", dir, filename, i + 1);
     MoveFileExA(oldpath, newpath, MOVEFILE_REPLACE_EXISTING);
   }
 
   /* 4. Rename current log -> .1 */
-  snprintf(newpath, sizeof(newpath), "%s\\%s.1", dir, filename);
+  omni_format(newpath, sizeof(newpath), "%s\\%s.1", dir, filename);
   MoveFileExA(filepath, newpath, MOVEFILE_REPLACE_EXISTING);
 
   /* 5. Open a fresh file — use _SH_DENYNO to allow concurrent reads */
@@ -291,8 +292,8 @@ static void svc_log_timestamp(char *buf, size_t size) {
 
   SYSTEMTIME st;
   GetLocalTime(&st);
-  snprintf(buf, size, "%04u-%02u-%02u %02u:%02u:%02u", st.wYear, st.wMonth,
-           st.wDay, st.wHour, st.wMinute, st.wSecond);
+  omni_format(buf, size, "%04u-%02u-%02u %02u:%02u:%02u", st.wYear, st.wMonth,
+              st.wDay, st.wHour, st.wMinute, st.wSecond);
 }
 
 /* ── Public API ───────────────────────────────────────────────── */
@@ -307,8 +308,8 @@ int svc_log_init(const char *log_dir, SvcLogLevel log_level,
     max_files = 100;
 
   /* Build the full log file path */
-  int ret = snprintf(g_log_path, sizeof(g_log_path), "%s\\%s", log_dir,
-                     LOG_FILE_NAME);
+  int ret = omni_format(g_log_path, sizeof(g_log_path), "%s\\%s", log_dir,
+                        LOG_FILE_NAME);
   if (ret < 0 || (size_t)ret >= sizeof(g_log_path))
     return -1;
 
@@ -322,7 +323,7 @@ int svc_log_init(const char *log_dir, SvcLogLevel log_level,
     return -1; /* directory creation may have failed */
 
   /* Store copies of configuration strings */
-  if (snprintf(g_log_dir, sizeof(g_log_dir), "%s", log_dir) < 0 ||
+  if (omni_format(g_log_dir, sizeof(g_log_dir), "%s", log_dir) < 0 ||
       strnlen_s(log_dir, sizeof(g_log_dir)) >= sizeof(g_log_dir)) {
     fclose(f);
     return -1;
@@ -352,13 +353,13 @@ void svc_log_write(SvcLogLevel level, const char *source, const char *fmt,
    */
   if (!g_init) {
     char debug_buf[LINE_BUF_SIZE];
-    int n = snprintf(debug_buf, sizeof(debug_buf), "[svc_log] [%s] [%s] ",
-                     svc_log_level_name(level), source ? source : "?");
+    int n = omni_format(debug_buf, sizeof(debug_buf), "[svc_log] [%s] [%s] ",
+                        svc_log_level_name(level), source ? source : "?");
 
     if (n > 0 && (size_t)n < sizeof(debug_buf)) {
       va_list args;
       va_start(args, fmt);
-      vsnprintf(debug_buf + n, sizeof(debug_buf) - (size_t)n, fmt, args);
+      omni_vformat(debug_buf + n, sizeof(debug_buf) - (size_t)n, fmt, args);
       va_end(args);
     }
     debug_buf[sizeof(debug_buf) - 1] = '\0';
@@ -387,13 +388,13 @@ void svc_log_write(SvcLogLevel level, const char *source, const char *fmt,
 
   /* Format the full line: [TIMESTAMP] [LEVEL] [source] message */
   char line[LINE_BUF_SIZE];
-  int n = snprintf(line, sizeof(line), "[%s] [%s] [%s] ", ts,
-                   svc_log_level_name(level), source ? source : "?");
+  int n = omni_format(line, sizeof(line), "[%s] [%s] [%s] ", ts,
+                      svc_log_level_name(level), source ? source : "?");
 
   if (n > 0 && (size_t)n < sizeof(line)) {
     va_list args;
     va_start(args, fmt);
-    vsnprintf(line + n, sizeof(line) - (size_t)n, fmt, args);
+    omni_vformat(line + n, sizeof(line) - (size_t)n, fmt, args);
     va_end(args);
   }
   line[sizeof(line) - 1] = '\0';

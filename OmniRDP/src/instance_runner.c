@@ -44,6 +44,7 @@
 static volatile int g_running = 1;
 static ViewerServer *g_server = NULL;
 
+#include "safe_string.h"
 #include <winpr/wlog.h>
 
 /* Viewer log file state — owned by our callback, rotated by us */
@@ -97,7 +98,7 @@ static int instance_key_configured(const SvcConfig *config,
   char section[256];
   if (!config || !config->ini || !inst || !key)
     return 0;
-  if (snprintf(section, sizeof(section), "instance:%s", inst->name) < 0)
+  if (omni_format(section, sizeof(section), "instance:%s", inst->name) < 0)
     return 0;
   return ini_get(config->ini, section, key, NULL) != NULL;
 }
@@ -251,8 +252,8 @@ static BOOL viewer_wlog_callback(const wLogMessage *msg) {
 static DWORD WINAPI heartbeat_thread(LPVOID param) {
   const char *instanceName = (const char *)param;
   char pipePath[256];
-  snprintf(pipePath, sizeof(pipePath), "\\\\.\\pipe\\OmniRDP_Instance_%s",
-           instanceName);
+  omni_format(pipePath, sizeof(pipePath), "\\\\.\\pipe\\OmniRDP_Instance_%s",
+              instanceName);
 
   /* Wait for the pipe to become available (service creates it) */
   for (int retry = 0; retry < 30; retry++) {
@@ -276,8 +277,8 @@ static DWORD WINAPI heartbeat_thread(LPVOID param) {
     /* Send heartbeat: timestamp and viewer count */
     char msg[64];
     unsigned int vc = viewer_server_get_count(g_server);
-    int len = snprintf(msg, sizeof(msg), "heartbeat:%llu:%u\n",
-                       (unsigned long long)GetTickCount64(), vc);
+    int len = omni_format(msg, sizeof(msg), "heartbeat:%llu:%u\n",
+                          (unsigned long long)GetTickCount64(), vc);
     DWORD written;
     WriteFile(hPipe, msg, (DWORD)len, &written, NULL);
 
@@ -467,8 +468,8 @@ int instance_runner_main(int argc, char *argv[]) {
     if (svc_log_level_from_string(config->service.log_level, &log_level) != 0)
       log_level = SVC_LOG_INFO;
 
-    snprintf(instance_log_dir, sizeof(instance_log_dir), "%s\\%s", log_dir,
-             args.instance_name);
+    omni_format(instance_log_dir, sizeof(instance_log_dir), "%s\\%s", log_dir,
+                args.instance_name);
     svc_log_init(instance_log_dir, log_level, config->service.log_max_size_mb,
                  config->service.log_max_files);
     LOG_I("instance_runner", "Instance '%s' starting (config=%s)",
@@ -495,8 +496,8 @@ int instance_runner_main(int argc, char *argv[]) {
     WLog_ConfigureAppender(appender, "callbacks", &cbs);
 
     /* Open viewer.log ourselves and store rotation params */
-    snprintf(g_viewer_log_path, sizeof(g_viewer_log_path), "%s\\viewer.log",
-             instance_log_dir);
+    omni_format(g_viewer_log_path, sizeof(g_viewer_log_path), "%s\\viewer.log",
+                instance_log_dir);
 #ifdef _WIN32
     g_viewer_logfile = _fsopen(g_viewer_log_path, "a", _SH_DENYNO);
     if (!g_viewer_logfile)
