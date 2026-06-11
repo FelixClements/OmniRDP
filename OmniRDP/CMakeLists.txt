@@ -53,6 +53,7 @@ set(SOURCES
     src/viewer_internal.c
     src/viewer_auth.c
     src/viewer_framebuffer.c
+    src/viewer_monitor_layout.c
     src/viewer_publisher.c
     src/viewer_classic_queue.c
     src/viewer_classic_transport.c
@@ -90,6 +91,7 @@ set(HEADERS
     include/platform_compat.h
     src/pointer_shape.h
     src/viewer_server_internal.h
+    src/viewer_monitor_layout.h
     src/viewer_auth.h
     src/viewer_internal.h
     src/ini_parser.h
