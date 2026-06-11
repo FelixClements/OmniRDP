@@ -17,14 +17,20 @@ typedef enum {
   TEST_SEND_END
 } TestSendOp;
 
-static TestSendOp g_send_order[8] = {0};
+static TestSendOp g_send_order[64] = {0};
 static UINT32 g_send_count = 0;
+static UINT32 g_create_count = 0;
+static UINT32 g_map_count = 0;
 static UINT32 g_surface_count = 0;
 static UINT g_fail_on_send = 0;
 static RDPGFX_RESET_GRAPHICS_PDU g_last_reset = {0};
 static RDPGFX_CREATE_SURFACE_PDU g_last_create = {0};
 static RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU g_last_map = {0};
 static RDPGFX_SURFACE_COMMAND g_last_surface = {0};
+static RDPGFX_CREATE_SURFACE_PDU g_created_surfaces[OMNIRDP_MAX_MONITORS] = {0};
+static RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU
+    g_mapped_surfaces[OMNIRDP_MAX_MONITORS] = {0};
+static RDPGFX_SURFACE_COMMAND g_surface_commands[64] = {0};
 static const MONITOR_DEF *g_expected_reset_source = NULL;
 static MONITOR_DEF g_last_reset_monitors[OMNIRDP_MAX_MONITORS] = {0};
 static UINT32 g_caps_confirm_count = 0;
@@ -60,6 +66,9 @@ static UINT test_create_surface(RdpgfxServerContext *context,
   if (!create)
     return ERROR_INTERNAL_ERROR;
   g_last_create = *create;
+  if (g_create_count < OMNIRDP_MAX_MONITORS)
+    g_created_surfaces[g_create_count] = *create;
+  g_create_count++;
   return test_record_send(TEST_SEND_CREATE);
 }
 
@@ -69,6 +78,9 @@ static UINT test_map_surface(RdpgfxServerContext *context,
   if (!map)
     return ERROR_INTERNAL_ERROR;
   g_last_map = *map;
+  if (g_map_count < OMNIRDP_MAX_MONITORS)
+    g_mapped_surfaces[g_map_count] = *map;
+  g_map_count++;
   return test_record_send(TEST_SEND_MAP);
 }
 
@@ -86,6 +98,8 @@ static UINT test_surface_command(RdpgfxServerContext *context,
   if (!cmd)
     return ERROR_INTERNAL_ERROR;
   g_last_surface = *cmd;
+  if (g_surface_count < 64U)
+    g_surface_commands[g_surface_count] = *cmd;
   g_surface_count++;
   return test_record_send(TEST_SEND_SURFACE);
 }
@@ -126,9 +140,14 @@ static void reset_send_recorder(void) {
   memset(&g_last_create, 0, sizeof(g_last_create));
   memset(&g_last_map, 0, sizeof(g_last_map));
   memset(&g_last_surface, 0, sizeof(g_last_surface));
+  memset(g_created_surfaces, 0, sizeof(g_created_surfaces));
+  memset(g_mapped_surfaces, 0, sizeof(g_mapped_surfaces));
+  memset(g_surface_commands, 0, sizeof(g_surface_commands));
   memset(g_last_reset_monitors, 0, sizeof(g_last_reset_monitors));
   g_expected_reset_source = NULL;
   g_send_count = 0;
+  g_create_count = 0;
+  g_map_count = 0;
   g_surface_count = 0;
   g_fail_on_send = 0;
   reset_caps_confirm_recorder();
@@ -1484,6 +1503,14 @@ static int test_snapshot_sends_server_monitor_layout(void) {
   ok = ok && expect_true(
                  viewer_gfx_pipeline_send_snapshot(&server, &viewer, &snapshot),
                  "snapshot sends multi-monitor reset");
+  ok = ok && expect_uint32(g_send_count, 8,
+                           "multi-monitor baseline sends eight callbacks");
+  ok = ok && expect_uint32(g_create_count, 2,
+                           "baseline creates one surface per monitor");
+  ok = ok &&
+       expect_uint32(g_map_count, 2, "baseline maps one surface per monitor");
+  ok = ok && expect_uint32(g_surface_count, 2,
+                           "baseline sends one command per monitor");
   ok = ok && expect_uint32(g_last_reset.monitorCount, 2,
                            "reset uses server monitor count");
   ok = ok && expect_uint32((UINT32)g_last_reset_monitors[0].flags,
@@ -1492,6 +1519,28 @@ static int test_snapshot_sends_server_monitor_layout(void) {
                            "second monitor left sent");
   ok = ok && expect_uint32((UINT32)g_last_reset_monitors[1].right, 7,
                            "second monitor right sent");
+  ok = ok && expect_uint32(g_created_surfaces[0].surfaceId, 0, "surface 0 id");
+  ok = ok && expect_uint32(g_created_surfaces[0].width, 4, "surface 0 width");
+  ok = ok && expect_uint32(g_created_surfaces[0].height, 4, "surface 0 height");
+  ok = ok && expect_uint32(g_created_surfaces[1].surfaceId, 1, "surface 1 id");
+  ok = ok && expect_uint32(g_created_surfaces[1].width, 4, "surface 1 width");
+  ok = ok && expect_uint32(g_created_surfaces[1].height, 4, "surface 1 height");
+  ok = ok &&
+       expect_uint32(g_mapped_surfaces[0].outputOriginX, 0, "map 0 origin x");
+  ok = ok &&
+       expect_uint32(g_mapped_surfaces[1].outputOriginX, 4, "map 1 origin x");
+  ok = ok && expect_uint32(g_surface_commands[0].surfaceId, 0,
+                           "command 0 surface id");
+  ok = ok &&
+       expect_uint32(g_surface_commands[0].left, 0, "command 0 local left");
+  ok = ok &&
+       expect_uint32(g_surface_commands[0].right, 4, "command 0 local right");
+  ok = ok && expect_uint32(g_surface_commands[1].surfaceId, 1,
+                           "command 1 surface id");
+  ok = ok &&
+       expect_uint32(g_surface_commands[1].left, 0, "command 1 local left");
+  ok = ok &&
+       expect_uint32(g_surface_commands[1].right, 4, "command 1 local right");
 
   uninit_test_viewer(&viewer);
   return ok;
@@ -1764,6 +1813,87 @@ static int test_dirty_update_multi_rect_and_failures(void) {
     ok = ok && expect_uint32(viewer.gfx.dirty_in_flight_frames, 0,
                              "failed dirty send does not increment in-flight");
   }
+
+  viewer.gfx.rdpgfx = NULL;
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_update_splits_by_monitor_surface(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[128] = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 8, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 21;
+  snapshot.pixels = pixels;
+  snapshot.width = 8;
+  snapshot.height = 4;
+  snapshot.stride = 32;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixel_bytes = sizeof(pixels);
+  snapshot.generation = 220;
+  snapshot.dirty_rect_count = 1;
+  snapshot.dirty_rects[0].left = 5;
+  snapshot.dirty_rects[0].top = 1;
+  snapshot.dirty_rects[0].right = 5;
+  snapshot.dirty_rects[0].bottom = 1;
+  server.monitor_layout.monitor_count = 2;
+  server.monitor_layout.total_width = 8;
+  server.monitor_layout.total_height = 4;
+  server.monitor_layout.monitors[0].left = 0;
+  server.monitor_layout.monitors[0].top = 0;
+  server.monitor_layout.monitors[0].right = 3;
+  server.monitor_layout.monitors[0].bottom = 3;
+  server.monitor_layout.monitors[0].flags = MONITOR_PRIMARY;
+  server.monitor_layout.monitors[1].left = 4;
+  server.monitor_layout.monitors[1].top = 0;
+  server.monitor_layout.monitors[1].right = 7;
+  server.monitor_layout.monitors[1].bottom = 3;
+
+  reset_send_recorder();
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &snapshot),
+                           VIEWER_GFX_DIRTY_SEND_SENT, "monitor 1 dirty sends");
+  ok = ok &&
+       expect_uint32(g_surface_count, 1, "monitor 1 dirty sends one command");
+  ok = ok && expect_uint32(g_surface_commands[0].surfaceId, 1,
+                           "monitor 1 dirty surface id");
+  ok = ok && expect_uint32(g_surface_commands[0].left, 1,
+                           "monitor 1 dirty local left");
+  ok = ok && expect_uint32(g_surface_commands[0].right, 2,
+                           "monitor 1 dirty local right");
+  ok = ok && expect_uint32(viewer_gfx_pipeline_handle_frame_ack(&viewer, 21),
+                           CHANNEL_RC_OK, "monitor 1 dirty ack accepted");
+
+  snapshot.generation = 221;
+  snapshot.dirty_rects[0].left = 3;
+  snapshot.dirty_rects[0].right = 4;
+  reset_send_recorder();
+  ok = ok &&
+       expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                         &server, &viewer, &snapshot),
+                     VIEWER_GFX_DIRTY_SEND_SENT, "cross-monitor dirty sends");
+  ok = ok && expect_uint32(g_send_count, 4, "start two surfaces end");
+  ok = ok && expect_uint32(g_surface_count, 2,
+                           "cross-monitor dirty sends two commands");
+  ok = ok && expect_uint32(g_surface_commands[0].surfaceId, 0,
+                           "cross dirty first surface id");
+  ok = ok && expect_uint32(g_surface_commands[0].left, 3,
+                           "cross dirty first local left");
+  ok = ok && expect_uint32(g_surface_commands[0].right, 4,
+                           "cross dirty first local right");
+  ok = ok && expect_uint32(g_surface_commands[1].surfaceId, 1,
+                           "cross dirty second surface id");
+  ok = ok && expect_uint32(g_surface_commands[1].left, 0,
+                           "cross dirty second local left");
+  ok = ok && expect_uint32(g_surface_commands[1].right, 1,
+                           "cross dirty second local right");
 
   viewer.gfx.rdpgfx = NULL;
   uninit_test_viewer(&viewer);
@@ -3525,6 +3655,8 @@ int main(void) {
   if (!test_frame_ack_accepts_zero_without_dirty_state_change())
     return 1;
   if (!test_dirty_update_multi_rect_and_failures())
+    return 1;
+  if (!test_dirty_update_splits_by_monitor_surface())
     return 1;
   if (!test_dirty_mapping_cleared_by_baseline())
     return 1;

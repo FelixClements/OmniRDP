@@ -159,6 +159,39 @@ static int test_dirty_rect_uses_cropped_snapshot_origin(void) {
   return ok;
 }
 
+static int test_region_rebases_destination_bounds(void) {
+  BYTE pixels[128] = {0};
+  BYTE expected[64] = {0};
+  ViewerFramebufferSnapshot snapshot = make_snapshot(pixels, 8, 4, 32, 128);
+  RDPGFX_SURFACE_COMMAND command = {0};
+  int ok = 1;
+
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+  memmove(expected, pixels + 16, 16);
+  memmove(expected + 16, pixels + 48, 16);
+  memmove(expected + 32, pixels + 80, 16);
+  memmove(expected + 48, pixels + 112, 16);
+
+  ok = ok && expect_true(viewer_gfx_uncompressed_build_surface_command_region(
+                             &snapshot, 2, 4, 0, 8, 4, 0, 0, &command),
+                         "rebased region command builds");
+  ok = ok && expect_uint32(command.surfaceId, 2, "rebased surface id");
+  ok = ok && expect_uint32(command.left, 0, "rebased local left");
+  ok = ok && expect_uint32(command.top, 0, "rebased local top");
+  ok = ok && expect_uint32(command.right, 4, "rebased local right");
+  ok = ok && expect_uint32(command.bottom, 4, "rebased local bottom");
+  ok = ok && expect_uint32(command.width, 4, "rebased width");
+  ok = ok && expect_uint32(command.height, 4, "rebased height");
+  ok = ok &&
+       expect_uint32(command.length, sizeof(expected), "rebased payload size");
+  ok = ok && expect_bytes(command.data, expected, sizeof(expected),
+                          "rebased payload copies source crop");
+
+  viewer_gfx_uncompressed_surface_command_reset(&command);
+  return ok;
+}
+
 static int test_dirty_rect_edge_bounds(void) {
   BYTE pixels[64] = {0};
   BYTE expected_pixel[4] = {0};
@@ -345,6 +378,7 @@ int main(void) {
   ok = ok && test_full_frame_repacks_padded_stride();
   ok = ok && test_dirty_rect_builds_exclusive_bounds();
   ok = ok && test_dirty_rect_uses_cropped_snapshot_origin();
+  ok = ok && test_region_rebases_destination_bounds();
   ok = ok && test_dirty_rect_edge_bounds();
   ok = ok && test_invalid_inputs();
   ok = ok && test_reset_idempotent();

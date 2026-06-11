@@ -121,11 +121,14 @@ static BOOL viewer_gfx_uncompressed_validate_rect(
 
 static BOOL viewer_gfx_uncompressed_build_surface_command_bounds(
     const ViewerFramebufferSnapshot *snapshot, UINT16 surface_id, UINT32 left,
-    UINT32 top, UINT32 right, UINT32 bottom, RDPGFX_SURFACE_COMMAND *command) {
+    UINT32 top, UINT32 right, UINT32 bottom, UINT32 dest_left, UINT32 dest_top,
+    RDPGFX_SURFACE_COMMAND *command) {
   BYTE *data = NULL;
   UINT32 row = 0;
   UINT32 rect_width = 0;
   UINT32 rect_height = 0;
+  UINT32 dest_right = 0;
+  UINT32 dest_bottom = 0;
   size_t destination_row_bytes = 0;
   size_t payload_bytes = 0;
 
@@ -143,6 +146,12 @@ static BOOL viewer_gfx_uncompressed_build_surface_command_bounds(
   rect_height = bottom - top;
   if ((rect_width == 0) || (rect_height == 0))
     return FALSE;
+  if (((UINT32)UINT16_MAX - dest_left) < rect_width)
+    return FALSE;
+  if (((UINT32)UINT16_MAX - dest_top) < rect_height)
+    return FALSE;
+  dest_right = dest_left + rect_width;
+  dest_bottom = dest_top + rect_height;
 
   if ((size_t)rect_width > (SIZE_MAX / 4U))
     return FALSE;
@@ -178,10 +187,10 @@ static BOOL viewer_gfx_uncompressed_build_surface_command_bounds(
   command->codecId = RDPGFX_CODECID_UNCOMPRESSED;
   command->contextId = 0;
   command->format = PIXEL_FORMAT_BGRX32;
-  command->left = (UINT16)left;
-  command->top = (UINT16)top;
-  command->right = (UINT16)right;
-  command->bottom = (UINT16)bottom;
+  command->left = (UINT16)dest_left;
+  command->top = (UINT16)dest_top;
+  command->right = (UINT16)dest_right;
+  command->bottom = (UINT16)dest_bottom;
   command->width = (UINT16)rect_width;
   command->height = (UINT16)rect_height;
   command->length = (UINT32)payload_bytes;
@@ -201,7 +210,8 @@ BOOL viewer_gfx_uncompressed_build_surface_command(
     return FALSE;
 
   return viewer_gfx_uncompressed_build_surface_command_bounds(
-      snapshot, surface_id, 0, 0, snapshot->width, snapshot->height, command);
+      snapshot, surface_id, 0, 0, snapshot->width, snapshot->height, 0, 0,
+      command);
 }
 
 BOOL viewer_gfx_uncompressed_build_surface_command_rect(
@@ -223,7 +233,22 @@ BOOL viewer_gfx_uncompressed_build_surface_command_rect(
     return FALSE;
 
   return viewer_gfx_uncompressed_build_surface_command_bounds(
-      snapshot, surface_id, left, top, right, bottom, command);
+      snapshot, surface_id, left, top, right, bottom, left, top, command);
+}
+
+BOOL viewer_gfx_uncompressed_build_surface_command_region(
+    const ViewerFramebufferSnapshot *snapshot, UINT16 surface_id,
+    UINT32 source_left, UINT32 source_top, UINT32 source_right,
+    UINT32 source_bottom, UINT32 dest_left, UINT32 dest_top,
+    RDPGFX_SURFACE_COMMAND *command) {
+  if (!command)
+    return FALSE;
+
+  viewer_gfx_uncompressed_surface_command_reset(command);
+
+  return viewer_gfx_uncompressed_build_surface_command_bounds(
+      snapshot, surface_id, source_left, source_top, source_right,
+      source_bottom, dest_left, dest_top, command);
 }
 
 void viewer_gfx_uncompressed_surface_command_reset(

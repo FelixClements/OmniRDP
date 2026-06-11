@@ -29,6 +29,11 @@ BOOL viewer_gfx_rfx_build_surface_command_rect(
     ViewerGfxRfxContext *context, const ViewerFramebufferSnapshot *snapshot,
     UINT16 surface_id, const RECTANGLE_16 *dirty_rect,
     RDPGFX_SURFACE_COMMAND *command);
+BOOL viewer_gfx_rfx_build_surface_command_region(
+    ViewerGfxRfxContext *context, const ViewerFramebufferSnapshot *snapshot,
+    UINT16 surface_id, UINT32 source_left, UINT32 source_top,
+    UINT32 source_right, UINT32 source_bottom, UINT32 dest_left,
+    UINT32 dest_top, RDPGFX_SURFACE_COMMAND *command);
 void viewer_gfx_rfx_surface_command_reset(RDPGFX_SURFACE_COMMAND *command);
 
 #ifdef VIEWER_GFX_RFX_TESTING
