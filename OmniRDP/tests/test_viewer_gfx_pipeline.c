@@ -27,6 +27,8 @@ static RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU g_last_map = {0};
 static RDPGFX_SURFACE_COMMAND g_last_surface = {0};
 static const MONITOR_DEF *g_expected_reset_source = NULL;
 static MONITOR_DEF g_last_reset_monitors[OMNIRDP_MAX_MONITORS] = {0};
+static UINT32 g_caps_confirm_count = 0;
+static RDPGFX_CAPSET g_last_confirmed_cap = {0};
 
 static UINT test_record_send(TestSendOp op) {
   g_send_order[g_send_count++] = op;
@@ -103,6 +105,21 @@ static UINT test_caps_confirm(RdpgfxServerContext *context,
   return ERROR_INTERNAL_ERROR;
 }
 
+static UINT test_caps_confirm_capture(RdpgfxServerContext *context,
+                                      const RDPGFX_CAPS_CONFIRM_PDU *confirm) {
+  (void)context;
+  if (!confirm || !confirm->capsSet)
+    return ERROR_INTERNAL_ERROR;
+  g_last_confirmed_cap = *confirm->capsSet;
+  g_caps_confirm_count++;
+  return CHANNEL_RC_OK;
+}
+
+static void reset_caps_confirm_recorder(void) {
+  g_caps_confirm_count = 0;
+  memset(&g_last_confirmed_cap, 0, sizeof(g_last_confirmed_cap));
+}
+
 static void reset_send_recorder(void) {
   memset(g_send_order, 0, sizeof(g_send_order));
   memset(&g_last_reset, 0, sizeof(g_last_reset));
@@ -114,6 +131,7 @@ static void reset_send_recorder(void) {
   g_send_count = 0;
   g_surface_count = 0;
   g_fail_on_send = 0;
+  reset_caps_confirm_recorder();
 }
 
 RdpgfxServerContext *rdpgfx_server_context_new(HANDLE vcm) {
@@ -164,6 +182,30 @@ static int expect_uint64(UINT64 actual, UINT64 expected, const char *message) {
     return 0;
   }
   return 1;
+}
+
+static RDPGFX_CAPSET test_rdpgfx_cap(UINT32 version, UINT32 flags) {
+  RDPGFX_CAPSET cap = {0};
+  cap.version = version;
+  cap.length = RDPGFX_CAPSET_BASE_SIZE;
+  cap.flags = flags;
+  return cap;
+}
+
+static UINT32 test_rdpgfx_avc_disabled_flag(void) {
+#ifdef RDPGFX_CAPS_FLAG_AVC_DISABLED
+  return RDPGFX_CAPS_FLAG_AVC_DISABLED;
+#else
+  return 0;
+#endif
+}
+
+static UINT32 test_rdpgfx_scaledmap_disable_flag(void) {
+#ifdef RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE
+  return RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE;
+#else
+  return 0;
+#endif
 }
 
 static BOOL init_test_viewer(Viewer *viewer, UINT32 width, UINT32 height) {
@@ -510,6 +552,121 @@ static int test_caps_advertise_rejects_missing_capsets(void) {
   DeleteCriticalSection(&server.gfx.lock);
   return ok;
 }
+
+#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_81) &&           \
+    defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_101) &&         \
+    defined(RDPGFX_CAPVERSION_102) && defined(RDPGFX_CAPVERSION_103) &&        \
+    defined(RDPGFX_CAPVERSION_104) && defined(RDPGFX_CAPVERSION_105) &&        \
+    defined(RDPGFX_CAPVERSION_106) && defined(RDPGFX_CAPVERSION_106_ERR) &&    \
+    defined(RDPGFX_CAPVERSION_107)
+static int test_caps_advertise_selects_mstsc_newest_supported_cap(void) {
+  const UINT32 avc_disabled = test_rdpgfx_avc_disabled_flag();
+  const UINT32 mstsc_107_flags =
+      avc_disabled | test_rdpgfx_scaledmap_disable_flag();
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext context = {0};
+  RDPGFX_CAPSET caps[] = {
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_8, RDPGFX_CAPS_FLAG_THINCLIENT),
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_81, RDPGFX_CAPS_FLAG_THINCLIENT),
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_10, avc_disabled),
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_101, 0),
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_102, avc_disabled),
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_103, avc_disabled),
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_104, avc_disabled),
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_105, avc_disabled),
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_106, avc_disabled),
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_106_ERR, avc_disabled),
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_107, mstsc_107_flags)};
+  RDPGFX_CAPS_ADVERTISE_PDU advertise = {.capsSetCount = ARRAYSIZE(caps),
+                                         .capsSets = caps};
+  int ok = 1;
+
+  reset_caps_confirm_recorder();
+  ok = ok && expect_true(
+                 InitializeCriticalSectionAndSpinCount(&server.gfx.lock, 4000),
+                 "server gfx lock init");
+  ok = ok && expect_true(init_test_viewer(&viewer, 3840, 1080), "viewer init");
+  viewer.id = 7;
+  viewer.gfx.pipeline_server = &server;
+  context.custom = &viewer;
+  context.CapsConfirm = test_caps_confirm_capture;
+
+  ok = ok &&
+       expect_uint32(viewer_gfx_pipeline_caps_advertise(&context, &advertise),
+                     CHANNEL_RC_OK, "mstsc caps advertise handled");
+  ok = ok && expect_uint32(g_caps_confirm_count, 1,
+                           "mstsc caps advertise confirms once");
+  ok = ok && expect_uint32(g_last_confirmed_cap.version, RDPGFX_CAPVERSION_107,
+                           "mstsc caps advertise selects newest version");
+  ok = ok && expect_uint32(g_last_confirmed_cap.flags, mstsc_107_flags,
+                           "mstsc caps advertise preserves selected flags");
+  ok = ok && expect_true(viewer.gfx.caps_ready,
+                         "mstsc caps advertise marks caps ready");
+  ok = ok && expect_true(viewer.gfx.use_rdpgfx,
+                         "mstsc caps advertise enables rdpegfx");
+  ok = ok && expect_true(server.gfx.canonical_caps_valid,
+                         "mstsc caps advertise establishes canonical cap");
+  ok = ok &&
+       expect_uint32(server.gfx.canonical_caps.version, RDPGFX_CAPVERSION_107,
+                     "mstsc caps advertise stores newest canonical cap");
+
+  uninit_test_viewer(&viewer);
+  DeleteCriticalSection(&server.gfx.lock);
+  return ok;
+}
+#endif
+
+#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_81) &&           \
+    defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_101) &&         \
+    defined(RDPGFX_CAPVERSION_102) && defined(RDPGFX_CAPVERSION_103) &&        \
+    defined(RDPGFX_CAPVERSION_104) && defined(RDPGFX_CAPVERSION_106)
+static int test_caps_advertise_selects_freerdp_newest_supported_cap(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext context = {0};
+  RDPGFX_CAPSET caps[] = {test_rdpgfx_cap(RDPGFX_CAPVERSION_8, 0),
+                          test_rdpgfx_cap(RDPGFX_CAPVERSION_81, 0),
+                          test_rdpgfx_cap(RDPGFX_CAPVERSION_10, 0),
+                          test_rdpgfx_cap(RDPGFX_CAPVERSION_101, 0),
+                          test_rdpgfx_cap(RDPGFX_CAPVERSION_102, 0),
+                          test_rdpgfx_cap(RDPGFX_CAPVERSION_103, 0),
+                          test_rdpgfx_cap(RDPGFX_CAPVERSION_104, 0),
+                          test_rdpgfx_cap(RDPGFX_CAPVERSION_106, 0)};
+  RDPGFX_CAPS_ADVERTISE_PDU advertise = {.capsSetCount = ARRAYSIZE(caps),
+                                         .capsSets = caps};
+  int ok = 1;
+
+  reset_caps_confirm_recorder();
+  ok = ok && expect_true(
+                 InitializeCriticalSectionAndSpinCount(&server.gfx.lock, 4000),
+                 "server gfx lock init");
+  ok = ok && expect_true(init_test_viewer(&viewer, 3840, 1080), "viewer init");
+  viewer.id = 8;
+  viewer.gfx.pipeline_server = &server;
+  context.custom = &viewer;
+  context.CapsConfirm = test_caps_confirm_capture;
+
+  ok = ok &&
+       expect_uint32(viewer_gfx_pipeline_caps_advertise(&context, &advertise),
+                     CHANNEL_RC_OK, "freerdp caps advertise handled");
+  ok = ok && expect_uint32(g_caps_confirm_count, 1,
+                           "freerdp caps advertise confirms once");
+  ok = ok && expect_uint32(g_last_confirmed_cap.version, RDPGFX_CAPVERSION_106,
+                           "freerdp caps advertise selects newest version");
+  ok = ok && expect_true(viewer.gfx.caps_ready,
+                         "freerdp caps advertise marks caps ready");
+  ok = ok && expect_true(viewer.gfx.use_rdpgfx,
+                         "freerdp caps advertise enables rdpegfx");
+  ok = ok &&
+       expect_uint32(server.gfx.canonical_caps.version, RDPGFX_CAPVERSION_106,
+                     "freerdp caps advertise stores newest canonical cap");
+
+  uninit_test_viewer(&viewer);
+  DeleteCriticalSection(&server.gfx.lock);
+  return ok;
+}
+#endif
 
 static int test_snapshot_validation_rejects_not_ready(void) {
   ViewerServer server = {0};
@@ -3311,6 +3468,22 @@ int main(void) {
     return 1;
   if (!test_caps_advertise_rejects_missing_capsets())
     return 1;
+#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_81) &&           \
+    defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_101) &&         \
+    defined(RDPGFX_CAPVERSION_102) && defined(RDPGFX_CAPVERSION_103) &&        \
+    defined(RDPGFX_CAPVERSION_104) && defined(RDPGFX_CAPVERSION_105) &&        \
+    defined(RDPGFX_CAPVERSION_106) && defined(RDPGFX_CAPVERSION_106_ERR) &&    \
+    defined(RDPGFX_CAPVERSION_107)
+  if (!test_caps_advertise_selects_mstsc_newest_supported_cap())
+    return 1;
+#endif
+#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_81) &&           \
+    defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_101) &&         \
+    defined(RDPGFX_CAPVERSION_102) && defined(RDPGFX_CAPVERSION_103) &&        \
+    defined(RDPGFX_CAPVERSION_104) && defined(RDPGFX_CAPVERSION_106)
+  if (!test_caps_advertise_selects_freerdp_newest_supported_cap())
+    return 1;
+#endif
   if (!test_snapshot_validation_rejects_not_ready())
     return 1;
   if (!test_snapshot_sends_full_frame_baseline_order())
