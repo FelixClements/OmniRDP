@@ -109,7 +109,7 @@ static BOOL viewer_gfx_caps_is_preferred(const RDPGFX_CAPSET *candidate,
     return TRUE;
 
   if (candidate->version != current->version)
-    return candidate->version < current->version;
+    return candidate->version > current->version;
 
 #ifdef RDPGFX_CAPS_FLAG_AVC_DISABLED
   if ((candidate->flags & RDPGFX_CAPS_FLAG_AVC_DISABLED) !=

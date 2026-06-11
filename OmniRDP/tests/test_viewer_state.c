@@ -208,6 +208,14 @@ static UINT32 test_gfx_avc_disabled_flag(void) {
 #endif
 }
 
+static UINT32 test_gfx_scaledmap_disable_flag(void) {
+#ifdef RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE
+  return RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE;
+#else
+  return 0;
+#endif
+}
+
 static int test_gfx_cap_description_formats_version_flags(void) {
   enum { CAP_DESCRIPTION_CAPACITY = 80 };
   char *buffer = (char *)calloc(CAP_DESCRIPTION_CAPACITY, sizeof(*buffer));
@@ -367,14 +375,39 @@ static int test_gfx_canonical_same_version_unknown_flags_rejected(void) {
 }
 
 #ifdef RDPGFX_CAPVERSION_10
-static void test_gfx_prefers_lower_official_version(void) {
+static int test_gfx_prefers_highest_official_version(void) {
   RDPGFX_CAPSET selected = {0};
   RDPGFX_CAPSET advertised[] = {test_gfx_cap(RDPGFX_CAPVERSION_10, 0),
                                 test_gfx_cap(RDPGFX_CAPVERSION_8, 0)};
 
-  assert(
-      viewer_gfx_select_compatible_caps(NULL, FALSE, advertised, 2, &selected));
-  assert(selected.version == RDPGFX_CAPVERSION_8);
+  if (!viewer_gfx_select_compatible_caps(NULL, FALSE, advertised, 2, &selected))
+    return 1;
+  if (selected.version != RDPGFX_CAPVERSION_10)
+    return 1;
+  return 0;
+}
+#endif
+
+#if defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_106) &&         \
+    defined(RDPGFX_CAPVERSION_107)
+static int test_gfx_prefers_mstsc_newest_official_version(void) {
+  const UINT32 mstsc_flags =
+      test_gfx_avc_disabled_flag() | test_gfx_scaledmap_disable_flag();
+  RDPGFX_CAPSET selected = {0};
+  RDPGFX_CAPSET advertised[] = {
+      test_gfx_cap(RDPGFX_CAPVERSION_8, 0),
+      test_gfx_cap(RDPGFX_CAPVERSION_10, 0),
+      test_gfx_cap(RDPGFX_CAPVERSION_106, 0),
+      test_gfx_cap(RDPGFX_CAPVERSION_107, mstsc_flags)};
+
+  if (!viewer_gfx_select_compatible_caps(NULL, FALSE, advertised,
+                                         ARRAYSIZE(advertised), &selected))
+    return 1;
+  if (selected.version != RDPGFX_CAPVERSION_107)
+    return 1;
+  if (selected.flags != mstsc_flags)
+    return 1;
+  return 0;
 }
 #endif
 #endif
@@ -413,7 +446,13 @@ int main(void) {
   if (test_gfx_canonical_same_version_unknown_flags_rejected() != 0)
     return 1;
 #ifdef RDPGFX_CAPVERSION_10
-  test_gfx_prefers_lower_official_version();
+  if (test_gfx_prefers_highest_official_version() != 0)
+    return 1;
+#endif
+#if defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_106) &&         \
+    defined(RDPGFX_CAPVERSION_107)
+  if (test_gfx_prefers_mstsc_newest_official_version() != 0)
+    return 1;
 #endif
 #endif
   return 0;
