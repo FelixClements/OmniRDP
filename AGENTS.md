@@ -148,3 +148,17 @@ Prefer checked patterns already used locally: `safe_string.h` `omni_format`/`omn
 ## LICENSING
 
 OmniRDP is GNU AGPLv3. FreeRDP is Apache License 2.0. Installer license files live under `setup/license/`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `FelixClements/OmniRDP`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default triage label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context repo: read root `CONTEXT.md` and ADRs under `docs/adr/` when present. See `docs/agents/domain.md`.
