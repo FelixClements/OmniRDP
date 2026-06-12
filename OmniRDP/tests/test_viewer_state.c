@@ -349,15 +349,19 @@ static int test_gfx_canonical_version_accepts_different_allowed_flags(void) {
   return 0;
 }
 
-static int test_gfx_canonical_different_version_falls_back_for_viewer(void) {
+static int test_gfx_canonical_different_version_downgrades_for_viewer(void) {
 #ifdef RDPGFX_CAPVERSION_81
   RDPGFX_CAPSET selected = {0};
   RDPGFX_CAPSET canonical = test_gfx_cap(RDPGFX_CAPVERSION_81, 0);
   RDPGFX_CAPSET advertised[] = {
       test_gfx_cap(RDPGFX_CAPVERSION_8, test_gfx_avc_disabled_flag())};
 
-  if (viewer_gfx_select_compatible_caps(&canonical, TRUE, advertised, 1,
-                                        &selected))
+  if (!viewer_gfx_select_compatible_caps(&canonical, TRUE, advertised, 1,
+                                         &selected))
+    return 1;
+  if (selected.version != RDPGFX_CAPVERSION_8)
+    return 1;
+  if (selected.flags != test_gfx_avc_disabled_flag())
     return 1;
 #endif
   return 0;
@@ -441,7 +445,7 @@ int main(void) {
   test_gfx_unsupported_first_does_not_poison_canonical();
   if (test_gfx_canonical_version_accepts_different_allowed_flags() != 0)
     return 1;
-  if (test_gfx_canonical_different_version_falls_back_for_viewer() != 0)
+  if (test_gfx_canonical_different_version_downgrades_for_viewer() != 0)
     return 1;
   if (test_gfx_canonical_same_version_unknown_flags_rejected() != 0)
     return 1;

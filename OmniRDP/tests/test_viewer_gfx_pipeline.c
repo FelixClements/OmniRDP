@@ -687,6 +687,60 @@ static int test_caps_advertise_selects_freerdp_newest_supported_cap(void) {
 }
 #endif
 
+#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_10) &&           \
+    defined(RDPGFX_CAPVERSION_106) && defined(RDPGFX_CAPVERSION_107)
+static int test_caps_advertise_downgrades_from_canonical_for_viewer(void) {
+  const UINT32 canonical_flags =
+      test_rdpgfx_avc_disabled_flag() | test_rdpgfx_scaledmap_disable_flag();
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext context = {0};
+  RDPGFX_CAPSET caps[] = {test_rdpgfx_cap(RDPGFX_CAPVERSION_8, 0),
+                          test_rdpgfx_cap(RDPGFX_CAPVERSION_10, 0),
+                          test_rdpgfx_cap(RDPGFX_CAPVERSION_106, 0)};
+  RDPGFX_CAPS_ADVERTISE_PDU advertise = {.capsSetCount = ARRAYSIZE(caps),
+                                         .capsSets = caps};
+  int ok = 1;
+
+  reset_caps_confirm_recorder();
+  ok = ok && expect_true(
+                 InitializeCriticalSectionAndSpinCount(&server.gfx.lock, 4000),
+                 "server gfx lock init");
+  server.gfx.canonical_caps_valid = TRUE;
+  server.gfx.canonical_caps =
+      test_rdpgfx_cap(RDPGFX_CAPVERSION_107, canonical_flags);
+  ok = ok && expect_true(init_test_viewer(&viewer, 3840, 1080), "viewer init");
+  viewer.id = 9;
+  viewer.activated = TRUE;
+  viewer.gfx.pipeline_server = &server;
+  context.custom = &viewer;
+  context.CapsConfirm = test_caps_confirm_capture;
+
+  ok = ok &&
+       expect_uint32(viewer_gfx_pipeline_caps_advertise(&context, &advertise),
+                     CHANNEL_RC_OK, "downgrade caps advertise handled");
+  ok = ok && expect_uint32(g_caps_confirm_count, 1,
+                           "downgrade caps advertise confirms once");
+  ok = ok && expect_uint32(g_last_confirmed_cap.version, RDPGFX_CAPVERSION_106,
+                           "downgrade caps advertise selects viewer version");
+  ok = ok && expect_uint32(g_last_confirmed_cap.flags, 0,
+                           "downgrade caps advertise preserves viewer flags");
+  ok = ok && expect_true(viewer.gfx.caps_ready,
+                         "downgrade caps advertise marks caps ready");
+  ok = ok && expect_true(viewer.gfx.use_rdpgfx,
+                         "downgrade caps advertise enables rdpegfx");
+  ok = ok && expect_true(server.gfx.canonical_caps_valid,
+                         "downgrade preserves canonical cap");
+  ok = ok &&
+       expect_uint32(server.gfx.canonical_caps.version, RDPGFX_CAPVERSION_107,
+                     "downgrade does not lower canonical cap");
+
+  uninit_test_viewer(&viewer);
+  DeleteCriticalSection(&server.gfx.lock);
+  return ok;
+}
+#endif
+
 static int test_snapshot_validation_rejects_not_ready(void) {
   ViewerServer server = {0};
   Viewer viewer = {0};
@@ -1503,8 +1557,8 @@ static int test_snapshot_sends_server_monitor_layout(void) {
   ok = ok && expect_true(
                  viewer_gfx_pipeline_send_snapshot(&server, &viewer, &snapshot),
                  "snapshot sends multi-monitor reset");
-  ok = ok && expect_uint32(g_send_count, 8,
-                           "multi-monitor baseline sends eight callbacks");
+  ok = ok && expect_uint32(g_send_count, 9,
+                           "multi-monitor baseline sends nine callbacks");
   ok = ok && expect_uint32(g_create_count, 2,
                            "baseline creates one surface per monitor");
   ok = ok &&
@@ -3612,6 +3666,11 @@ int main(void) {
     defined(RDPGFX_CAPVERSION_102) && defined(RDPGFX_CAPVERSION_103) &&        \
     defined(RDPGFX_CAPVERSION_104) && defined(RDPGFX_CAPVERSION_106)
   if (!test_caps_advertise_selects_freerdp_newest_supported_cap())
+    return 1;
+#endif
+#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_10) &&           \
+    defined(RDPGFX_CAPVERSION_106) && defined(RDPGFX_CAPVERSION_107)
+  if (!test_caps_advertise_downgrades_from_canonical_for_viewer())
     return 1;
 #endif
   if (!test_snapshot_validation_rejects_not_ready())

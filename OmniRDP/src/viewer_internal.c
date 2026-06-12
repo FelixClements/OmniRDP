@@ -139,13 +139,17 @@ BOOL viewer_gfx_select_compatible_caps(const RDPGFX_CAPSET *canonical_caps,
       const RDPGFX_CAPSET *caps = &advertised_caps[i];
       if (!viewer_gfx_caps_is_whitelisted(caps))
         continue;
-      if (caps->version == canonical_caps->version) {
-        *selected_caps = *caps;
-        return TRUE;
-      }
+      if (caps->version > canonical_caps->version)
+        continue;
+      if (viewer_gfx_caps_is_preferred(caps, best))
+        best = caps;
     }
 
-    return FALSE;
+    if (!best)
+      return FALSE;
+
+    *selected_caps = *best;
+    return TRUE;
   }
 
   for (i = 0; i < advertised_caps_count; i++) {
