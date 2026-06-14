@@ -50,11 +50,10 @@ jobs:
       - name: Remove partial FreeRDP tree
         run: rm -rf freerdp
 
-      - name: Checkout FreeRDP fork
+      - name: Checkout FreeRDP fork default branch
         uses: actions/checkout@v5
         with:
           repository: FelixClements/FreeRDP
-          ref: main
           path: freerdp
           fetch-depth: 1
 
