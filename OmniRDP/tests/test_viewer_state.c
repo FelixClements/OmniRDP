@@ -191,7 +191,6 @@ static void test_gfx_failure_policy_classic_fallback_stays_classic(void) {
   assert(!viewer_gfx_failure_requires_disconnect(&gfx, TRUE));
 }
 
-#ifdef RDPGFX_CAPVERSION_8
 static RDPGFX_CAPSET test_gfx_cap(UINT32 version, UINT32 flags) {
   RDPGFX_CAPSET cap = {0};
 
@@ -201,19 +200,11 @@ static RDPGFX_CAPSET test_gfx_cap(UINT32 version, UINT32 flags) {
 }
 
 static UINT32 test_gfx_avc_disabled_flag(void) {
-#ifdef RDPGFX_CAPS_FLAG_AVC_DISABLED
   return RDPGFX_CAPS_FLAG_AVC_DISABLED;
-#else
-  return 0;
-#endif
 }
 
 static UINT32 test_gfx_scaledmap_disable_flag(void) {
-#ifdef RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE
   return RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE;
-#else
-  return 0;
-#endif
 }
 
 static int test_gfx_cap_description_formats_version_flags(void) {
@@ -258,23 +249,14 @@ test_gfx_highest_unsupported_version_rejected_without_downgrade(void) {
 }
 
 static void test_gfx_unsupported_avc_flags_rejected(void) {
-#if defined(RDPGFX_CAPS_FLAG_AVC420_ENABLED) ||                                \
-    defined(RDPGFX_CAPS_FLAG_AVC_THINCLIENT)
   RDPGFX_CAPSET selected = {0};
   RDPGFX_CAPSET advertised[] = {
-      test_gfx_cap(RDPGFX_CAPVERSION_8, 0
-#ifdef RDPGFX_CAPS_FLAG_AVC420_ENABLED
-                                            | RDPGFX_CAPS_FLAG_AVC420_ENABLED
-#endif
-#ifdef RDPGFX_CAPS_FLAG_AVC_THINCLIENT
-                                            | RDPGFX_CAPS_FLAG_AVC_THINCLIENT
-#endif
-                   )};
+      test_gfx_cap(RDPGFX_CAPVERSION_8, RDPGFX_CAPS_FLAG_AVC420_ENABLED |
+                                            RDPGFX_CAPS_FLAG_AVC_THINCLIENT)};
 
   assert(!viewer_gfx_caps_is_whitelisted(&advertised[0]));
   assert(!viewer_gfx_select_compatible_caps(NULL, FALSE, advertised, 1,
                                             &selected));
-#endif
 }
 
 static void test_gfx_unknown_flags_rejected(void) {
@@ -350,7 +332,6 @@ static int test_gfx_canonical_version_accepts_different_allowed_flags(void) {
 }
 
 static int test_gfx_canonical_different_version_downgrades_for_viewer(void) {
-#ifdef RDPGFX_CAPVERSION_81
   RDPGFX_CAPSET selected = {0};
   RDPGFX_CAPSET canonical = test_gfx_cap(RDPGFX_CAPVERSION_81, 0);
   RDPGFX_CAPSET advertised[] = {
@@ -363,7 +344,6 @@ static int test_gfx_canonical_different_version_downgrades_for_viewer(void) {
     return 1;
   if (selected.flags != test_gfx_avc_disabled_flag())
     return 1;
-#endif
   return 0;
 }
 
@@ -378,7 +358,6 @@ static int test_gfx_canonical_same_version_unknown_flags_rejected(void) {
   return 0;
 }
 
-#ifdef RDPGFX_CAPVERSION_10
 static int test_gfx_prefers_highest_official_version(void) {
   RDPGFX_CAPSET selected = {0};
   RDPGFX_CAPSET advertised[] = {test_gfx_cap(RDPGFX_CAPVERSION_10, 0),
@@ -390,10 +369,7 @@ static int test_gfx_prefers_highest_official_version(void) {
     return 1;
   return 0;
 }
-#endif
 
-#if defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_106) &&         \
-    defined(RDPGFX_CAPVERSION_107)
 static int test_gfx_prefers_mstsc_newest_official_version(void) {
   const UINT32 mstsc_flags =
       test_gfx_avc_disabled_flag() | test_gfx_scaledmap_disable_flag();
@@ -413,8 +389,28 @@ static int test_gfx_prefers_mstsc_newest_official_version(void) {
     return 1;
   return 0;
 }
-#endif
-#endif
+
+static int test_gfx_accepts_live_freerdp_107_cap_list(void) {
+  RDPGFX_CAPSET selected = {0};
+  RDPGFX_CAPSET advertised[] = {
+      test_gfx_cap(RDPGFX_CAPVERSION_8, 0x00000002U),
+      test_gfx_cap(RDPGFX_CAPVERSION_81, 0x00000002U),
+      test_gfx_cap(RDPGFX_CAPVERSION_10, 0x00000022U),
+      test_gfx_cap(RDPGFX_CAPVERSION_101, 0x00000000U),
+      test_gfx_cap(RDPGFX_CAPVERSION_102, 0x00000022U),
+      test_gfx_cap(RDPGFX_CAPVERSION_103, 0x00000020U),
+      test_gfx_cap(RDPGFX_CAPVERSION_104, 0x00000022U),
+      test_gfx_cap(RDPGFX_CAPVERSION_107, 0x000000A2U)};
+
+  if (!viewer_gfx_select_compatible_caps(NULL, FALSE, advertised,
+                                         ARRAYSIZE(advertised), &selected))
+    return 1;
+  if (selected.version != RDPGFX_CAPVERSION_107)
+    return 1;
+  if (selected.flags != 0x000000A2U)
+    return 1;
+  return 0;
+}
 
 int main(void) {
   test_suppress_crt_dialogs();
@@ -433,7 +429,6 @@ int main(void) {
   test_gfx_failure_policy_pre_activation_allows_fallback();
   test_gfx_failure_policy_live_rdpgfx_disconnects();
   test_gfx_failure_policy_classic_fallback_stays_classic();
-#ifdef RDPGFX_CAPVERSION_8
   if (test_gfx_cap_description_formats_version_flags() != 0)
     return 1;
   test_gfx_supported_clean_cap_selected();
@@ -449,15 +444,11 @@ int main(void) {
     return 1;
   if (test_gfx_canonical_same_version_unknown_flags_rejected() != 0)
     return 1;
-#ifdef RDPGFX_CAPVERSION_10
   if (test_gfx_prefers_highest_official_version() != 0)
     return 1;
-#endif
-#if defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_106) &&         \
-    defined(RDPGFX_CAPVERSION_107)
   if (test_gfx_prefers_mstsc_newest_official_version() != 0)
     return 1;
-#endif
-#endif
+  if (test_gfx_accepts_live_freerdp_107_cap_list() != 0)
+    return 1;
   return 0;
 }

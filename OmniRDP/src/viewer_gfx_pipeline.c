@@ -1,5 +1,6 @@
 #include "viewer_gfx_pipeline.h"
 #include "platform_compat.h"
+#include "viewer_gfx_codec_clearcodec.h"
 #include "viewer_gfx_codec_rfx.h"
 #include "viewer_gfx_codec_uncompressed.h"
 #include "viewer_internal.h"
@@ -188,6 +189,21 @@ viewer_gfx_pipeline_ensure_rfx_context_locked(ViewerGraphicsContext *gfx) {
   return gfx->rfx_context != NULL;
 }
 
+static BOOL viewer_gfx_pipeline_ensure_clearcodec_context_locked(
+    ViewerGraphicsContext *gfx) {
+  if (!gfx)
+    return FALSE;
+
+  if (gfx->clearcodec_context)
+    return TRUE;
+
+  if (!viewer_gfx_clearcodec_is_available())
+    return FALSE;
+
+  gfx->clearcodec_context = viewer_gfx_clearcodec_context_new();
+  return gfx->clearcodec_context != NULL;
+}
+
 static void viewer_gfx_pipeline_downgrade_to_uncompressed_locked(
     ViewerGraphicsContext *gfx) {
   if (!gfx)
@@ -195,6 +211,8 @@ static void viewer_gfx_pipeline_downgrade_to_uncompressed_locked(
 
   viewer_gfx_rfx_context_free(gfx->rfx_context);
   gfx->rfx_context = NULL;
+  viewer_gfx_clearcodec_context_free(gfx->clearcodec_context);
+  gfx->clearcodec_context = NULL;
   gfx->selected_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
 }
 
@@ -205,16 +223,25 @@ static BOOL viewer_gfx_pipeline_build_surface_command_region(
     UINT32 dest_top, RDPGFX_SURFACE_COMMAND *command) {
   ViewerGraphicsContext *gfx = viewer ? &viewer->gfx : NULL;
   ViewerGfxRfxContext *rfx_context = NULL;
+  ViewerGfxClearCodecContext *clearcodec_context = NULL;
   ViewerGfxCodec selected_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
   UINT64 encode_start_us = 0;
   UINT64 encode_us = 0;
   BOOL use_rfx = FALSE;
+  BOOL use_clearcodec = FALSE;
 
   if (!gfx || !command)
     return FALSE;
 
   EnterCriticalSection(&gfx->lock);
-  if (gfx->selected_codec == VIEWER_GFX_CODEC_RFX) {
+  if (gfx->selected_codec == VIEWER_GFX_CODEC_CLEARCODEC) {
+    if (viewer_gfx_pipeline_ensure_clearcodec_context_locked(gfx)) {
+      clearcodec_context = gfx->clearcodec_context;
+      use_clearcodec = TRUE;
+    } else {
+      viewer_gfx_pipeline_downgrade_to_uncompressed_locked(gfx);
+    }
+  } else if (gfx->selected_codec == VIEWER_GFX_CODEC_RFX) {
     if (viewer_gfx_pipeline_ensure_rfx_context_locked(gfx)) {
       rfx_context = gfx->rfx_context;
       use_rfx = TRUE;
@@ -223,6 +250,28 @@ static BOOL viewer_gfx_pipeline_build_surface_command_region(
     }
   }
   LeaveCriticalSection(&gfx->lock);
+
+  if (use_clearcodec) {
+    encode_start_us = viewer_gfx_pipeline_now_us();
+    if (viewer_gfx_clearcodec_build_surface_command_region(
+            clearcodec_context, snapshot, surface_id, source_left, source_top,
+            source_right, source_bottom, dest_left, dest_top, command)) {
+      encode_us = viewer_gfx_pipeline_now_us() - encode_start_us;
+      EnterCriticalSection(&gfx->lock);
+      viewer_gfx_pipeline_record_encode_locked(gfx, encode_start_us, encode_us,
+                                               command->length);
+      LeaveCriticalSection(&gfx->lock);
+      WLog_DBG(
+          TAG,
+          "Viewer %u RDPEGFX ClearCodec surface encode: generation=%" PRIu64
+          " surface_id=%" PRIu16 " source=(%u,%u)-(%u,%u) dest=(%u,%u)"
+          " payload_bytes=%" PRIu32 " encode_us=%" PRIu64,
+          viewer ? viewer->id : 0U, snapshot ? snapshot->generation : 0,
+          surface_id, source_left, source_top, source_right, source_bottom,
+          dest_left, dest_top, command->length, encode_us);
+      return TRUE;
+    }
+  }
 
   if (use_rfx) {
     encode_start_us = viewer_gfx_pipeline_now_us();
@@ -245,7 +294,7 @@ static BOOL viewer_gfx_pipeline_build_surface_command_region(
     }
   }
 
-  if (use_rfx) {
+  if (use_rfx || use_clearcodec) {
     EnterCriticalSection(&gfx->lock);
     viewer_gfx_pipeline_downgrade_to_uncompressed_locked(gfx);
     LeaveCriticalSection(&gfx->lock);
@@ -1132,6 +1181,7 @@ BOOL viewer_gfx_pipeline_init(Viewer *viewer) {
   viewer->gfx.preferred_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
   viewer->gfx.selected_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
   viewer->gfx.rfx_context = NULL;
+  viewer->gfx.clearcodec_context = NULL;
   viewer_gfx_pipeline_reset_dirty_diagnostics_locked(&viewer->gfx);
   return TRUE;
 }
@@ -1146,6 +1196,8 @@ void viewer_gfx_pipeline_uninit(Viewer *viewer) {
   viewer_gfx_pipeline_reset_dirty_state_locked(gfx);
   viewer_gfx_rfx_context_free(gfx->rfx_context);
   gfx->rfx_context = NULL;
+  viewer_gfx_clearcodec_context_free(gfx->clearcodec_context);
+  gfx->clearcodec_context = NULL;
   if (gfx->rdpgfx) {
     if (gfx->channel_opened && gfx->rdpgfx->Close)
       (void)gfx->rdpgfx->Close(gfx->rdpgfx);
@@ -1425,7 +1477,8 @@ BOOL viewer_gfx_pipeline_activate(ViewerServer *server, Viewer *viewer) {
   gfx->last_ack_frame_id = 0;
   viewer_gfx_pipeline_invalidate_surface_locked(gfx);
   gfx->selected_codec = gfx->preferred_codec;
-  if (gfx->selected_codec != VIEWER_GFX_CODEC_RFX)
+  if ((gfx->selected_codec != VIEWER_GFX_CODEC_RFX) &&
+      (gfx->selected_codec != VIEWER_GFX_CODEC_CLEARCODEC))
     viewer_gfx_pipeline_downgrade_to_uncompressed_locked(gfx);
 
   if (gfx->negotiation_outcome == VIEWER_GFX_NEGOTIATION_CLASSIC_FALLBACK) {
@@ -1613,6 +1666,7 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   UINT32 i = 0;
   UINT rc = CHANNEL_RC_OK;
   BOOL ok = FALSE;
+  BOOL selected_clearcodec = FALSE;
   BOOL selected_uncompressed = FALSE;
 
   if (!server || !viewer || !gfx || !snapshot || !snapshot->pixels ||
@@ -1625,6 +1679,7 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
   EnterCriticalSection(&gfx->lock);
   selected_uncompressed =
       (gfx->selected_codec == VIEWER_GFX_CODEC_UNCOMPRESSED);
+  selected_clearcodec = (gfx->selected_codec == VIEWER_GFX_CODEC_CLEARCODEC);
   viewer_gfx_pipeline_ensure_dirty_limits_locked(gfx);
   max_dirty_bytes = gfx->dirty_max_in_flight_bytes;
   LeaveCriticalSection(&gfx->lock);
@@ -1725,9 +1780,10 @@ ViewerGfxDirtySendStatus viewer_gfx_pipeline_send_dirty_update_result(
       break;
     }
   }
-  if (((UINT64_MAX - gfx->dirty_in_flight_bytes) < pending_payload_bytes) ||
-      ((gfx->dirty_in_flight_bytes + pending_payload_bytes) >
-       gfx->dirty_max_in_flight_bytes) ||
+  if ((!selected_clearcodec &&
+       (((UINT64_MAX - gfx->dirty_in_flight_bytes) < pending_payload_bytes) ||
+        ((gfx->dirty_in_flight_bytes + pending_payload_bytes) >
+         gfx->dirty_max_in_flight_bytes))) ||
       (gfx->dirty_in_flight_frames >= max_in_flight) ||
       (map_slot >= VIEWER_GFX_DIRTY_FRAME_MAP_CAPACITY)) {
     LeaveCriticalSection(&gfx->lock);

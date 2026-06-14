@@ -318,6 +318,8 @@ int main(void) {
   const char *viewer_gfx_codec_rfx_path = "test_svc_config_gfx_codec_rfx.ini";
   const char *viewer_gfx_codec_remote_fx_path =
       "test_svc_config_gfx_codec_remote_fx.ini";
+  const char *viewer_gfx_codec_clearcodec_path =
+      "test_svc_config_gfx_codec_clearcodec.ini";
   const char *viewer_gfx_codec_invalid_path =
       "test_svc_config_gfx_codec_invalid.ini";
   const char *backend_credentials_without_nla_path =
@@ -649,6 +651,38 @@ int main(void) {
     ok = 0;
   svc_config_free(config);
 
+  if (!write_viewer_gfx_codec_config(viewer_gfx_codec_clearcodec_path,
+                                     "clearcodec")) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    return 1;
+  }
+
+  config = svc_config_load(viewer_gfx_codec_clearcodec_path);
+  if (!config) {
+    remove(path);
+    remove(classic_latest_path);
+    remove(viewer_gfx_path);
+    remove(viewer_gfx_full_frame_dirty_path);
+    remove(backend_gfx_path);
+    remove(codec_gfx_path);
+    remove(viewer_gfx_codec_rfx_path);
+    remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_clearcodec_path);
+    return 1;
+  }
+
+  inst = svc_config_find_instance(config, "Test");
+  if (!inst || inst->viewer_gfx_codec != SVC_VIEWER_GFX_CODEC_CLEARCODEC)
+    ok = 0;
+  svc_config_free(config);
+
   if (!write_viewer_gfx_codec_config(viewer_gfx_codec_invalid_path,
                                      "not_a_codec")) {
     remove(path);
@@ -659,6 +693,7 @@ int main(void) {
     remove(codec_gfx_path);
     remove(viewer_gfx_codec_rfx_path);
     remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_clearcodec_path);
     return 1;
   }
 
@@ -672,6 +707,7 @@ int main(void) {
     remove(codec_gfx_path);
     remove(viewer_gfx_codec_rfx_path);
     remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_clearcodec_path);
     remove(viewer_gfx_codec_invalid_path);
     return 1;
   }
@@ -690,6 +726,7 @@ int main(void) {
     remove(codec_gfx_path);
     remove(viewer_gfx_codec_rfx_path);
     remove(viewer_gfx_codec_remote_fx_path);
+    remove(viewer_gfx_codec_clearcodec_path);
     remove(viewer_gfx_codec_invalid_path);
     return 1;
   }
@@ -825,6 +862,7 @@ int main(void) {
   remove(codec_gfx_path);
   remove(viewer_gfx_codec_rfx_path);
   remove(viewer_gfx_codec_remote_fx_path);
+  remove(viewer_gfx_codec_clearcodec_path);
   remove(viewer_gfx_codec_invalid_path);
   remove(backend_credentials_without_nla_path);
   remove(backend_rdp_file_options_path);

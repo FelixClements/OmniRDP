@@ -114,8 +114,8 @@ viewer.throttle_max_updates_per_sec = 0
 ; Experimental viewer RDPEGFX path. Default off. Uses canonical framebuffer
 ; snapshots, not backend GFX.
 viewer.gfx.enabled = false
-; viewer.gfx.codec = uncompressed|rfx; RFX requires compatible RDPEGFX
-; capability negotiation and multimon QA.
+; viewer.gfx.codec = uncompressed|rfx|clearcodec; compressed codecs require
+; compatible RDPEGFX capability negotiation and multimon QA.
 viewer.gfx.codec = uncompressed
 ; Experimental viewer RFX encoder threading. Default off.
 viewer.gfx.rfx_threading_enabled = false

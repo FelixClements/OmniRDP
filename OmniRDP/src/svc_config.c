@@ -159,6 +159,9 @@ static int svc_config_get_viewer_gfx_codec(const IniFile *ini,
   if (svc_config_str_equal_ci(value, "rfx") ||
       svc_config_str_equal_ci(value, "remote_fx"))
     return SVC_VIEWER_GFX_CODEC_RFX;
+  if (svc_config_str_equal_ci(value, "clearcodec") ||
+      svc_config_str_equal_ci(value, "clear_codec"))
+    return SVC_VIEWER_GFX_CODEC_CLEARCODEC;
 
   fprintf_s(stderr,
             "Warning: [%s] %s=%s is not a supported viewer GFX codec; using "

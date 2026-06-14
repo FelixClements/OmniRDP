@@ -71,6 +71,12 @@ BOOL viewer_publisher_make_full_frame_dirty(
 
   if (!snapshot || (snapshot->width == 0) || (snapshot->height == 0))
     return FALSE;
+  if (((snapshot->pixel_width != 0) &&
+       (snapshot->pixel_width != snapshot->width)) ||
+      ((snapshot->pixel_height != 0) &&
+       (snapshot->pixel_height != snapshot->height)) ||
+      (snapshot->pixel_origin_x != 0) || (snapshot->pixel_origin_y != 0))
+    return FALSE;
 
   full_rect.left = 0;
   full_rect.top = 0;
