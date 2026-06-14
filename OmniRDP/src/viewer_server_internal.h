@@ -4,6 +4,7 @@
 #include "monitor_layout.h"
 #include "viewer_classic_queue.h"
 #include "viewer_framebuffer.h"
+#include "viewer_gfx_codec_clearcodec.h"
 #include "viewer_gfx_codec_rfx.h"
 #include "viewer_publisher.h"
 #include "viewer_server.h"
@@ -139,6 +140,7 @@ typedef struct {
   ViewerGfxCodec selected_codec;
   BOOL rfx_threading_enabled;
   ViewerGfxRfxContext *rfx_context;
+  ViewerGfxClearCodecContext *clearcodec_context;
   UINT64 dirty_last_sent_rect_count;
   UINT64 dirty_last_sent_area;
   UINT64 gfx_encode_count;

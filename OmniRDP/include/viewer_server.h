@@ -21,7 +21,8 @@ typedef enum {
 
 typedef enum {
   VIEWER_GFX_CODEC_UNCOMPRESSED = 0,
-  VIEWER_GFX_CODEC_RFX
+  VIEWER_GFX_CODEC_RFX,
+  VIEWER_GFX_CODEC_CLEARCODEC
 } ViewerGfxCodec;
 
 typedef struct {

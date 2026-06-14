@@ -50,11 +50,11 @@ jobs:
       - name: Remove partial FreeRDP tree
         run: rm -rf freerdp-3.26.0
 
-      - name: Checkout FreeRDP 3.26.0
+      - name: Checkout FelixClements FreeRDP fork
         uses: actions/checkout@v5
         with:
-          repository: FreeRDP/FreeRDP
-          ref: 3.26.0
+          repository: FelixClements/FreeRDP
+          ref: 8859ec1179ba8c67b40fe4d5ebd93586f3f43640
           path: freerdp-3.26.0
           fetch-depth: 1
 

@@ -3,6 +3,7 @@
 archive/
 artifacts/
 OmniRDP/build/
+OmniRDP/build-release/
 OmniRDP/build-asan/
 /*.md
 AGENTS.md

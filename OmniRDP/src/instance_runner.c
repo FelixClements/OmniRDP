@@ -70,12 +70,27 @@ static const char *svc_log_level_to_wlog(SvcLogLevel level) {
 }
 
 static ViewerGfxCodec instance_viewer_gfx_codec(int codec) {
-  return (codec == SVC_VIEWER_GFX_CODEC_RFX) ? VIEWER_GFX_CODEC_RFX
-                                             : VIEWER_GFX_CODEC_UNCOMPRESSED;
+  switch (codec) {
+  case SVC_VIEWER_GFX_CODEC_RFX:
+    return VIEWER_GFX_CODEC_RFX;
+  case SVC_VIEWER_GFX_CODEC_CLEARCODEC:
+    return VIEWER_GFX_CODEC_CLEARCODEC;
+  case SVC_VIEWER_GFX_CODEC_UNCOMPRESSED:
+  default:
+    return VIEWER_GFX_CODEC_UNCOMPRESSED;
+  }
 }
 
 static const char *instance_viewer_gfx_codec_name(int codec) {
-  return (codec == SVC_VIEWER_GFX_CODEC_RFX) ? "rfx" : "uncompressed";
+  switch (codec) {
+  case SVC_VIEWER_GFX_CODEC_RFX:
+    return "rfx";
+  case SVC_VIEWER_GFX_CODEC_CLEARCODEC:
+    return "clearcodec";
+  case SVC_VIEWER_GFX_CODEC_UNCOMPRESSED:
+  default:
+    return "uncompressed";
+  }
 }
 
 static const char *svc_log_level_to_text(SvcLogLevel level) {

@@ -1687,7 +1687,16 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
   }
 
   if (diagnostic_full_frame_dirty) {
-    if (viewer_publisher_make_full_frame_dirty(&snapshot)) {
+    ViewerFramebufferSnapshot full_snapshot = {0};
+    BOOL full_snapshot_ready = FALSE;
+
+    if (viewer_framebuffer_snapshot(&server->framebuffer, &full_snapshot) &&
+        viewer_publisher_make_full_frame_dirty(&full_snapshot)) {
+      viewer_framebuffer_snapshot_free(&snapshot);
+      snapshot = full_snapshot;
+      full_snapshot_ready = TRUE;
+      snapshot_generation = snapshot.generation;
+      snapshot_dirty_rect_count = snapshot.dirty_rect_count;
       WLog_INFO(TAG,
                 "Viewer %u RDPEGFX diagnostic full-frame dirty forced: "
                 "generation=%" PRIu64 " original_dirty_rects=%u width=%u "
@@ -1695,6 +1704,7 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
                 viewer->id, snapshot_generation, original_dirty_rect_count,
                 snapshot.width, snapshot.height);
     } else {
+      viewer_framebuffer_snapshot_free(&full_snapshot);
       WLog_DBG(TAG,
                "Viewer %u RDPEGFX diagnostic full-frame dirty skipped: "
                "generation=%" PRIu64 " original_dirty_rects=%u width=%u "
@@ -1702,7 +1712,8 @@ static BOOL viewer_gfx_try_send_dirty_update(ViewerServer *server,
                viewer->id, snapshot_generation, original_dirty_rect_count,
                snapshot.width, snapshot.height);
     }
-    snapshot_dirty_rect_count = snapshot.dirty_rect_count;
+    if (full_snapshot_ready)
+      snapshot_dirty_rect_count = snapshot.dirty_rect_count;
   }
 
   if (!viewer_gfx_pipeline_dirty_update_allowed(server, viewer, &snapshot,
@@ -2986,9 +2997,13 @@ void viewer_server_set_gfx_codec(ViewerServer *server, ViewerGfxCodec codec) {
   if (!server)
     return;
 
-  server->viewer_gfx_codec = (codec == VIEWER_GFX_CODEC_RFX)
-                                 ? VIEWER_GFX_CODEC_RFX
-                                 : VIEWER_GFX_CODEC_UNCOMPRESSED;
+  if ((codec == VIEWER_GFX_CODEC_RFX) ||
+      (codec == VIEWER_GFX_CODEC_CLEARCODEC)) {
+    server->viewer_gfx_codec = codec;
+    return;
+  }
+
+  server->viewer_gfx_codec = VIEWER_GFX_CODEC_UNCOMPRESSED;
 }
 
 void viewer_server_set_gfx_rfx_threading(ViewerServer *server, BOOL enabled) {

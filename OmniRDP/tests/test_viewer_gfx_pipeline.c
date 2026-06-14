@@ -212,19 +212,11 @@ static RDPGFX_CAPSET test_rdpgfx_cap(UINT32 version, UINT32 flags) {
 }
 
 static UINT32 test_rdpgfx_avc_disabled_flag(void) {
-#ifdef RDPGFX_CAPS_FLAG_AVC_DISABLED
   return RDPGFX_CAPS_FLAG_AVC_DISABLED;
-#else
-  return 0;
-#endif
 }
 
 static UINT32 test_rdpgfx_scaledmap_disable_flag(void) {
-#ifdef RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE
   return RDPGFX_CAPS_FLAG_SCALEDMAP_DISABLE;
-#else
-  return 0;
-#endif
 }
 
 static BOOL init_test_viewer(Viewer *viewer, UINT32 width, UINT32 height) {
@@ -572,12 +564,6 @@ static int test_caps_advertise_rejects_missing_capsets(void) {
   return ok;
 }
 
-#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_81) &&           \
-    defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_101) &&         \
-    defined(RDPGFX_CAPVERSION_102) && defined(RDPGFX_CAPVERSION_103) &&        \
-    defined(RDPGFX_CAPVERSION_104) && defined(RDPGFX_CAPVERSION_105) &&        \
-    defined(RDPGFX_CAPVERSION_106) && defined(RDPGFX_CAPVERSION_106_ERR) &&    \
-    defined(RDPGFX_CAPVERSION_107)
 static int test_caps_advertise_selects_mstsc_newest_supported_cap(void) {
   const UINT32 avc_disabled = test_rdpgfx_avc_disabled_flag();
   const UINT32 mstsc_107_flags =
@@ -634,12 +620,7 @@ static int test_caps_advertise_selects_mstsc_newest_supported_cap(void) {
   DeleteCriticalSection(&server.gfx.lock);
   return ok;
 }
-#endif
 
-#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_81) &&           \
-    defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_101) &&         \
-    defined(RDPGFX_CAPVERSION_102) && defined(RDPGFX_CAPVERSION_103) &&        \
-    defined(RDPGFX_CAPVERSION_104) && defined(RDPGFX_CAPVERSION_106)
 static int test_caps_advertise_selects_freerdp_newest_supported_cap(void) {
   ViewerServer server = {0};
   Viewer viewer = {0};
@@ -685,10 +666,7 @@ static int test_caps_advertise_selects_freerdp_newest_supported_cap(void) {
   DeleteCriticalSection(&server.gfx.lock);
   return ok;
 }
-#endif
 
-#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_10) &&           \
-    defined(RDPGFX_CAPVERSION_106) && defined(RDPGFX_CAPVERSION_107)
 static int test_caps_advertise_downgrades_from_canonical_for_viewer(void) {
   const UINT32 canonical_flags =
       test_rdpgfx_avc_disabled_flag() | test_rdpgfx_scaledmap_disable_flag();
@@ -739,7 +717,6 @@ static int test_caps_advertise_downgrades_from_canonical_for_viewer(void) {
   DeleteCriticalSection(&server.gfx.lock);
   return ok;
 }
-#endif
 
 static int test_snapshot_validation_rejects_not_ready(void) {
   ViewerServer server = {0};
@@ -901,6 +878,51 @@ static int test_snapshot_rfx_codec_emits_cavideo(void) {
   ok = ok && expect_true(viewer.gfx.last_gfx_encode_end_us >=
                              viewer.gfx.last_gfx_encode_start_us,
                          "RFX baseline records encode window");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_snapshot_clearcodec_emits_clearcodec(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  ViewerFramebufferSnapshot snapshot = {0};
+  BYTE pixels[64] = {0};
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+  snapshot.pixels = pixels;
+  snapshot.width = 4;
+  snapshot.height = 4;
+  snapshot.stride = 16;
+  snapshot.pixel_format = PIXEL_FORMAT_BGRX32;
+  snapshot.pixel_bytes = sizeof(pixels);
+  viewer.gfx.rdpgfx = &rdpgfx;
+  viewer.gfx.caps_ready = TRUE;
+  viewer.gfx.use_rdpgfx = TRUE;
+  viewer.gfx.channel_opened = TRUE;
+  viewer.gfx.preferred_codec = (ViewerGfxCodec)2;
+  viewer.gfx.selected_codec = (ViewerGfxCodec)2;
+
+  reset_send_recorder();
+  ok = ok && expect_true(
+                 viewer_gfx_pipeline_send_snapshot(&server, &viewer, &snapshot),
+                 "ClearCodec snapshot sends full-frame baseline");
+  ok = ok && expect_uint32(g_last_surface.codecId, RDPGFX_CODECID_CLEARCODEC,
+                           "ClearCodec baseline uses ClearCodec");
+  ok = ok && expect_true(g_last_surface.length > 0,
+                         "ClearCodec baseline payload set");
+  ok = ok && expect_uint32(viewer.gfx.selected_codec, (ViewerGfxCodec)2,
+                           "ClearCodec remains selected after success");
+  ok = ok && expect_uint64(viewer.gfx.gfx_encode_count, 1,
+                           "ClearCodec baseline records encode count");
+  ok = ok && expect_uint64(viewer.gfx.gfx_encode_payload_bytes_total,
+                           g_last_surface.length,
+                           "ClearCodec baseline records encode payload bytes");
 
   uninit_test_viewer(&viewer);
   return ok;
@@ -1452,6 +1474,39 @@ static int test_dirty_update_rfx_codec_emits_cavideo(void) {
   ok = ok && expect_true(viewer.gfx.last_gfx_encode_end_us >=
                              viewer.gfx.last_gfx_encode_start_us,
                          "RFX dirty records encode window");
+
+  uninit_test_viewer(&viewer);
+  return ok;
+}
+
+static int test_dirty_update_clearcodec_ignores_byte_limit_after_encode(void) {
+  ViewerServer server = {0};
+  Viewer viewer = {0};
+  RdpgfxServerContext rdpgfx = {0};
+  BYTE pixels[128] = {0};
+  ViewerFramebufferSnapshot snapshot = make_dirty_snapshot(pixels, 32, 1);
+  int ok = 1;
+
+  ok = ok && expect_true(init_test_viewer(&viewer, 4, 4), "viewer init");
+  init_test_rdpgfx(&rdpgfx);
+  configure_dirty_eligible_viewer(&server, &viewer, &rdpgfx);
+  viewer.gfx.next_frame_id = 13;
+  viewer.gfx.preferred_codec = VIEWER_GFX_CODEC_CLEARCODEC;
+  viewer.gfx.selected_codec = VIEWER_GFX_CODEC_CLEARCODEC;
+  viewer.gfx.dirty_max_in_flight_bytes = 1;
+  for (size_t i = 0; i < sizeof(pixels); i++)
+    pixels[i] = (BYTE)(i + 1U);
+
+  reset_send_recorder();
+  ok = ok && expect_uint32(viewer_gfx_pipeline_send_dirty_update_result(
+                               &server, &viewer, &snapshot),
+                           VIEWER_GFX_DIRTY_SEND_SENT,
+                           "ClearCodec dirty sends after stateful encode");
+  ok = ok && expect_uint32(g_surface_count, 1, "one ClearCodec dirty command");
+  ok = ok && expect_uint32(g_last_surface.codecId, RDPGFX_CODECID_CLEARCODEC,
+                           "ClearCodec dirty uses ClearCodec");
+  ok = ok && expect_true(viewer.gfx.dirty_in_flight_bytes > 1,
+                         "ClearCodec records oversized payload bytes");
 
   uninit_test_viewer(&viewer);
   return ok;
@@ -3652,32 +3707,19 @@ int main(void) {
     return 1;
   if (!test_caps_advertise_rejects_missing_capsets())
     return 1;
-#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_81) &&           \
-    defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_101) &&         \
-    defined(RDPGFX_CAPVERSION_102) && defined(RDPGFX_CAPVERSION_103) &&        \
-    defined(RDPGFX_CAPVERSION_104) && defined(RDPGFX_CAPVERSION_105) &&        \
-    defined(RDPGFX_CAPVERSION_106) && defined(RDPGFX_CAPVERSION_106_ERR) &&    \
-    defined(RDPGFX_CAPVERSION_107)
   if (!test_caps_advertise_selects_mstsc_newest_supported_cap())
     return 1;
-#endif
-#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_81) &&           \
-    defined(RDPGFX_CAPVERSION_10) && defined(RDPGFX_CAPVERSION_101) &&         \
-    defined(RDPGFX_CAPVERSION_102) && defined(RDPGFX_CAPVERSION_103) &&        \
-    defined(RDPGFX_CAPVERSION_104) && defined(RDPGFX_CAPVERSION_106)
   if (!test_caps_advertise_selects_freerdp_newest_supported_cap())
     return 1;
-#endif
-#if defined(RDPGFX_CAPVERSION_8) && defined(RDPGFX_CAPVERSION_10) &&           \
-    defined(RDPGFX_CAPVERSION_106) && defined(RDPGFX_CAPVERSION_107)
   if (!test_caps_advertise_downgrades_from_canonical_for_viewer())
     return 1;
-#endif
   if (!test_snapshot_validation_rejects_not_ready())
     return 1;
   if (!test_snapshot_sends_full_frame_baseline_order())
     return 1;
   if (!test_snapshot_rfx_codec_emits_cavideo())
+    return 1;
+  if (!test_snapshot_clearcodec_emits_clearcodec())
     return 1;
   if (!test_snapshot_rfx_threading_flag_reaches_codec())
     return 1;
@@ -3704,6 +3746,8 @@ int main(void) {
   if (!test_dirty_update_command_bounds_validation())
     return 1;
   if (!test_dirty_update_rfx_codec_emits_cavideo())
+    return 1;
+  if (!test_dirty_update_clearcodec_ignores_byte_limit_after_encode())
     return 1;
   if (!test_monitor_layout_snapshot_uses_server_layout())
     return 1;

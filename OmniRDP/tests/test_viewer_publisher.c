@@ -1021,6 +1021,32 @@ static int test_make_full_frame_dirty_replaces_dirty_rects(void) {
   return ok;
 }
 
+static int test_make_full_frame_dirty_rejects_partial_pixels(void) {
+  ViewerFramebufferSnapshot snapshot = {0};
+  int ok = 1;
+
+  snapshot.width = 800;
+  snapshot.height = 600;
+  snapshot.pixel_origin_x = 100;
+  snapshot.pixel_origin_y = 50;
+  snapshot.pixel_width = 200;
+  snapshot.pixel_height = 100;
+  snapshot.dirty_rect_count = 1;
+  snapshot.dirty_rects[0].left = 100;
+  snapshot.dirty_rects[0].top = 50;
+  snapshot.dirty_rects[0].right = 299;
+  snapshot.dirty_rects[0].bottom = 149;
+
+  ok = ok && expect_true(!viewer_publisher_make_full_frame_dirty(&snapshot),
+                         "partial pixel snapshot cannot become full frame");
+  ok = ok && expect_uint32(snapshot.dirty_rect_count, 1,
+                           "partial snapshot dirty rect count preserved");
+  ok = ok && expect_uint32(snapshot.dirty_rects[0].left, 100,
+                           "partial snapshot dirty rect preserved");
+
+  return ok;
+}
+
 int main(void) {
   if (!test_init_uninit_lock_state())
     return 1;
@@ -1079,6 +1105,8 @@ int main(void) {
   if (!test_gfx_dirty_snapshot_overflow_full_frame())
     return 1;
   if (!test_make_full_frame_dirty_replaces_dirty_rects())
+    return 1;
+  if (!test_make_full_frame_dirty_rejects_partial_pixels())
     return 1;
   return 0;
 }

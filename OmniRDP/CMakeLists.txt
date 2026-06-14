@@ -61,6 +61,7 @@ set(SOURCES
     src/viewer_gfx_dirty_limits.c
     src/viewer_gfx_codec_uncompressed.c
     src/viewer_gfx_codec_rfx.c
+    src/viewer_gfx_codec_clearcodec.c
     src/viewer_pointer.c
     src/viewer_pointer_transport.c
     src/viewer_server.c
@@ -86,6 +87,7 @@ set(HEADERS
     src/viewer_gfx_pipeline.h
     include/viewer_gfx_codec_uncompressed.h
     include/viewer_gfx_codec_rfx.h
+    include/viewer_gfx_codec_clearcodec.h
     src/viewer_pointer.h
     src/viewer_pointer_transport.h
     include/platform_compat.h

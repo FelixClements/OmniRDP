@@ -48,6 +48,7 @@ add_executable(test_viewer_gfx_pipeline
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_dirty_limits.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_uncompressed.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_rfx.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_clearcodec.c
     ${CMAKE_SOURCE_DIR}/src/viewer_internal.c
     ${CMAKE_SOURCE_DIR}/src/platform_compat.c
 )
@@ -60,6 +61,11 @@ add_executable(test_viewer_gfx_codec_uncompressed
 add_executable(test_viewer_gfx_codec_rfx
     test_viewer_gfx_codec_rfx.c
     ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_rfx.c
+)
+
+add_executable(test_viewer_gfx_codec_clearcodec
+    test_viewer_gfx_codec_clearcodec.c
+    ${CMAKE_SOURCE_DIR}/src/viewer_gfx_codec_clearcodec.c
 )
 
 add_executable(test_backend_gfx_decode_only
@@ -242,11 +248,25 @@ target_include_directories(test_viewer_gfx_codec_rfx PRIVATE
     ${FREERDP_BUILD}/winpr/include
 )
 
+target_include_directories(test_viewer_gfx_codec_clearcodec PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${FREERDP_ROOT}/include
+    ${FREERDP_ROOT}/winpr/include
+    ${FREERDP_BUILD}/include
+    ${FREERDP_BUILD}/winpr/include
+)
+
 target_compile_definitions(test_viewer_gfx_codec_rfx PRIVATE
     VIEWER_GFX_RFX_TESTING
 )
 
 target_link_libraries(test_viewer_gfx_codec_rfx
+    ${FREERDP_LIB}
+    ${WINPR_LIB}
+)
+
+target_link_libraries(test_viewer_gfx_codec_clearcodec
     ${FREERDP_LIB}
     ${WINPR_LIB}
 )
@@ -266,6 +286,11 @@ set_target_properties(test_viewer_gfx_codec_uncompressed PROPERTIES
 )
 
 set_target_properties(test_viewer_gfx_codec_rfx PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+)
+
+set_target_properties(test_viewer_gfx_codec_clearcodec PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON
 )
@@ -412,6 +437,15 @@ add_test(NAME test_viewer_gfx_codec_rfx
         -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
 )
 set_tests_properties(test_viewer_gfx_codec_rfx PROPERTIES TIMEOUT 120)
+
+add_test(NAME test_viewer_gfx_codec_clearcodec
+    COMMAND ${CMAKE_COMMAND}
+        -DTEST_BIN_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DTEST_EXECUTABLE_NAME=test_viewer_gfx_codec_clearcodec${CMAKE_EXECUTABLE_SUFFIX}
+        "-DTEST_DLL_DIR=${FREERDP_BUILD}/libfreerdp/Release\;${FREERDP_BUILD}/winpr/libwinpr/Release\;${CMAKE_SOURCE_DIR}/../artifacts/windows-Release/bin"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/RunBuiltTest.cmake
+)
+set_tests_properties(test_viewer_gfx_codec_clearcodec PROPERTIES TIMEOUT 120)
 
 add_test(NAME test_svc_config
     COMMAND ${CMAKE_COMMAND}

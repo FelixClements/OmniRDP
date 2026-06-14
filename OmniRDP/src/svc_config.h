@@ -21,6 +21,7 @@ extern "C" {
 
 #define SVC_VIEWER_GFX_CODEC_UNCOMPRESSED 0
 #define SVC_VIEWER_GFX_CODEC_RFX 1
+#define SVC_VIEWER_GFX_CODEC_CLEARCODEC 2
 
 /* ── Service-level settings (from [service] section) ────────── */
 

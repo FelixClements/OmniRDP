@@ -111,7 +111,9 @@ foreach(CODEC_FILE
         "${SOURCE_DIR}/src/viewer_gfx_codec_uncompressed.c"
         "${SOURCE_DIR}/include/viewer_gfx_codec_uncompressed.h"
         "${SOURCE_DIR}/src/viewer_gfx_codec_rfx.c"
-        "${SOURCE_DIR}/include/viewer_gfx_codec_rfx.h")
+        "${SOURCE_DIR}/include/viewer_gfx_codec_rfx.h"
+        "${SOURCE_DIR}/src/viewer_gfx_codec_clearcodec.c"
+        "${SOURCE_DIR}/include/viewer_gfx_codec_clearcodec.h")
     file(READ "${CODEC_FILE}" CODEC_TEXT)
     check_text_forbidden(CODEC_TEXT "${CODEC_FILE}"
         "GFX codec ownership boundary" ${CODEC_TOKENS})
