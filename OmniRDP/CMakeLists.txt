@@ -29,11 +29,11 @@ if(USE_ADDRESS_SANITIZER)
     endif()
 endif()
 
-# ── Find FreeRDP 3.26.0 ───────────────────────────────────────
-# Find FreeRDP 3.26.0
-set(FREERDP_ROOT ${CMAKE_SOURCE_DIR}/../freerdp-3.26.0)
 if(NOT FREERDP_BUILD)
+    set(FREERDP_ROOT ${CMAKE_SOURCE_DIR}/../freerdp-3.26.0)
     set(FREERDP_BUILD ${FREERDP_ROOT}/build)
+elseif(NOT FREERDP_ROOT)
+    get_filename_component(FREERDP_ROOT "${FREERDP_BUILD}/.." ABSOLUTE)
 endif()
 
 # Include directories
